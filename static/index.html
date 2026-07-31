@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>广告投放小助手</title>
+<style>
+  /* ============ 设计变量:一处改色,全站生效 ============ */
+  :root {
+    --bg: #eef1f6;                /* 页面底色 */
+    --panel: #ffffff;             /* 面板/气泡底色 */
+    --text: #1d2129;
+    --muted: #7a8190;
+    --accent1: #4f6ef7;           /* 主题渐变的两端 */
+    --accent2: #7b5ff5;
+    --bot-bubble: #ffffff;
+    --border: #e4e8ef;
+    --shadow: 0 1px 3px rgba(16, 24, 40, .07), 0 6px 16px -6px rgba(16, 24, 40, .08);
+    --chip-bg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1015; --panel: #171a21; --text: #e9ebef; --muted: #8b93a1;
+      --accent1: #5b7cff; --accent2: #8b6cf8;
+      --bot-bubble: #1c2029; --border: #262b36;
+      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 16px -6px rgba(0,0,0,.5);
+      --chip-bg: #1c2029;
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(1000px 500px at 15% -10%, color-mix(in srgb, var(--accent1) 14%, transparent), transparent 60%),
+      radial-gradient(900px 500px at 90% -10%, color-mix(in srgb, var(--accent2) 12%, transparent), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100dvh;
+  }
+
+  /* ============ 顶栏 ============ */
+  header {
+    flex-shrink: 0;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px clamp(16px, 4vw, 40px);
+    background: color-mix(in srgb, var(--panel) 82%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .logo {
+    width: 38px; height: 38px; border-radius: 12px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    display: grid; place-items: center; font-size: 20px;
+    box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--accent1) 45%, transparent);
+  }
+  .title-wrap h1 { font-size: 15.5px; font-weight: 700; letter-spacing: .2px; }
+  .title-wrap .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 1px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px color-mix(in srgb, #22c55e 20%, transparent); }
+  header .right { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 12px; }
+  .ghost-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 6px 13px; font-size: 12.5px; cursor: pointer;
+    transition: all .15s ease; white-space: nowrap;
+  }
+  .ghost-btn:hover { border-color: var(--accent1); color: var(--accent1); }
+  @media (max-width: 640px) { .tagline { display: none; } }
+
+  /* ============ 消息区 ============ */
+  #messages {
+    flex: 1; overflow-y: auto;
+    padding: 24px clamp(16px, 4vw, 40px) 12px;
+    display: flex; flex-direction: column; gap: 18px;
+    scroll-behavior: smooth;
+  }
+  #messages > * { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; flex-shrink: 0; }
+
+  /* 一行消息 = 头像 + 气泡 */
+  .row { display: flex; gap: 10px; align-items: flex-end; animation: rise .25s ease both; }
+  .row.user { flex-direction: row-reverse; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    display: grid; place-items: center; font-size: 16px; font-weight: 600;
+    box-shadow: var(--shadow);
+  }
+  .avatar.bot { background: linear-gradient(135deg, var(--accent1), var(--accent2)); }
+  .avatar.user { background: var(--panel); border: 1px solid var(--border); font-size: 13px; color: var(--muted); }
+
+  .bubble {
+    max-width: min(76%, 700px);
+    padding: 11px 15px; border-radius: 16px;
+    line-height: 1.65; font-size: 14.5px; word-break: break-word;
+  }
+  .row.user .bubble {
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    color: #fff; border-bottom-right-radius: 5px;
+    box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent1) 55%, transparent);
+    white-space: pre-wrap;
+  }
+  .row.bot .bubble {
+    background: var(--bot-bubble); border: 1px solid var(--border);
+    border-bottom-left-radius: 5px; box-shadow: var(--shadow);
+    max-width: min(88%, 820px); overflow-x: auto;
+  }
+  .row.error .bubble {
+    background: color-mix(in srgb, #ef4444 10%, var(--panel));
+    border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+    color: #dc2626; border-bottom-left-radius: 5px; white-space: pre-wrap;
+  }
+
+  /* ============ 气泡内的 Markdown 排版 ============ */
+  .bubble p { margin: 7px 0; } .bubble p:first-child { margin-top: 0; } .bubble p:last-child { margin-bottom: 0; }
+  .bubble ul, .bubble ol { margin: 7px 0; padding-left: 22px; }
+  .bubble li { margin: 3px 0; }
+  .bubble h1, .bubble h2, .bubble h3 { font-size: 15px; margin: 12px 0 6px; }
+  .bubble table { border-collapse: separate; border-spacing: 0; margin: 10px 0; font-size: 13px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .bubble th, .bubble td { padding: 8px 12px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  .bubble tr:last-child td { border-bottom: none; }
+  .bubble th { background: color-mix(in srgb, var(--accent1) 8%, var(--panel)); font-weight: 600; }
+  .bubble tbody tr:nth-child(even) { background: color-mix(in srgb, var(--accent1) 3%, transparent); }
+  .bubble code { background: color-mix(in srgb, var(--accent1) 10%, transparent); padding: 1px 6px; border-radius: 6px; font-size: 12.5px; }
+  .bubble pre { background: color-mix(in srgb, var(--accent1) 7%, transparent); padding: 12px; border-radius: 10px; overflow-x: auto; margin: 8px 0; }
+  .bubble pre code { background: none; padding: 0; }
+  .bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+
+  /* "正在思考"动画 */
+  .typing-bubble { display: flex; gap: 5px; padding: 15px 18px; }
+  .typing-bubble i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
+  .typing-bubble i:nth-child(2) { animation-delay: .2s; }
+  .typing-bubble i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,80%,100% { opacity: .25 } 40% { opacity: 1 } }
+
+  /* 恢复历史后的分隔提示 */
+  .restore-tip { text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 0; }
+
+  /* ============ 快捷提问(开场展示) ============ */
+  #chips { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 42px; }
+  .chip {
+    background: var(--chip-bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+    box-shadow: var(--shadow); transition: all .15s ease;
+  }
+  .chip:hover { border-color: var(--accent1); color: var(--accent1); transform: translateY(-1px); }
+
+  /* ============ 输入区 ============ */
+  footer { flex-shrink: 0; padding: 10px clamp(16px, 4vw, 40px) 18px; }
+  .input-box {
+    max-width: 920px; margin: 0 auto;
+    display: flex; align-items: flex-end; gap: 8px;
+    background: var(--panel); border: 1.5px solid var(--border); border-radius: 22px;
+    padding: 8px 8px 8px 18px; box-shadow: var(--shadow);
+    transition: border-color .15s ease;
+  }
+  .input-box:focus-within { border-color: var(--accent1); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent1) 12%, transparent); }
+  textarea {
+    flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--text);
+    font: inherit; font-size: 14.5px; line-height: 1.55; max-height: 140px; padding: 6px 0;
+  }
+  #send {
+    width: 38px; height: 38px; border-radius: 50%; border: 0; cursor: pointer; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    display: grid; place-items: center; font-size: 16px;
+    box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--accent1) 50%, transparent);
+    transition: transform .12s ease, opacity .15s ease;
+  }
+  #send:hover { transform: scale(1.06); }
+  #send:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+  #attach {
+    width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border); cursor: pointer;
+    background: transparent; font-size: 17px; flex-shrink: 0; display: grid; place-items: center;
+    transition: all .15s ease;
+  }
+  #attach:hover { border-color: var(--accent1); background: color-mix(in srgb, var(--accent1) 8%, transparent); }
+  #attach:disabled { opacity: .5; cursor: wait; }
+  .hint { text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+
+  /* 细滚动条 */
+  #messages::-webkit-scrollbar { width: 8px; }
+  #messages::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 35%, transparent); border-radius: 8px; }
+  #messages::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">🤖</div>
+    <div class="title-wrap">
+      <h1>广告投放小助手</h1>
+      <div class="sub"><span class="dot"></span>在线 · NewsBreak 对话式投放</div>
+    </div>
+    <div class="right">
+      <span class="tagline">查数据 · 看报表 · 管投放</span>
+      <button id="new-chat" class="ghost-btn" title="清空当前对话,重新开始">🗑 新对话</button>
+    </div>
+  </header>
+
+  <div id="messages"></div>
+
+  <footer>
+    <div class="input-box">
+      <button id="attach" title="上传广告素材(图片/视频)">📎</button>
+      <input type="file" id="file-input" accept="image/*,video/*" hidden />
+      <textarea id="input" rows="1" placeholder="输入消息,回车发送(Shift+回车换行)…"></textarea>
+      <button id="send" title="发送">➤</button>
+    </div>
+    <div class="hint">📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak</div>
+  </footer>
+
+<script src="/static/marked.min.js"></script>
+<script>
+  // ===== 页面的"记忆":完整聊天记录。API 不记事,每次都把它全量发给后端 =====
+  // 存在浏览器的 localStorage 里,刷新/关标签页都不会丢(换浏览器或清缓存才会没)
+  const STORE_KEY = "adbot-chat-history";
+  const MAX_KEEP = 200;   // 只留最近 200 条,避免越攒越大拖慢页面
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) {
+      return [];   // 存的内容坏了就当没有,不能让页面开不出来
+    }
+  }
+
+  function saveHistory() {
+    try {
+      if (history.length > MAX_KEEP) history.splice(0, history.length - MAX_KEEP);
+      localStorage.setItem(STORE_KEY, JSON.stringify(history));
+    } catch (e) {
+      console.warn("聊天记录存盘失败(可能超出浏览器容量):", e);
+    }
+  }
+
+  const history = loadHistory();
+
+  const messagesEl = document.getElementById("messages");
+  const inputEl = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+
+  // 防止内容里混入 HTML 标签捣乱(只放行无害的 <br> 换行标签)
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+  }
+
+  // 画一行消息(头像 + 气泡)。who 是 "user" / "bot" / "error"
+  function addBubble(who, text) {
+    const row = document.createElement("div");
+    row.className = "row " + (who === "user" ? "user" : who === "error" ? "error" : "bot");
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar " + (who === "user" ? "user" : "bot");
+    avatar.textContent = who === "user" ? "我" : "🤖";
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    if (who === "bot" && window.marked) {
+      bubble.innerHTML = marked.parse(escapeHtml(text), { breaks: true });
+    } else {
+      bubble.textContent = text;
+    }
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return row;
+  }
+
+  // "正在思考"的三个小点
+  function showTyping() {
+    const row = document.createElement("div");
+    row.className = "row bot";
+    row.innerHTML = '<div class="avatar bot">🤖</div><div class="bubble typing-bubble"><i></i><i></i><i></i></div>';
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return row;
+  }
+
+  async function send(presetText) {
+    const text = (presetText || inputEl.value).trim();
+    if (!text) return;
+
+    const chips = document.getElementById("chips");
+    if (chips) chips.remove();   // 开始聊天后,收起快捷提问
+
+    inputEl.value = "";
+    inputEl.style.height = "auto";
+    addBubble("user", text);
+    history.push({ role: "user", content: text });
+    saveHistory();
+
+    sendBtn.disabled = true;
+    const typing = showTyping();
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: history }),
+      });
+      const data = await res.json();
+      typing.remove();
+
+      if (!res.ok) {
+        addBubble("error", "出错了:" + (data.error || res.status));
+        history.pop();  // 这轮没成功,撤掉刚才那句,方便重发
+        saveHistory();
+      } else {
+        addBubble("bot", data.reply);
+        history.push({ role: "assistant", content: data.reply });
+        saveHistory();
+      }
+    } catch (err) {
+      typing.remove();
+      addBubble("error", "网络错误:" + err.message);
+      history.pop();
+      saveHistory();
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  // 回车发送,Shift+回车换行;输入法组字中的回车(isComposing/229)一律放行
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  inputEl.addEventListener("input", () => {
+    inputEl.style.height = "auto";
+    inputEl.style.height = inputEl.scrollHeight + "px";
+  });
+  sendBtn.addEventListener("click", () => send());
+
+  // ===== 素材上传(📎按钮 和 直接粘贴图片 共用这一套) =====
+  const attachBtn = document.getElementById("attach");
+  const fileInput = document.getElementById("file-input");
+
+  async function uploadFile(f) {
+    if (!f) return;
+    attachBtn.disabled = true;
+    attachBtn.textContent = "⏳";
+    const form = new FormData();
+    form.append("file", f, f.name || "pasted-image.png");
+    try {
+      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        addBubble("error", "素材上传失败:" + (data.error || res.status));
+      } else {
+        // 上传成功:自动替用户发一条消息,把素材地址告诉 AI(向导会接着走下一步)
+        send(`我已上传素材「${data.filename}」,assetUrl: ${data.asset_url}`);
+      }
+    } catch (err) {
+      addBubble("error", "素材上传失败:" + err.message);
+    } finally {
+      attachBtn.disabled = false;
+      attachBtn.textContent = "📎";
+      fileInput.value = "";
+    }
+  }
+
+  attachBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => uploadFile(fileInput.files[0]));
+
+  // 在输入框里 Ctrl+V / Cmd+V 直接粘贴截图或复制的图片,自动上传
+  inputEl.addEventListener("paste", (e) => {
+    const items = e.clipboardData ? e.clipboardData.items : [];
+    for (const item of items) {
+      if (item.type && item.type.startsWith("image/")) {
+        e.preventDefault();
+        const f = item.getAsFile();
+        // 粘贴的图片一般没名字,给它起一个带时间的
+        const named = new File([f], `paste-${Date.now()}.png`, { type: f.type });
+        uploadFile(named);
+        return;
+      }
+    }
+  });
+
+  // ===== 开场:有存档就恢复,没有才显示欢迎语 + 快捷提问 =====
+  function showWelcome() {
+    addBubble("bot",
+      "你好,我是你的**广告投放小助手** 👋\n" +
+      "我连着你的 NewsBreak 账户,可以直接查真实数据;开启/暂停投放这类操作,我会先跟你确认再动手。\n" +
+      "点下面的快捷按钮,或直接输入你的问题:");
+
+    const chipsWrap = document.createElement("div");
+    chipsWrap.id = "chips";
+    [
+      "我有哪些广告账户?",
+      "最近90天各计划花费,用表格",
+      "哪条广告的 CTR 最高?",
+      "我想投一个新广告",
+    ].forEach((q) => {
+      const b = document.createElement("button");
+      b.className = "chip";
+      b.textContent = q;
+      b.onclick = () => send(q);
+      chipsWrap.appendChild(b);
+    });
+    messagesEl.appendChild(chipsWrap);
+  }
+
+  function restoreHistory() {
+    history.forEach((m) => addBubble(m.role === "user" ? "user" : "bot", m.content));
+    const tip = document.createElement("div");
+    tip.className = "restore-tip";
+    tip.textContent = `— 以上是上次的对话(共 ${history.length} 条),可以直接接着聊 —`;
+    messagesEl.appendChild(tip);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  if (history.length > 0) restoreHistory();
+  else showWelcome();
+
+  // 「新对话」按钮:清空记忆和屏幕,重新开始
+  document.getElementById("new-chat").addEventListener("click", () => {
+    if (history.length > 0 && !confirm("确定要清空当前对话吗?清空后无法恢复。")) return;
+    history.length = 0;
+    saveHistory();
+    messagesEl.innerHTML = "";
+    showWelcome();
+    inputEl.focus();
+  });
+
+  inputEl.focus();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# ⚠️ 密钥文件,绝对不能提交(里面是真实 API 钥匙)
+.env
+
+# Python 虚拟环境和缓存(换机器重装即可,不用带走)
+venv/
+__pycache__/
+*.pyc
+
+# 运行时产生的文件
+server.log
+pending_actions.json

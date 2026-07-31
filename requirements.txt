@@ -1,0 +1,8 @@
+# 依赖清单 —— 换台机器时:python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+fastapi==0.139.2          # 后端框架(提供聊天接口)
+uvicorn==0.51.0           # 跑 fastapi 的服务器
+python-multipart==0.0.32  # 处理素材文件上传
+httpx==0.28.1             # 给 NewsBreak 发请求
+google-genai==2.14.0      # 大脑A:Gemini
+openai==2.49.0            # 大脑B:ChatGPT / ofox 中转
+anthropic==0.117.0        # 大脑C:Claude
