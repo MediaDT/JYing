@@ -547,7 +547,8 @@
 
   // ===== 开场:有存档就恢复,没有才显示欢迎语 + 快捷提问 =====
   function showWelcome() {
-    addBubble("bot", t().welcome);
+    const row = addBubble("bot", t().welcome);
+    row.dataset.welcome = "1";   // 打标记:切语言时这条要跟着换(它是界面文字,不是对话内容)
 
     const chipsWrap = document.createElement("div");
     chipsWrap.id = "chips";
@@ -587,22 +588,47 @@
   // 🌐 中英文切换:界面文案立刻换;已有的对话内容保持原样(那是历史记录,
   // 不该改写),新的回复会用新语言 —— 后端会收到 lang 并切换 AI 的语言。
   document.getElementById("lang-toggle").addEventListener("click", () => {
+    const wasBusy = busy;   // 切换瞬间是否还有回复在路上?那条回复用的是旧语言
     lang = lang === "zh" ? "en" : "zh";
     localStorage.setItem(LANG_KEY, lang);
     applyLang();
-    // 开场页(还没聊过)直接整个重画,让欢迎语和快捷提问也换语言
+
+    // 开场页(还没聊过)整个重画,让欢迎语和快捷提问都换语言
     if (history.length === 0) {
       messagesEl.innerHTML = "";
       showWelcome();
-    } else {
-      const tip = document.createElement("div");
-      tip.className = "restore-tip";
-      tip.textContent = lang === "en"
-        ? "— Switched to English. New replies will be in English —"
-        : "— 已切换为中文,接下来的回复会用中文 —";
-      messagesEl.appendChild(tip);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      inputEl.focus();
+      return;
     }
+
+    // 已经聊过:对话内容保持原样(那是历史记录),但开场欢迎语属于界面文字,跟着换
+    const welcomeRow = messagesEl.querySelector('.row[data-welcome="1"] .bubble');
+    if (welcomeRow) {
+      welcomeRow.dataset.raw = t().welcome;
+      renderBubble(welcomeRow, t().welcome);
+    }
+
+    // 提示语:同一条反复切换时替换掉旧提示,不要堆一串
+    let tip = messagesEl.lastElementChild;
+    if (!tip || !tip.classList.contains("switch-tip")) {
+      tip = document.createElement("div");
+      tip.className = "restore-tip switch-tip";
+      messagesEl.appendChild(tip);
+    }
+    tip.textContent = lang === "en"
+      ? "— Switched to English. New replies will be in English —"
+      : "— 已切换为中文,接下来的回复会用中文 —";
+
+    // 关键提醒:切换前发出的那条请求,回来时仍是旧语言(不是切换失效)
+    if (wasBusy) {
+      const warn = document.createElement("div");
+      warn.className = "restore-tip switch-tip";
+      warn.textContent = lang === "en"
+        ? "(The reply already on its way was requested in Chinese, so it will arrive in Chinese.)"
+        : "(切换前发出的那条请求仍会用英文回复,这是正常的,不是切换没生效。)";
+      messagesEl.appendChild(warn);
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
     inputEl.focus();
   });
 
