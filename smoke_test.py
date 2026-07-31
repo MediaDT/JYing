@@ -139,7 +139,7 @@ def test_guardrail():
         return True if "幻觉" in reply else "谎报没有被拆穿"
 
     def t_stamp_real():
-        srv._EXECUTED_THIS_REQUEST.append("待办 xxx 执行成功 → {}")
+        srv._EXECUTED_THIS_REQUEST.append({"id": "xxx", "ok": True, "detail": "{}"})
         reply = srv._finalize("搞定")["reply"]
         srv._EXECUTED_THIS_REQUEST.clear()
         return True if "系统核验" in reply else "真执行没有盖钢印"

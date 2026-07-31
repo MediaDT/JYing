@@ -171,6 +171,67 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
 6) 调预算等其他写操作还没接上,涉及时说明需去后台手动操作。"""
 
 
+# 英文模式的人设。规则与中文版一一对应,只是换成英文表达 ——
+# 用户在页面上点 🌐 切换语言时,这里决定 AI 用哪种语言回答。
+SYSTEM_PROMPT_EN = """You are the "Ad Campaign Assistant", helping users manage advertising on NewsBreak.
+
+Your users are complete beginners at ad buying. Your first duty is to walk them through things step by step:
+- Reply in English, in plain everyday language; when a term comes up (campaign, CPC, ROAS...), explain it in one short sentence;
+- Ask about, and explain, ONE thing at a time — never dump a list of questions or a wall of information;
+- Every time you ask for input, include three things: what it is (plain language) + a concrete example + a recommended default,
+  so the user can always just say "use the default" and keep moving;
+- For multi-step flows, show progress like "Step 2 of 5: Set your budget", and preview what comes next;
+- After each answer, acknowledge it in one line before moving on;
+- If the user seems confused or answers something else, switch to offering 2-3 options instead of an open question;
+- If an action carries risk (pausing a live campaign, a big budget change), warn first, then advise.
+
+You have read-only tools that pull real data from NewsBreak:
+- Organization -> ad account -> campaign / ad set / ad is a nested chain:
+  use list_organizations for org_id, list_ad_accounts for the account id, then query with that account id.
+- get_report pulls performance, grouped by campaign/ad_set/ad over a date range you choose.
+  Use it whenever the user asks "how much did I spend / how is it doing". Each row **already includes name** —
+  use it directly, don't call a list tool to match ids. Fields: name/id/cost/revenue/roas/impressions/clicks/
+  conversions/cpm/cpc/cpa/ctr/cvr, all pre-formatted strings you can print as-is.
+  "N/A" means the platform has no data for it (common before any conversion) — don't report it as 0.
+  Prefer tables when reporting.
+- When asked about data, always call a tool and use the real numbers — never make them up.
+  Summarize the key points in plain language; don't dump raw JSON.
+- All ids are long numeric strings — quote them exactly.
+- Don't make the user pick an account manually: if there's only one organization/account, just use it.
+  Only when there are genuinely several should you list them and ask, then remember the choice for this conversation.
+
+"NEW CAMPAIGN WIZARD": when the user wants to launch a new ad, collect these 6 steps strictly one at a time,
+showing progress ("Step N of 6"):
+Step 1 Landing page: the URL to promote (explain: the page that opens when someone clicks the ad);
+Step 2 Budget: first daily or lifetime (recommend daily), then the amount (minimum $10; suggest $10-$50 for beginners);
+Step 3 Conversion event: use list_conversion_events to show the account's events and let them pick one
+   (explain: it's how the platform counts results; if they're unsure, recommend "submit form" or the first one);
+   Don't ask about bidding — the system uses the platform's automatic bidding (MAX_CONVERSION);
+Step 4 Creative: ask them to click the 📎 button to the left of the input box and upload an image or video.
+   After a successful upload a message with an assetUrl appears automatically — remember that assetUrl and the filename;
+Step 5 Copy: headline and description; if they'd rather not write it, draft it from the landing page topic and
+   ask them to approve. Give defaults for brand name and call to action;
+Step 6 Naming: ask for an English keyword (e.g. gutter); the name is generated as "keyword-MMDD".
+   They can also specify a name manually.
+Once everything is collected, call propose_create_campaign, restate the whole order back as a table,
+and wait for confirmation in their NEXT message before calling confirm_action.
+After creation: report the three ids, stress that everything is PAUSED (OFF), and tell them to say
+"turn on <campaign name>" when they're ready to start delivery.
+
+"WRITE ACTIONS" (pause/resume, create ad) must follow this flow exactly, no shortcuts:
+1) First verify the object with a query tool to get the exact id and name (never guess an id from memory);
+2) Call propose_status_change / propose_create_campaign to register the pending action, restate what you're about to do,
+   and **always include the action_id in your reply**, asking the user to confirm;
+3) Only after the user clearly agrees in their NEXT message ("confirm", "yes", "OK") call confirm_action with that id;
+   if you've forgotten the id, call list_pending_actions — never re-register the same thing;
+   if the user declines or changes their mind, call cancel_action;
+4) There is a hard safety interlock: registering and executing within the same user message is blocked. Don't try to work around it;
+5) Execution results may ONLY come from confirm_action's return value: quote every id exactly as returned, never invent one;
+   if a tool returns an error, say so honestly — never present a failure as a success;
+   if you did not call confirm_action, you must never say "created/executed/submitted";
+6) Other write actions (budget changes etc.) aren't wired up yet — say those need to be done in the NewsBreak dashboard."""
+
+
 # ============ 把 NewsBreak 的能力包装成 Gemini 能用的"工具" ============
 # 规矩:函数名、参数类型、docstring 会被 Gemini 读懂,它自己决定何时调用;
 #       出错时返回 {"error": ...} 而不是抛异常,让大脑能把原因转告用户。
@@ -522,15 +583,15 @@ def confirm_action(action_id: str) -> dict:
         # 把"真实发生了什么"记入代码层台账(聊天回复会盖'系统核验'钢印)
         if result.get("done"):
             detail = json.dumps(result.get("created") or result.get("detail") or "", ensure_ascii=False)[:220]
-            _EXECUTED_THIS_REQUEST.append(f"待办 {action_id} 执行成功 → {detail}")
+            _EXECUTED_THIS_REQUEST.append({"id": action_id, "ok": True, "detail": detail})
             PENDING_ACTIONS.pop(action_id, None)
             _save_actions()
         else:
-            _EXECUTED_THIS_REQUEST.append(f"待办 {action_id} 执行失败 → {str(result.get('error'))[:220]}")
+            _EXECUTED_THIS_REQUEST.append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
         return {"executed": {k: v for k, v in action.items() if k != "seq"}, **(result if isinstance(result, dict) else {"detail": result})}
     except Exception as e:
         print(f"[write-op] 待办 {action_id} 异常: {e}", flush=True)
-        _EXECUTED_THIS_REQUEST.append(f"待办 {action_id} 执行失败 → {str(e)[:220]}")
+        _EXECUTED_THIS_REQUEST.append({"id": action_id, "ok": False, "detail": str(e)[:220]})
         return {"error": str(e)}
 
 
@@ -557,6 +618,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]  # 完整的聊天记录(API 不记事,每次都要全量发)
+    lang: str = "zh"             # 界面语言:"zh" 中文 / "en" 英文,决定 AI 用哪种语言回答
 
 
 @app.get("/")
@@ -646,24 +708,39 @@ async def upload(file: UploadFile = File(...)):
         return JSONResponse(status_code=500, content={"error": f"上传过程出错:{e}"})
 
 
-def _system_prompt_now() -> str:
-    """人设 + 今天的真实日期 + 保险箱现状(AI 跨轮会忘记待办编号,直接喂给它)。"""
+def _system_prompt_now(lang: str = "zh") -> str:
+    """人设(按语言选)+ 今天的真实日期 + 保险箱现状。
+
+    为什么每轮都要注入日期和保险箱:AI 自己不知道今天几号,也记不住跨轮的待办编号。
+    """
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    prompt = SYSTEM_PROMPT + f"\n\n今天的日期(UTC)是 {today},计算\"最近N天\"等日期范围时以此为准。"
+    english = str(lang).lower().startswith("en")
+
+    if english:
+        prompt = SYSTEM_PROMPT_EN + f"\n\nToday's date (UTC) is {today}; use it when working out ranges like \"the last N days\"."
+    else:
+        prompt = SYSTEM_PROMPT + f"\n\n今天的日期(UTC)是 {today},计算\"最近N天\"等日期范围时以此为准。"
+
     if PENDING_ACTIONS:
         lines = []
         for aid, a in PENDING_ACTIONS.items():
-            if a.get("type") == "create_campaign":
-                lines.append(f"- 编号 {aid}:新建广告「{a.get('campaign_name')}」(已登记,待执行)")
-            else:
-                lines.append(f"- 编号 {aid}:{a.get('status')} {a.get('level')}「{a.get('name') or a.get('object_id')}」(已登记,待执行)")
-        prompt += ("\n\n【保险箱现状】以下待办已登记完毕,严禁重新登记:\n" + "\n".join(lines) +
-                   "\n用户已确认/同意时,直接调 confirm_action(用上面的编号)执行,不要再要求确认。")
+            what = (f"create ad \"{a.get('campaign_name')}\"" if english else f"新建广告「{a.get('campaign_name')}」") \
+                if a.get("type") == "create_campaign" else \
+                (f"{a.get('status')} {a.get('level')} \"{a.get('name') or a.get('object_id')}\"" if english
+                 else f"{a.get('status')} {a.get('level')}「{a.get('name') or a.get('object_id')}」")
+            lines.append(f"- id {aid}: {what}" if english else f"- 编号 {aid}:{what}(已登记,待执行)")
+        if english:
+            prompt += ("\n\n[PENDING ACTIONS] Already registered — do NOT register them again:\n"
+                       + "\n".join(lines) +
+                       "\nWhen the user confirms, call confirm_action with the id above; don't ask again.")
+        else:
+            prompt += ("\n\n【保险箱现状】以下待办已登记完毕,严禁重新登记:\n" + "\n".join(lines) +
+                       "\n用户已确认/同意时,直接调 confirm_action(用上面的编号)执行,不要再要求确认。")
     return prompt
 
 
-def ask_gemini(messages: list[ChatMessage]) -> str:
+def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
     """大脑 A:Gemini。钥匙从环境变量 GEMINI_API_KEY 自动读取。"""
     client = genai.Client()
     # 把聊天记录翻译成 Gemini 的格式:它管助手叫 "model",不叫 "assistant"
@@ -683,7 +760,7 @@ def ask_gemini(messages: list[ChatMessage]) -> str:
                 model=model,
                 contents=contents,
                 config=genai_types.GenerateContentConfig(
-                    system_instruction=_system_prompt_now(),
+                    system_instruction=_system_prompt_now(lang),
                     # 把工具递给它:Gemini 会"自动工具调用"——自己挑工具、自己执行、
                     # 拿到结果接着想,循环到能回答为止,最后只把人话答案给我们
                     tools=NEWSBREAK_TOOLS,
@@ -762,10 +839,10 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
 ]}
 
 
-def ask_openai(messages: list[ChatMessage]) -> str:
+def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
     """大脑 B:ChatGPT。钥匙从 OPENAI_API_KEY 读取(转发服务再加 OPENAI_BASE_URL)。"""
     client = openai.OpenAI()
-    msgs = [{"role": "system", "content": _system_prompt_now()}] + [
+    msgs = [{"role": "system", "content": _system_prompt_now(lang)}] + [
         {"role": m.role, "content": m.content} for m in messages
     ]
     # 型号候补:前面的不可用(404)就换下一个。
@@ -807,14 +884,14 @@ def ask_openai(messages: list[ChatMessage]) -> str:
     return "(工具调用轮数过多,已中止,请换个问法)"
 
 
-def ask_claude(messages: list[ChatMessage]) -> str:
+def ask_claude(messages: list[ChatMessage], lang: str = "zh") -> str:
     """大脑 B:Claude。钥匙从环境变量 ANTHROPIC_API_KEY 自动读取。"""
     client = anthropic.Anthropic()
     response = client.messages.create(
         model="claude-opus-4-8",           # 当前推荐的主力模型
         max_tokens=16000,                  # 单次回答的长度上限
         thinking={"type": "adaptive"},     # 自适应思考:难题多想想,简单题直接答
-        system=_system_prompt_now(),
+        system=_system_prompt_now(lang),
         messages=[m.model_dump() for m in messages],
     )
     # 回答里可能既有"思考块"又有"文字块",只取文字部分
@@ -822,18 +899,52 @@ def ask_claude(messages: list[ChatMessage]) -> str:
 
 
 # AI 回复里出现这些词、却没有真实执行记录且保险箱还有待办 → 大概率在"谎报军情"
-_CLAIM_KEYWORDS = ["成功创建", "已创建", "创建并提交", "已提交", "已执行", "已开启", "已暂停", "已为您暂停", "已为您开启"]
+_CLAIM_KEYWORDS = [
+    # 中文说法
+    "成功创建", "已创建", "创建并提交", "已提交", "已执行", "已开启", "已暂停", "已为您暂停", "已为您开启",
+    # 英文说法(英文模式下 AI 谎报会用这些词)
+    "successfully created", "has been created", "have been created", "i've created",
+    "has been paused", "has been turned on", "has been turned off",
+    "successfully submitted", "successfully executed", "is now live",
+]
 
 
-def _finalize(reply: str) -> dict:
-    """给回复盖"系统核验"钢印:真执行了什么、有没有谎报,以代码层记录为准。"""
+def _finalize(reply: str, lang: str = "zh") -> dict:
+    """给回复盖"系统核验"钢印:真执行了什么、有没有谎报,以代码层记录为准。
+
+    这段字是代码直接输出给用户看的(不经过 AI),所以要自己按语言切换。
+    """
+    english = str(lang).lower().startswith("en")
+
     if _EXECUTED_THIS_REQUEST:
-        stamp = ";".join(_EXECUTED_THIS_REQUEST)
-        return {"reply": f"{reply}\n\n---\n🔒 **系统核验**(代码层记录,非 AI 生成):{stamp}"}
-    if PENDING_ACTIONS and any(kw in reply for kw in _CLAIM_KEYWORDS):
-        ids = "、".join(PENDING_ACTIONS.keys())
-        return {"reply": f"{reply}\n\n---\n⚠️ **系统核验**:本轮实际上没有执行任何操作,保险箱里仍有待办({ids})。"
-                         f"如果上面说\"已创建/已执行\",那是 AI 的幻觉,请回复「执行待办 {ids}」重试。"}
+        parts = []
+        for rec in _EXECUTED_THIS_REQUEST:
+            if isinstance(rec, dict):
+                if english:
+                    verb = "succeeded" if rec.get("ok") else "FAILED"
+                    parts.append(f"action {rec.get('id')} {verb} → {rec.get('detail')}")
+                else:
+                    verb = "执行成功" if rec.get("ok") else "执行失败"
+                    parts.append(f"待办 {rec.get('id')} {verb} → {rec.get('detail')}")
+            else:
+                parts.append(str(rec))   # 兼容旧格式
+        label = ("🔒 **System verification** (recorded by code, not written by the AI): "
+                 if english else "🔒 **系统核验**(代码层记录,非 AI 生成):")
+        return {"reply": f"{reply}\n\n---\n{label}{'; '.join(parts)}"}
+
+    # 谎报匹配不分大小写:AI 写的是 "Successfully created",关键词表里是小写
+    reply_lower = reply.lower()
+    if PENDING_ACTIONS and any(kw.lower() in reply_lower for kw in _CLAIM_KEYWORDS):
+        ids = ", ".join(PENDING_ACTIONS.keys()) if english else "、".join(PENDING_ACTIONS.keys())
+        note = (f"⚠️ **System verification**: nothing was actually executed this turn — "
+                f"the pending action(s) are still queued ({ids}). If the message above claims something "
+                f"was created or done, that is an AI hallucination. "
+                f'Reply "run pending action {ids}" to retry.'
+                if english else
+                f"⚠️ **系统核验**:本轮实际上没有执行任何操作,保险箱里仍有待办({ids})。"
+                f"如果上面说\"已创建/已执行\",那是 AI 的幻觉,请回复「执行待办 {ids}」重试。")
+        return {"reply": f"{reply}\n\n---\n{note}"}
+
     return {"reply": reply}
 
 
@@ -854,22 +965,22 @@ def chat(req: ChatRequest):
 
     try:
         if brain == "openai" and os.environ.get("OPENAI_API_KEY"):
-            return _finalize(ask_openai(req.messages))
+            return _finalize(ask_openai(req.messages, req.lang), req.lang)
         if brain == "claude" and (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-            return _finalize(ask_claude(req.messages))
+            return _finalize(ask_claude(req.messages, req.lang), req.lang)
 
         # 三级火箭:Gemini(免费)→ 额度尽了切 ChatGPT/ofox → 都没有再看 Claude
         if os.environ.get("GEMINI_API_KEY"):
             try:
-                return _finalize(ask_gemini(req.messages))
+                return _finalize(ask_gemini(req.messages, req.lang), req.lang)
             except genai_errors.APIError as e:
                 if e.code == 429 and os.environ.get("OPENAI_API_KEY"):
-                    return _finalize(ask_openai(req.messages))  # Gemini 额度尽,ChatGPT 顶上
+                    return _finalize(ask_openai(req.messages, req.lang), req.lang)  # Gemini 额度尽,顶上
                 raise
         if os.environ.get("OPENAI_API_KEY"):
-            return _finalize(ask_openai(req.messages))
+            return _finalize(ask_openai(req.messages, req.lang), req.lang)
         if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-            return _finalize(ask_claude(req.messages))
+            return _finalize(ask_claude(req.messages, req.lang), req.lang)
         return JSONResponse(
             status_code=500,
             content={"error": "还没配置 AI 大脑的钥匙:打开 .env,填 GEMINI_API_KEY(免费)/ OPENAI_API_KEY / ANTHROPIC_API_KEY 任意一把,填完直接重发消息即可。"},

@@ -196,11 +196,12 @@
   <header>
     <div class="logo">🤖</div>
     <div class="title-wrap">
-      <h1>广告投放小助手</h1>
-      <div class="sub"><span class="dot"></span>在线 · NewsBreak 对话式投放</div>
+      <h1 id="app-title">广告投放小助手</h1>
+      <div class="sub"><span class="dot"></span><span id="app-sub">在线 · NewsBreak 对话式投放</span></div>
     </div>
     <div class="right">
-      <span class="tagline">查数据 · 看报表 · 管投放</span>
+      <span class="tagline" id="app-tagline">查数据 · 看报表 · 管投放</span>
+      <button id="lang-toggle" class="ghost-btn" title="切换中文 / English">🌐 EN</button>
       <button id="new-chat" class="ghost-btn" title="清空当前对话,重新开始">🗑 新对话</button>
     </div>
   </header>
@@ -214,11 +215,107 @@
       <textarea id="input" rows="1" placeholder="输入消息,回车发送(Shift+回车换行)…"></textarea>
       <button id="send" title="发送">➤</button>
     </div>
-    <div class="hint">📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak</div>
+    <div class="hint" id="app-hint">📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak</div>
   </footer>
 
 <script src="/static/marked.min.js"></script>
 <script>
+  // ===== 中英文切换 =====
+  // 一张"翻译表",两套文案;切语言时整页刷新文案,并把语言告诉后端(AI 也跟着换语言)
+  const LANG_KEY = "adbot-lang";
+  const I18N = {
+    zh: {
+      title: "广告投放小助手",
+      sub: "在线 · NewsBreak 对话式投放",
+      tagline: "查数据 · 看报表 · 管投放",
+      langBtn: "🌐 EN",
+      langBtnTitle: "Switch to English",
+      newChat: "🗑 新对话",
+      newChatTitle: "清空当前对话,重新开始",
+      attachTitle: "上传广告素材(图片/视频)",
+      sendTitle: "发送",
+      placeholder: "输入消息,回车发送(Shift+回车换行)…",
+      hint: "📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak",
+      welcome:
+        "你好,我是你的**广告投放小助手** 👋\n" +
+        "我连着你的 NewsBreak 账户,可以直接查真实数据;开启/暂停投放这类操作,我会先跟你确认再动手。\n" +
+        "点下面的快捷按钮,或直接输入你的问题:",
+      chips: [
+        "我有哪些广告账户?",
+        "最近90天各计划花费,用表格",
+        "哪条广告的 CTR 最高?",
+        "我想投一个新广告",
+      ],
+      busy: "助手正在思考,请等它回完再发…",
+      undelivered: "未送达 · 助手没收到这句,请重新发一次",
+      restoreTip: (n) => `— 以上是上次的对话(共 ${n} 条),可以直接接着聊 —`,
+      confirmClear: "确定要清空当前对话吗?清空后无法恢复。",
+      errPrefix: "出错了:",
+      netErr: "网络错误:",
+      timeout: "等太久了(超过 3 分钟没响应),这条没发出去。可能是后端卡住了,请重试;还不行就重启服务。",
+      uploadFail: "素材上传失败:",
+      uploadedMsg: (name, url) => `我已上传素材「${name}」,assetUrl: ${url}`,
+    },
+    en: {
+      title: "Ad Campaign Assistant",
+      sub: "Online · NewsBreak conversational ads",
+      tagline: "Data · Reports · Campaign control",
+      langBtn: "🌐 中文",
+      langBtnTitle: "切换为中文",
+      newChat: "🗑 New chat",
+      newChatTitle: "Clear this conversation and start over",
+      attachTitle: "Upload creative (image / video)",
+      sendTitle: "Send",
+      placeholder: "Type a message. Enter to send, Shift+Enter for a new line…",
+      hint: "📎 Upload creative · Write actions (pause/create) always ask you first · Live data from NewsBreak",
+      welcome:
+        "Hi, I'm your **Ad Campaign Assistant** 👋\n" +
+        "I'm connected to your NewsBreak account and can pull real data. For actions like pausing or launching ads, I'll always confirm with you first.\n" +
+        "Tap a shortcut below, or just type your question:",
+      chips: [
+        "What ad accounts do I have?",
+        "Spend by campaign, last 90 days, as a table",
+        "Which ad has the highest CTR?",
+        "I want to create a new ad",
+      ],
+      busy: "The assistant is thinking — please wait for its reply…",
+      undelivered: "Not delivered · the assistant didn't receive this, please send it again",
+      restoreTip: (n) => `— Above is your previous conversation (${n} messages). Just pick up where you left off —`,
+      confirmClear: "Clear this conversation? This can't be undone.",
+      errPrefix: "Something went wrong: ",
+      netErr: "Network error: ",
+      timeout: "Timed out (no response for 3 minutes) — this message wasn't sent. The backend may be stuck; please retry, or restart the service.",
+      uploadFail: "Upload failed: ",
+      uploadedMsg: (name, url) => `I've uploaded the creative "${name}", assetUrl: ${url}`,
+    },
+  };
+
+  let lang = localStorage.getItem(LANG_KEY) === "en" ? "en" : "zh";
+  const t = () => I18N[lang];
+
+  /** 把界面上所有静态文案刷成当前语言 */
+  function applyLang() {
+    const d = t();
+    document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
+    document.title = d.title;
+    document.getElementById("app-title").textContent = d.title;
+    document.getElementById("app-sub").textContent = d.sub;
+    document.getElementById("app-tagline").textContent = d.tagline;
+    document.getElementById("app-hint").textContent = d.hint;
+
+    const langBtn = document.getElementById("lang-toggle");
+    langBtn.textContent = d.langBtn;
+    langBtn.title = d.langBtnTitle;
+
+    const newChatBtn = document.getElementById("new-chat");
+    newChatBtn.textContent = d.newChat;
+    newChatBtn.title = d.newChatTitle;
+
+    document.getElementById("attach").title = d.attachTitle;
+    document.getElementById("send").title = d.sendTitle;
+    inputEl.placeholder = d.placeholder;
+  }
+
   // ===== 页面的"记忆":完整聊天记录。API 不记事,每次都把它全量发给后端 =====
   // 存在浏览器的 localStorage 里,刷新/关标签页都不会丢(换浏览器或清缓存才会没)
   const STORE_KEY = "adbot-chat-history";
@@ -287,7 +384,7 @@
     row.classList.add("undelivered");
     const tag = document.createElement("div");
     tag.className = "undelivered-tag";
-    tag.textContent = "未送达 · 助手没收到这句,请重新发一次";
+    tag.textContent = t().undelivered;
     row.appendChild(tag);
   }
 
@@ -307,8 +404,8 @@
     // 上一条还没回来就别再发了——否则会同时发两个请求:
     // 两份回复、两次消耗额度,而且第二个带的还是旧上下文
     if (busy) {
-      inputEl.placeholder = "助手正在思考,请等它回完再发…";
-      setTimeout(() => { inputEl.placeholder = "输入消息,回车发送(Shift+回车换行)…"; }, 1800);
+      inputEl.placeholder = t().busy;
+      setTimeout(() => { inputEl.placeholder = t().placeholder; }, 1800);
       return;
     }
 
@@ -336,14 +433,14 @@
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({ messages: history, lang: lang }),
         signal: controller.signal,
       });
       const data = await res.json();
       typing.remove();
 
       if (!res.ok) {
-        addBubble("error", "出错了:" + (data.error || res.status));
+        addBubble("error", t().errPrefix + (data.error || res.status));
         history.pop();  // 这轮没成功,撤掉刚才那句,方便重发
         markUndelivered(userRow);
         saveHistory();
@@ -354,9 +451,7 @@
       }
     } catch (err) {
       typing.remove();
-      const msg = err.name === "AbortError"
-        ? "等太久了(超过 3 分钟没响应),这条没发出去。可能是后端卡住了,请重试;还不行就重启服务。"
-        : "网络错误:" + err.message;
+      const msg = err.name === "AbortError" ? t().timeout : t().netErr + err.message;
       addBubble("error", msg);
       history.pop();
       markUndelivered(userRow);
@@ -394,13 +489,13 @@
       const res = await fetch("/api/upload", { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) {
-        addBubble("error", "素材上传失败:" + (data.error || res.status));
+        addBubble("error", t().uploadFail + (data.error || res.status));
       } else {
         // 上传成功:自动替用户发一条消息,把素材地址告诉 AI(向导会接着走下一步)
-        send(`我已上传素材「${data.filename}」,assetUrl: ${data.asset_url}`);
+        send(t().uploadedMsg(data.filename, data.asset_url));
       }
     } catch (err) {
-      addBubble("error", "素材上传失败:" + err.message);
+      addBubble("error", t().uploadFail + err.message);
     } finally {
       attachBtn.disabled = false;
       attachBtn.textContent = "📎";
@@ -430,19 +525,11 @@
 
   // ===== 开场:有存档就恢复,没有才显示欢迎语 + 快捷提问 =====
   function showWelcome() {
-    addBubble("bot",
-      "你好,我是你的**广告投放小助手** 👋\n" +
-      "我连着你的 NewsBreak 账户,可以直接查真实数据;开启/暂停投放这类操作,我会先跟你确认再动手。\n" +
-      "点下面的快捷按钮,或直接输入你的问题:");
+    addBubble("bot", t().welcome);
 
     const chipsWrap = document.createElement("div");
     chipsWrap.id = "chips";
-    [
-      "我有哪些广告账户?",
-      "最近90天各计划花费,用表格",
-      "哪条广告的 CTR 最高?",
-      "我想投一个新广告",
-    ].forEach((q) => {
+    t().chips.forEach((q) => {
       const b = document.createElement("button");
       b.className = "chip";
       b.textContent = q;
@@ -456,21 +543,44 @@
     history.forEach((m) => addBubble(m.role === "user" ? "user" : "bot", m.content));
     const tip = document.createElement("div");
     tip.className = "restore-tip";
-    tip.textContent = `— 以上是上次的对话(共 ${history.length} 条),可以直接接着聊 —`;
+    tip.textContent = t().restoreTip(history.length);
     messagesEl.appendChild(tip);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  applyLang();                       // 先把界面刷成当前语言
   if (history.length > 0) restoreHistory();
   else showWelcome();
 
   // 「新对话」按钮:清空记忆和屏幕,重新开始
   document.getElementById("new-chat").addEventListener("click", () => {
-    if (history.length > 0 && !confirm("确定要清空当前对话吗?清空后无法恢复。")) return;
+    if (history.length > 0 && !confirm(t().confirmClear)) return;
     history.length = 0;
     saveHistory();
     messagesEl.innerHTML = "";
     showWelcome();
+    inputEl.focus();
+  });
+
+  // 🌐 中英文切换:界面文案立刻换;已有的对话内容保持原样(那是历史记录,
+  // 不该改写),新的回复会用新语言 —— 后端会收到 lang 并切换 AI 的语言。
+  document.getElementById("lang-toggle").addEventListener("click", () => {
+    lang = lang === "zh" ? "en" : "zh";
+    localStorage.setItem(LANG_KEY, lang);
+    applyLang();
+    // 开场页(还没聊过)直接整个重画,让欢迎语和快捷提问也换语言
+    if (history.length === 0) {
+      messagesEl.innerHTML = "";
+      showWelcome();
+    } else {
+      const tip = document.createElement("div");
+      tip.className = "restore-tip";
+      tip.textContent = lang === "en"
+        ? "— Switched to English. New replies will be in English —"
+        : "— 已切换为中文,接下来的回复会用中文 —";
+      messagesEl.appendChild(tip);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
     inputEl.focus();
   });
 
