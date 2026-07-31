@@ -1,0 +1,247 @@
+"""
+冒烟测试 —— 改完代码跑一遍,确认核心功能没被改坏。
+
+用法(在 my-agent 目录下):
+    ./venv/bin/python smoke_test.py
+
+它会做什么:
+  ✅ 查询类:真的连 NewsBreak 查数据(只读,不改任何东西)
+  ✅ 护栏类:用假 id 走一遍两阶段确认流程(不会真的改动广告)
+  ✅ 纯逻辑:素材类型判断、校验规则等(不联网)
+  ❌ 不会:创建广告、改状态、花钱、动你的真实投放
+
+绿色 PASS 全过 = 可以放心提交。
+"""
+
+import sys
+import traceback
+
+PASSED, FAILED = [], []
+
+
+def check(name: str, fn):
+    """跑一个检查项,不管成败都继续往下跑,最后统一汇总。"""
+    try:
+        result = fn()
+        if result is True or result is None:
+            PASSED.append(name)
+            print(f"  ✅ {name}")
+        else:
+            FAILED.append((name, str(result)))
+            print(f"  ❌ {name} → {result}")
+    except Exception as e:
+        FAILED.append((name, f"{type(e).__name__}: {e}"))
+        print(f"  ❌ {name} → {type(e).__name__}: {e}")
+        if "-v" in sys.argv:
+            traceback.print_exc()
+
+
+# ============ 1. 纯逻辑检查(不联网,最快) ============
+
+def test_pure_logic():
+    import newsbreak_client as nb
+
+    print("\n【1】纯逻辑(不联网)")
+
+    def t_creative_type():
+        cases = [
+            ("a.png", "image/png", "IMAGE"),
+            ("a.gif", "image/gif", "GIF"),
+            ("a.mp4", "video/mp4", "VIDEO"),
+            ("没有后缀", "video/mp4", "VIDEO"),   # MIME 优先于后缀
+            ("a.gif", "", "GIF"),                # 没 MIME 时看后缀
+            ("a.mkv", "", "VIDEO"),
+        ]
+        bad = [f"{f}/{m}→{nb.creative_type_of(f, m)}(应为{w})"
+               for f, m, w in cases if nb.creative_type_of(f, m) != w]
+        return "; ".join(bad) or True
+
+    def t_report_level_guard():
+        try:
+            nb.get_report(level="不存在的层级")
+            return "非法 level 居然没报错"
+        except nb.NewsBreakError:
+            return True
+
+    def t_status_guard():
+        try:
+            nb.update_status("campaign", "1", "MAYBE")
+            return "非法 status 居然没报错"
+        except nb.NewsBreakError:
+            return True
+
+    check("素材类型判断(MIME 优先、后缀兜底)", t_creative_type)
+    check("报表层级非法值会被拦", t_report_level_guard)
+    check("开关状态非法值会被拦", t_status_guard)
+
+
+# ============ 2. 建广告的校验规则(不联网,不会真建) ============
+
+def test_validation():
+    import agent_server as srv
+
+    print("\n【2】建广告校验规则(只登记不执行)")
+
+    base = dict(
+        ad_account_id="123", keyword="test",
+        landing_url="https://example.com", budget_dollars=20,
+        headline="Test Headline", description="Test description here",
+        asset_url="https://cdn.example.com/a.png",
+    )
+
+    def rejects(label, **override):
+        def run():
+            r = srv.propose_create_campaign(**{**base, **override})
+            if "error" not in r:
+                srv.cancel_action(r.get("action_id", ""))   # 误放行了,清理掉
+                return "居然被放行了"
+            return True
+        check(label, run)
+
+    rejects("预算低于 $10 被拒", budget_dollars=5)
+    rejects("落地页不是链接被拒", landing_url="不是链接")
+    rejects("素材地址无效被拒", asset_url="")
+    rejects("关键词为空被拒", keyword="  ")
+    rejects("预算类型非法被拒", budget_type="WEEKLY")
+
+
+# ============ 3. 写操作护栏(用假 id,不会真改) ============
+
+def test_guardrail():
+    import agent_server as srv
+
+    print("\n【3】写操作护栏(假 id,不会动真广告)")
+
+    srv._REQUEST_SEQ = 10_000
+    r1 = srv.propose_status_change("campaign", "0", "OFF", name="冒烟测试用")
+    aid = r1.get("action_id", "")
+
+    def t_registered():
+        return True if aid else f"登记失败: {r1}"
+
+    def t_dedupe():
+        r2 = srv.propose_status_change("campaign", "0", "OFF", name="冒烟测试用")
+        return True if r2.get("action_id") == aid else "同样内容居然登记出了新编号(查重失效)"
+
+    def t_fuse():
+        r = srv.confirm_action(aid)
+        return True if "保险丝" in str(r.get("error", "")) else f"保险丝没拦住: {r}"
+
+    def t_listed():
+        ids = [a["action_id"] for a in srv.list_pending_actions().get("pending_actions", [])]
+        return True if aid in ids else "保险箱里查不到刚登记的待办"
+
+    def t_prompt_injected():
+        return True if aid in srv._system_prompt_now() else "保险箱现状没注入提示词(AI 会忘编号)"
+
+    def t_stamp_liar():
+        reply = srv._finalize("好消息!已成功创建!")["reply"]
+        return True if "幻觉" in reply else "谎报没有被拆穿"
+
+    def t_stamp_real():
+        srv._EXECUTED_THIS_REQUEST.append("待办 xxx 执行成功 → {}")
+        reply = srv._finalize("搞定")["reply"]
+        srv._EXECUTED_THIS_REQUEST.clear()
+        return True if "系统核验" in reply else "真执行没有盖钢印"
+
+    def t_cancel():
+        return True if srv.cancel_action(aid).get("cancelled") else "取消失败"
+
+    check("能登记待办并拿到编号", t_registered)
+    check("相同内容不会重复登记", t_dedupe)
+    check("同一条消息里执行会被保险丝拦住", t_fuse)
+    check("保险箱能查到待办", t_listed)
+    check("保险箱现状会注入提示词", t_prompt_injected)
+    check("AI 谎报会被拆穿(⚠️ 标记)", t_stamp_liar)
+    check("真执行会盖钢印(🔒 标记)", t_stamp_real)
+    check("能取消待办", t_cancel)
+
+
+# ============ 4. 真连 NewsBreak(只读) ============
+
+def test_newsbreak_readonly():
+    import agent_server as srv
+    import newsbreak_client as nb
+
+    print("\n【4】连 NewsBreak 查真数据(只读)")
+
+    def t_orgs():
+        return True if nb.list_organizations() else "查不到任何组织"
+
+    def t_accounts_flat():
+        accts = srv._all_ad_accounts()
+        if not accts:
+            return "查不到任何广告账户"
+        a = accts[0]
+        if not a.get("id") or a["id"] == a.get("group_id"):
+            return f"账户 id 可能拿成了分组 id: {a}"
+        return True
+
+    def t_campaigns():
+        acct = srv._default_ad_account_id()
+        return True if "items" in nb.list_campaigns(acct) else "计划列表结构不对"
+
+    def t_events():
+        acct = srv._default_ad_account_id()
+        return True if isinstance(nb.list_events(acct), list) else "转化事件列表结构不对"
+
+    def t_report_fields():
+        r = nb.get_report("campaign", start_date="2026-04-01")   # 保持在 180 天上限内
+        if not r.get("rows"):
+            return True   # 没数据也算通过(可能确实没投放)
+        row = r["rows"][0]
+        need = {"name", "id", "cost", "revenue", "roas", "clicks", "ctr", "conversions"}
+        missing = need - set(row)
+        return f"报表缺字段: {missing}" if missing else True
+
+    check("能查到组织", t_orgs)
+    check("账户列表已拍平(拿到真账户 id)", t_accounts_flat)
+    check("能查广告计划列表", t_campaigns)
+    check("能查转化事件列表", t_events)
+    def t_report_span_guard():
+        try:
+            nb.get_report("campaign", start_date="2025-01-01", end_date="2026-07-31")
+            return "超过 180 天居然没被拦"
+        except nb.NewsBreakError as e:
+            return True if "180" in str(e) else f"拦是拦了,但提示不对: {e}"
+
+    check("报表字段齐全(含名字/收入/ROAS)", t_report_fields)
+    check("报表跨度超 180 天会被友好拦截", t_report_span_guard)
+
+
+# ============ 5. HTTP 接口 ============
+
+def test_http():
+    from fastapi.testclient import TestClient
+    import agent_server as srv
+
+    print("\n【5】HTTP 接口")
+    client = TestClient(srv.app)
+
+    check("首页能打开", lambda: True if client.get("/").status_code == 200 else "首页打不开")
+    check("接口文档已关闭(/docs)", lambda: True if client.get("/docs").status_code == 404 else "/docs 还开着")
+    check("接口文档已关闭(/openapi.json)",
+          lambda: True if client.get("/openapi.json").status_code == 404 else "/openapi.json 还开着")
+    check("Markdown 渲染库在位",
+          lambda: True if client.get("/static/marked.min.js").status_code == 200 else "marked.min.js 丢了")
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("广告投放小助手 · 冒烟测试(只读,不会改动真实广告)")
+    print("=" * 60)
+
+    test_pure_logic()
+    test_validation()
+    test_guardrail()
+    test_newsbreak_readonly()
+    test_http()
+
+    print("\n" + "=" * 60)
+    print(f"结果:{len(PASSED)} 通过 / {len(FAILED)} 失败")
+    if FAILED:
+        print("\n失败项:")
+        for name, why in FAILED:
+            print(f"  ❌ {name}\n     {why}")
+        sys.exit(1)
+    print("✅ 全部通过,可以放心提交")

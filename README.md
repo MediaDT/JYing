@@ -115,7 +115,8 @@ cd ~/workspace/my-agent
 > 报表包含:**名字**、花费、**收入、ROAS**、展示、点击、转化、CPM、CPC、CPA、CTR、CVR。
 > 不说时间就默认查最近 7 天(按 UTC 算,和北京时间差 8 小时)。
 > 看到 **N/A** 表示平台没这项数据(比如还没有转化的计划),不等于 0。
-> 目前报表是**按整个 token 查的,不分账户**——你以后开了第二个账户,数字会混在一起。
+> 报表一次最多查 **180 天**,超了会提示你缩短范围。
+> 多账户时可以指定只看某个账户(单账户不用管)。
 
 ### 开启 / 暂停
 
@@ -287,6 +288,7 @@ python3 -m venv venv
 | `README.md` | 本文件 |
 | `server.log` | 运行日志。⚠️ 只有把输出重定向到它才会生成(`./start.sh` 前台跑时日志只打在终端)。想留档:`setsid nohup ./start.sh >> server.log 2>&1 &` |
 | `pending_actions.json` | 保险箱存档(没有待办时内容为空,可以删) |
+| `smoke_test.py` | 冒烟测试:改完代码跑 `./venv/bin/python smoke_test.py`,26 项全绿才提交 |
 | `chat.py` / `newsbreak_hello.py` | 早期学习用的小练习,可以不管 |
 
 ---

@@ -134,6 +134,14 @@
   .typing-bubble i:nth-child(3) { animation-delay: .4s; }
   @keyframes blink { 0%,80%,100% { opacity: .25 } 40% { opacity: 1 } }
 
+  /* 发送失败的消息:变淡 + 底下挂一条说明,避免"以为发出去了" */
+  .row.undelivered { opacity: .55; flex-wrap: wrap; }
+  .row.undelivered .bubble { filter: grayscale(.6); }
+  .undelivered-tag {
+    width: 100%; text-align: right; font-size: 11px; color: #dc2626;
+    padding: 3px 42px 0 0; letter-spacing: .2px;
+  }
+
   /* 恢复历史后的分隔提示 */
   .restore-tip { text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 0; }
 
@@ -271,6 +279,18 @@
     return row;
   }
 
+  // 给发送失败的那条消息打上"未送达"标记。
+  // 为什么需要:失败时我们会把这句从记忆里撤掉(方便重发),
+  // 但气泡还留在屏幕上——不标出来的话,你会以为助手听见了,其实它完全不知道。
+  function markUndelivered(row) {
+    if (!row) return;
+    row.classList.add("undelivered");
+    const tag = document.createElement("div");
+    tag.className = "undelivered-tag";
+    tag.textContent = "未送达 · 助手没收到这句,请重新发一次";
+    row.appendChild(tag);
+  }
+
   // "正在思考"的三个小点
   function showTyping() {
     const row = document.createElement("div");
@@ -281,7 +301,17 @@
     return row;
   }
 
+  let busy = false;   // 正在等回复时为 true,挡住重复发送
+
   async function send(presetText) {
+    // 上一条还没回来就别再发了——否则会同时发两个请求:
+    // 两份回复、两次消耗额度,而且第二个带的还是旧上下文
+    if (busy) {
+      inputEl.placeholder = "助手正在思考,请等它回完再发…";
+      setTimeout(() => { inputEl.placeholder = "输入消息,回车发送(Shift+回车换行)…"; }, 1800);
+      return;
+    }
+
     const text = (presetText || inputEl.value).trim();
     if (!text) return;
 
@@ -290,18 +320,24 @@
 
     inputEl.value = "";
     inputEl.style.height = "auto";
-    addBubble("user", text);
+    const userRow = addBubble("user", text);   // 记住这一行,失败时要给它加标记
     history.push({ role: "user", content: text });
     saveHistory();
 
+    busy = true;
     sendBtn.disabled = true;
     const typing = showTyping();
+
+    // 超时保护:后端卡死时不要让小点一直转下去
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 180000);   // 3 分钟
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: history }),
+        signal: controller.signal,
       });
       const data = await res.json();
       typing.remove();
@@ -309,6 +345,7 @@
       if (!res.ok) {
         addBubble("error", "出错了:" + (data.error || res.status));
         history.pop();  // 这轮没成功,撤掉刚才那句,方便重发
+        markUndelivered(userRow);
         saveHistory();
       } else {
         addBubble("bot", data.reply);
@@ -317,10 +354,16 @@
       }
     } catch (err) {
       typing.remove();
-      addBubble("error", "网络错误:" + err.message);
+      const msg = err.name === "AbortError"
+        ? "等太久了(超过 3 分钟没响应),这条没发出去。可能是后端卡住了,请重试;还不行就重启服务。"
+        : "网络错误:" + err.message;
+      addBubble("error", msg);
       history.pop();
+      markUndelivered(userRow);
       saveHistory();
     } finally {
+      clearTimeout(timer);
+      busy = false;
       sendBtn.disabled = false;
       inputEl.focus();
     }
@@ -375,8 +418,10 @@
       if (item.type && item.type.startsWith("image/")) {
         e.preventDefault();
         const f = item.getAsFile();
-        // 粘贴的图片一般没名字,给它起一个带时间的
-        const named = new File([f], `paste-${Date.now()}.png`, { type: f.type });
+        // 粘贴的图片没有文件名,按它的真实类型起名(别一律叫 .png,
+        // 否则 GIF 会被当成普通图片提交给平台)
+        const ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg");
+        const named = new File([f], `paste-${Date.now()}.${ext}`, { type: f.type });
         uploadFile(named);
         return;
       }

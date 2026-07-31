@@ -187,7 +187,8 @@ def list_organizations() -> dict:
 
 
 def list_ad_accounts(org_id: str) -> dict:
-    """查询某个组织(org_id)下的所有广告账户(ad account),返回账户列表。"""
+    """查询某个组织(org_id)下的所有广告账户。返回的每项里,`id` 就是广告账户 id,
+    可直接用于查计划/报表/建广告;`group_id` 只是外层分组,**不要**当账户 id 用。"""
     try:
         return {"ad_accounts": nb.list_ad_accounts(org_id)}
     except Exception as e:
@@ -226,7 +227,8 @@ def list_conversion_events(ad_account_id: str) -> dict:
         return {"error": str(e)}
 
 
-def get_report(level: str = "campaign", start_date: str = "", end_date: str = "") -> dict:
+def get_report(level: str = "campaign", start_date: str = "", end_date: str = "",
+               ad_account_id: str = "") -> dict:
     """查询一段时间的投放数据报表:花费、展示、点击、转化、CPC、CTR 等。
 
     level 可选 "campaign" / "ad_set" / "ad"(按哪一层汇总);
@@ -234,7 +236,7 @@ def get_report(level: str = "campaign", start_date: str = "", end_date: str = ""
     返回的每行带对象 id,可结合 list_campaigns 等工具把 id 对回名字。
     """
     try:
-        return nb.get_report(level, start_date, end_date)
+        return nb.get_report(level, start_date, end_date, ad_account_id)
     except Exception as e:
         return {"error": str(e)}
 
@@ -471,7 +473,8 @@ def _execute_create_campaign(a: dict) -> dict:
 
     # 第三层:ad(带创意)
     creative = {
-        "type": nb.creative_type_of(a.get("asset_filename", ""), ""),
+        # 类型优先用上传时记下的(权威),查不到才退回按文件名猜
+        "type": _ASSET_TYPES.get(a["asset_url"]) or nb.creative_type_of(a.get("asset_filename", ""), ""),
         "headline": a["headline"],
         "description": a["description"],
         "callToAction": a["call_to_action"],
@@ -566,26 +569,37 @@ def index():
 from fastapi import File, UploadFile  # noqa: E402
 
 _CACHED_ACCOUNT_ID = ""
+# 素材地址 → 素材类型(IMAGE/GIF/VIDEO),上传时记下,建广告时查回
+_ASSET_TYPES: dict[str, str] = {}
+
+
+def _all_ad_accounts() -> list[dict]:
+    """列出名下所有组织的所有广告账户(nb.list_ad_accounts 已拍平,直接用 id)。"""
+    accounts = []
+    for org in nb.list_organizations():
+        org_id = str(org.get("id") or org.get("orgId") or "")
+        if org_id:
+            accounts.extend(nb.list_ad_accounts(org_id))
+    return [a for a in accounts if a.get("id")]
 
 
 def _default_ad_account_id() -> str:
-    """找到用户的广告账户 id(单账户直接用,查一次就缓存)。"""
+    """确定用哪个广告账户。
+
+    只有一个账户时直接用(绝大多数情况);**有多个时明确报错**,而不是默默挑第一个——
+    静默挑错账户会把素材传进别人的账户,属于"不报错但结果全错"的坑。
+    """
     global _CACHED_ACCOUNT_ID
     if _CACHED_ACCOUNT_ID:
         return _CACHED_ACCOUNT_ID
-    orgs = nb.list_organizations()
-    if not orgs:
-        raise nb.NewsBreakError("名下没有任何组织")
-    org_id = str(orgs[0].get("id") or orgs[0].get("orgId") or "")
-    groups = nb.list_ad_accounts(org_id)
-    # 接口返回的是"组织分组"套娃结构:真正的账户在每组的 adAccounts 数组里
-    for group in groups:
-        for account in group.get("adAccounts") or []:
-            account_id = str(account.get("id") or "")
-            if account_id:
-                _CACHED_ACCOUNT_ID = account_id
-                return _CACHED_ACCOUNT_ID
-    raise nb.NewsBreakError("组织下没有任何广告账户")
+    accounts = _all_ad_accounts()
+    if not accounts:
+        raise nb.NewsBreakError("名下没有任何广告账户")
+    if len(accounts) > 1:
+        listed = "、".join(f"{a['name']}(id={a['id']})" for a in accounts)
+        raise nb.NewsBreakError(f"你名下有 {len(accounts)} 个广告账户,请指定用哪个:{listed}")
+    _CACHED_ACCOUNT_ID = accounts[0]["id"]
+    return _CACHED_ACCOUNT_ID
 
 
 @app.post("/api/upload")
@@ -618,6 +632,10 @@ async def upload(file: UploadFile = File(...)):
         asset_url = str(data.get("assetUrl") or data.get("url") or "")
         if not asset_url:
             return JSONResponse(status_code=502, content={"error": f"NewsBreak 未返回素材地址:{data}"})
+
+        # 记下这个素材的真实类型(浏览器给的 MIME 最权威)。
+        # 建广告时按 assetUrl 查回来,不用指望 AI 把类型传对,也不怕文件名没后缀。
+        _ASSET_TYPES[asset_url] = nb.creative_type_of(filename, file.content_type or "")
         return {"asset_url": asset_url, "filename": filename}
 
     except nb.NewsBreakError as e:
@@ -708,7 +726,8 @@ OPENAI_TOOL_SCHEMAS = [
     _oa_tool("get_report", "查询投放数据报表(花费/展示/点击/转化等)",
              {"level": _LEVEL,
               "start_date": {"type": "string", "description": "开始日期 YYYY-MM-DD,可不填(默认最近7天)"},
-              "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD,可不填"}}, []),
+              "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD,可不填"},
+              "ad_account_id": {"type": "string", "description": "只看某个广告账户(单账户可不填)"}}, []),
     _oa_tool("propose_status_change", "登记一个开启/暂停待办(不会立即执行,须用户确认)",
              {"level": _LEVEL, "object_id": _ID,
               "status": {"type": "string", "enum": ["ON", "OFF"], "description": "ON=开启 OFF=暂停"},

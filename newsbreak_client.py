@@ -71,10 +71,28 @@ def list_organizations() -> list[dict]:
 
 
 def list_ad_accounts(org_id: str) -> list[dict]:
-    """查询某个组织下的所有广告账户(ad account)。"""
-    return list(
-        _get_json("/ad-account/getGroupsByOrgIds", params=[("orgIds", org_id)]).get("list") or []
-    )
+    """查询某个组织下的所有广告账户(ad account),返回**拍平后的账户列表**。
+
+    ⚠️ 这里有个坑:接口返回的是"组织分组"的套娃结构 ——
+        [{id: 分组id, name: 分组名, adAccounts: [{id: 真账户id, name: ...}]}]
+    外层 id 是分组、不是账户,而且两者名字常常一模一样,肉眼和 AI 都分不出来。
+    所以这里统一拍平,只吐真账户,避免把分组 id 当账户 id 用(会导致查不到数据)。
+    """
+    groups = _get_json("/ad-account/getGroupsByOrgIds", params=[("orgIds", org_id)]).get("list") or []
+    accounts = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for acc in group.get("adAccounts") or []:
+            if not isinstance(acc, dict):
+                continue
+            accounts.append({
+                "id": str(acc.get("id") or ""),          # 真正的广告账户 id
+                "name": acc.get("name") or "",
+                "group_id": str(group.get("id") or ""),  # 外层分组 id,仅供参考
+                "group_name": group.get("name") or "",
+            })
+    return accounts
 
 
 def _list_page(path: str, ad_account_id: str, page: int, limit: int, search: str) -> dict:
@@ -135,7 +153,8 @@ _REPORT_LEVELS = {
 }
 
 
-def get_report(level: str = "campaign", start_date: str = "", end_date: str = "") -> dict:
+def get_report(level: str = "campaign", start_date: str = "", end_date: str = "",
+               ad_account_id: str = "") -> dict:
     """查询一段时间的投放数据(花费/展示/点击/转化等),按 campaign / ad_set / ad 汇总。
 
     日期格式 YYYY-MM-DD;不填则默认最近 7 天。
@@ -150,6 +169,18 @@ def get_report(level: str = "campaign", start_date: str = "", end_date: str = ""
     end = end_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     start = start_date or (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
 
+    # 平台硬限制:报表时间跨度不能超过 180 天(实测,超了返回英文报错)。
+    # 这里提前拦住并说人话,免得用户看到一句 "Report dates range can not exceed 180 days"。
+    try:
+        span = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(start, "%Y-%m-%d")).days
+        if span < 0:
+            raise NewsBreakError(f"开始日期({start})晚于结束日期({end}),请检查")
+        if span > 180:
+            raise NewsBreakError(
+                f"查询跨度 {span} 天,超过平台上限 180 天。请缩短范围,或分几段来查")
+    except ValueError:
+        raise NewsBreakError(f"日期格式要是 YYYY-MM-DD,收到:{start} ~ {end}")
+
     body = {
         "name": f"my-agent-report-{dimension}",
         "dateRange": "FIXED",
@@ -158,6 +189,10 @@ def get_report(level: str = "campaign", start_date: str = "", end_date: str = ""
         "dimensions": [dimension],
         "metrics": ["COST", "IMPRESSION", "CPM"],
     }
+    # 指定账户时带上过滤(单账户可不填)。注意:平台接受这个字段但我们只有一个账户,
+    # 无法验证多账户下是否真的过滤生效——多账户环境请先核对数字。
+    if ad_account_id:
+        body["adAccountId"] = ad_account_id
     data = _post_json("/reports/getIntegratedReport", body)
 
     def num(row: dict, keys: list[str], default: float = 0.0) -> float:
@@ -224,9 +259,23 @@ def update_status(level: str, object_id: str, status: str) -> dict:
 # ============ 建广告全家桶(写操作,均需上层护栏确认后才可调用) ============
 
 def creative_type_of(filename: str, mime_type: str = "") -> str:
-    """按文件名/类型判断素材种类:VIDEO / GIF / IMAGE(qx-ad-bot 的规则)。"""
+    """判断素材种类:VIDEO / GIF / IMAGE。
+
+    **优先用浏览器给的 mime_type**(权威),文件名后缀只是兜底 ——
+    因为粘贴的截图、没有后缀的文件都会让"猜后缀"失效,
+    把视频当成图片提交给平台会被拒。
+    """
+    mime = (mime_type or "").lower()
+    if mime.startswith("video/"):
+        return "VIDEO"
+    if mime == "image/gif":
+        return "GIF"
+    if mime.startswith("image/"):
+        return "IMAGE"
+
+    # 没有 mime 时退回看后缀
     lower = (filename or "").lower()
-    if (mime_type or "").startswith("video/") or lower.endswith((".mp4", ".mov", ".webm")):
+    if lower.endswith((".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv")):
         return "VIDEO"
     if lower.endswith(".gif"):
         return "GIF"
