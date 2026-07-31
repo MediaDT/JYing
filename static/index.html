@@ -218,7 +218,11 @@
     <div class="hint" id="app-hint">📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak</div>
   </footer>
 
-<script src="/static/marked.min.js"></script>
+<!-- async:不阻塞页面。
+     以前是阻塞式加载,这个文件一旦卡住(比如端口转发的桥半死),
+     后面的脚本就永远不执行 → 整页白屏。现在改成异步:页面先出来,
+     等它到了再把已有气泡重新排版一次(见 onMarkedReady)。 -->
+<script async src="/static/marked.min.js" onload="window.onMarkedReady && window.onMarkedReady()"></script>
 <script>
   // ===== 中英文切换 =====
   // 一张"翻译表",两套文案;切语言时整页刷新文案,并把语言告诉后端(AI 也跟着换语言)
@@ -363,8 +367,9 @@
 
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    if (who === "bot" && window.marked) {
-      bubble.innerHTML = marked.parse(escapeHtml(text), { breaks: true });
+    if (who === "bot") {
+      bubble.dataset.raw = text;      // 存原文,marked 晚到时可以重新排版
+      renderBubble(bubble, text);
     } else {
       bubble.textContent = text;
     }
@@ -375,6 +380,23 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return row;
   }
+
+  /** 把一段文字画进气泡:排版库到了就按 Markdown 排,没到就先按纯文本显示 */
+  function renderBubble(bubble, text) {
+    if (window.marked) {
+      bubble.innerHTML = marked.parse(escapeHtml(text), { breaks: true });
+    } else {
+      bubble.textContent = text;
+    }
+  }
+
+  // 排版库(marked.js)异步加载完成后回调:把之前按纯文本显示的气泡补排一次版。
+  // 这样即使它慢到、甚至加载失败,页面也照样可用,只是表格样式差一点。
+  window.onMarkedReady = function () {
+    document.querySelectorAll(".row.bot .bubble[data-raw]").forEach((b) => {
+      renderBubble(b, b.dataset.raw);
+    });
+  };
 
   // 给发送失败的那条消息打上"未送达"标记。
   // 为什么需要:失败时我们会把这句从记忆里撤掉(方便重发),
