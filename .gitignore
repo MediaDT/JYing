@@ -9,6 +9,7 @@ __pycache__/
 # 运行时产生的文件
 server.log
 pending_actions.json
+scheduled_tasks.json   # 定时任务运行时状态,跟机器走,不进版本库
 
 # 账号数据(密码哈希 + 每个账号的聊天记录),绝不能进 git
 data/
