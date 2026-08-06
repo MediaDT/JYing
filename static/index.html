@@ -184,6 +184,57 @@
     padding: 3px 42px 0 0; letter-spacing: .2px;
   }
 
+  /* ============ 广告账户接入弹窗 ============ */
+  #acct-btn.linked { color: var(--accent1); border-color: color-mix(in srgb, var(--accent1) 40%, transparent); }
+  #acct-btn.unlinked { color: #d97706; border-color: color-mix(in srgb, #d97706 45%, transparent); }
+  .overlay {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    background: rgba(10, 12, 18, .45); backdrop-filter: blur(3px);
+    align-items: center; justify-content: center; padding: 20px;
+  }
+  .overlay.show { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 18px;
+    box-shadow: 0 20px 60px -12px rgba(0,0,0,.35);
+    width: 100%; max-width: 520px; max-height: 86vh; overflow-y: auto;
+    padding: 22px 24px; animation: rise .2s ease both;
+  }
+  .modal h2 { font-size: 16.5px; margin-bottom: 4px; }
+  .modal .desc { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 16px; }
+  .modal label { display: block; font-size: 12.5px; font-weight: 600; margin: 14px 0 6px; }
+  .modal input[type="text"], .modal input[type="password"] {
+    width: 100%; padding: 10px 13px; font: inherit; font-size: 13.5px;
+    border: 1.5px solid var(--border); border-radius: 11px;
+    background: var(--bg); color: var(--text); outline: none;
+  }
+  .modal input:focus { border-color: var(--accent1); }
+  .acct-status {
+    display: flex; align-items: center; gap: 9px; padding: 11px 13px;
+    border-radius: 11px; font-size: 13px; margin-bottom: 4px;
+    background: color-mix(in srgb, var(--accent1) 7%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent1) 20%, transparent);
+  }
+  .acct-status.bad { background: color-mix(in srgb, #d97706 9%, transparent); border-color: color-mix(in srgb, #d97706 30%, transparent); }
+  .acct-list { display: flex; flex-direction: column; gap: 7px; margin-top: 6px; }
+  .acct-item {
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+    padding: 10px 13px; border: 1.5px solid var(--border); border-radius: 11px;
+    font-size: 13px; transition: all .13s ease; background: var(--bg);
+  }
+  .acct-item:hover { border-color: var(--accent1); }
+  .acct-item.active { border-color: var(--accent1); background: color-mix(in srgb, var(--accent1) 9%, transparent); }
+  .acct-item .aid { margin-left: auto; font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .modal-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 20px; }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    border: 0; border-radius: 11px; padding: 9px 20px; font-size: 13.5px; cursor: pointer;
+  }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .modal-msg { font-size: 12.5px; margin-top: 12px; line-height: 1.6; }
+  .modal-msg.err { color: #dc2626; }
+  .modal-msg.ok { color: #16a34a; }
+  .modal a { color: var(--accent1); }
+
   /* 恢复历史后的分隔提示 */
   .restore-tip { text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 0; }
 
@@ -244,10 +295,27 @@
     </div>
     <div class="right">
       <span class="tagline" id="app-tagline">查数据 · 看报表 · 管投放</span>
+      <button id="platform-btn" class="ghost-btn" title="切换投放平台" onclick="location.href='/platforms'">🔄</button>
+      <span id="user-chip" class="ghost-btn" style="display:none;cursor:default"></span>
+      <button id="dash-btn" class="ghost-btn" title="打开数据大屏(KPI/趋势/AI诊断)" onclick="location.href='/dashboard'">📊 大屏</button>
+      <button id="acct-btn" class="ghost-btn" title="接入 / 切换广告账户">🔗 账户</button>
       <button id="lang-toggle" class="ghost-btn" title="切换中文 / English">🌐 EN</button>
       <button id="new-chat" class="ghost-btn" title="开一个新对话(当前对话会存进左侧列表)">✚ 新对话</button>
     </div>
   </header>
+
+  <!-- 广告账户接入弹窗 -->
+  <div class="overlay" id="acct-overlay">
+    <div class="modal">
+      <h2 id="acct-title">🔗 接入广告账户</h2>
+      <div class="desc" id="acct-desc"></div>
+      <div id="acct-body"></div>
+      <div class="modal-msg" id="acct-msg"></div>
+      <div class="modal-actions">
+        <button class="ghost-btn" id="acct-close">关闭</button>
+      </div>
+    </div>
+  </div>
 
   <div class="main">
     <aside id="sidebar">
@@ -279,13 +347,60 @@
   // ===== 中英文切换 =====
   // 一张"翻译表",两套文案;切语言时整页刷新文案,并把语言告诉后端(AI 也跟着换语言)
   const LANG_KEY = "adbot-lang";
+  // ===== 当前投放平台(从网址 ?platform= 取,记住上次的选择)=====
+  // 用 var 而不是 const:var 会被"提升",早期(applyLang)读到的最差是 undefined,
+  // 不会像 const 那样直接抛错把整页脚本打断。这是 CLAUDE.md 里记过的坑。
+  var PLATFORM_KEY = "adbot-platform";
+  var _q = new URLSearchParams(location.search);
+  var PLATFORM = _q.get("platform") || localStorage.getItem(PLATFORM_KEY) || "newsbreak";
+  var PLATFORM_NAME = "NewsBreak";     // 拿到 /api/platforms 后会换成真实名字
+  var PLATFORM_BOUND = true;           // 先乐观,查到没绑再提示
+  var WANT_BIND = _q.get("bind") === "1";
+  localStorage.setItem(PLATFORM_KEY, PLATFORM);
+
   const I18N = {
     zh: {
       title: "广告投放小助手",
-      sub: "在线 · NewsBreak 对话式投放",
+      sub: "在线 · {p} 对话式投放",
+      switchPlatform: "切换平台",
+      notBoundTitle: "还没绑定 {p} 账号",
+      notBoundBody: "绑定之后才能查数据、管投放。点顶栏的 🔗 按钮,粘贴 {p} 的 Access Token 就行。",
+      notBoundBtn: "现在去绑定",
       tagline: "查数据 · 看报表 · 管投放",
       langBtn: "🌐 EN",
       langBtnTitle: "Switch to English",
+      upUploading: (info) => `⏳ 正在上传素材…\n📄 ${info}`,
+      upErrEmpty: "这个文件是空的(0 字节),换一个试试。",
+      upErrTooBig: (s) => `文件太大(${s}),上限 100 MB。请压缩后再传。`,
+      upErrWrongType: (ty) => `不支持这种文件(${ty})。广告素材只能是图片或视频。`,
+      upErrHttp: (code) => `服务器返回 HTTP ${code},但没说明原因。可以重试一次;一直这样就要看服务端日志了。`,
+      upErrNoUrl: "NewsBreak 收下了文件但没返回素材地址,请重试或换一张。",
+      upErrTimeout: "上传超时(等了 3 分钟)。可能是文件太大或网络太慢——换个小一点的文件试试。",
+      upErrNetwork: (m) => `连接中断,请求没能送达服务器(${m})。\n常见原因:①VSCode 端口转发的"桥"断了 → 去端口面板把 18100 删掉重加;②服务刚重启;③文件过大导致连接被掐断。\n先刷新页面确认能正常聊天,再重新上传。`,
+      storageTrimmed: (n) => `⚠️ 浏览器存储空间满了,已自动清掉最旧的 ${n} 段对话腾地方。想彻底清爽可以手动删掉不用的对话。`,
+      storageFull: "⚠️ 浏览器存储空间已满,这段对话可能存不下了。请点「✚ 新对话」或删掉几段旧对话再继续。",
+      dashBtn: "📊 大屏",
+      dashBtnTitle: "打开数据大屏(KPI / 趋势 / AI 诊断)",
+      acctBtn: "🔗 账户",
+      acctBtnTitle: "接入 / 切换广告账户",
+      acctBtnUnlinked: "🔗 未接入账户",
+      acctTitle: "🔗 接入广告账户",
+      acctDescLinked: "助手当前连着下面这个 NewsBreak 账户。有多个账户时,点一下就能切换。",
+      acctDescUnlinked: "还没接入 NewsBreak 广告账户。粘贴你的 Access Token 就能连上。",
+      acctTokenLabel: "NewsBreak Access Token",
+      acctTokenPlaceholder: "粘贴 Access Token…",
+      acctTokenHelp: "去哪拿:登录 NewsBreak Ad Manager → Resources → API Access Tokens → 生成后复制。",
+      acctSave: "保存并连接",
+      acctSaving: "验证中…",
+      acctChange: "更换 Token",
+      acctPickLabel: "选择要操作的广告账户",
+      acctConnected: "已接入",
+      acctNotConnected: "未接入",
+      acctOrgLabel: "组织",
+      acctClose: "关闭",
+      acctSaved: "✅ 已连接!现在可以直接问我数据了。",
+      acctSwitched: "✅ 已切换账户。",
+      acctTokenBad: "Token 无效或已过期,请重新生成一个。",
       newChat: "✚ 新对话",
       newChatTitle: "开一个新对话(当前对话会存进左侧列表)",
       sidebarHead: "对话记录",
@@ -320,10 +435,46 @@
     },
     en: {
       title: "Ad Campaign Assistant",
-      sub: "Online · NewsBreak conversational ads",
+      sub: "Online · {p} conversational ads",
+      switchPlatform: "Switch platform",
+      notBoundTitle: "No {p} account linked yet",
+      notBoundBody: "Link an account to query data and manage delivery. Click the 🔗 button in the top bar and paste your {p} Access Token.",
+      notBoundBtn: "Link it now",
       tagline: "Data · Reports · Campaign control",
       langBtn: "🌐 中文",
       langBtnTitle: "切换为中文",
+      upUploading: (info) => `⏳ Uploading asset…\n📄 ${info}`,
+      upErrEmpty: "This file is empty (0 bytes) — try another one.",
+      upErrTooBig: (s) => `File too large (${s}); the limit is 100 MB. Please compress it first.`,
+      upErrWrongType: (ty) => `Unsupported file type (${ty}). Ad assets must be an image or a video.`,
+      upErrHttp: (code) => `Server returned HTTP ${code} without a reason. Try again; if it keeps happening, check the server log.`,
+      upErrNoUrl: "NewsBreak accepted the file but returned no asset URL. Please retry or use a different file.",
+      upErrTimeout: "Upload timed out (waited 3 minutes). The file may be too large or the connection too slow — try a smaller file.",
+      upErrNetwork: (m) => `Connection dropped — the request never reached the server (${m}).\nCommon causes: (1) the VS Code port-forward "bridge" died → remove and re-add port 18100; (2) the server just restarted; (3) the file was large enough that the connection was cut.\nRefresh the page, confirm chat still works, then upload again.`,
+      storageTrimmed: (n) => `⚠️ Browser storage was full — the ${n} oldest chat(s) were dropped to make room. Delete chats you no longer need to free up more.`,
+      storageFull: "⚠️ Browser storage is full; this chat may not be saved. Start a new chat or delete some old ones to continue.",
+      dashBtn: "📊 Dashboard",
+      dashBtnTitle: "Open the data dashboard (KPIs / trends / AI review)",
+      acctBtn: "🔗 Account",
+      acctBtnTitle: "Connect / switch ad account",
+      acctBtnUnlinked: "🔗 Not connected",
+      acctTitle: "🔗 Connect ad account",
+      acctDescLinked: "The assistant is connected to the NewsBreak account below. If you have more than one, click to switch.",
+      acctDescUnlinked: "No NewsBreak ad account connected yet. Paste your Access Token to connect.",
+      acctTokenLabel: "NewsBreak Access Token",
+      acctTokenPlaceholder: "Paste your Access Token…",
+      acctTokenHelp: "Where to get it: NewsBreak Ad Manager → Resources → API Access Tokens → generate and copy.",
+      acctSave: "Save & connect",
+      acctSaving: "Verifying…",
+      acctChange: "Change token",
+      acctPickLabel: "Choose the ad account to work with",
+      acctConnected: "Connected",
+      acctNotConnected: "Not connected",
+      acctOrgLabel: "Organization",
+      acctClose: "Close",
+      acctSaved: "✅ Connected! You can start asking about your data.",
+      acctSwitched: "✅ Account switched.",
+      acctTokenBad: "Token is invalid or expired — please generate a new one.",
       newChat: "✚ New chat",
       newChatTitle: "Start a new chat (the current one is saved to the list on the left)",
       sidebarHead: "Chats",
@@ -367,7 +518,7 @@
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
     document.title = d.title;
     document.getElementById("app-title").textContent = d.title;
-    document.getElementById("app-sub").textContent = d.sub;
+    document.getElementById("app-sub").textContent = d.sub.replace("{p}", PLATFORM_NAME);
     document.getElementById("app-tagline").textContent = d.tagline;
     document.getElementById("app-hint").textContent = d.hint;
 
@@ -379,6 +530,17 @@
     newChatBtn.textContent = d.newChat;
     newChatBtn.title = d.newChatTitle;
 
+    var dashBtn = document.getElementById("dash-btn");
+    if (dashBtn) { dashBtn.textContent = d.dashBtn; dashBtn.title = d.dashBtnTitle; }
+
+    // 账户按钮和弹窗也跟着换语言。
+    // 必须用 acctReady 判断:账户模块在本文件末尾才初始化,而 applyLang 在那之前就会被调用一次;
+    // 那时 renderAcctBtn 虽已"提升"可调用,但它依赖的 const 变量还没初始化,直接调会抛错、中断整个初始化。
+    if (acctReady) {
+      renderAcctBtn();
+      if (document.getElementById("acct-overlay").classList.contains("show")) renderAcctModal();
+    }
+
     document.getElementById("sidebar-head").textContent = d.sidebarHead;
     document.getElementById("sidebar-toggle").title = d.sidebarToggleTitle;
     if (typeof renderConvList === "function") renderConvList();
@@ -389,6 +551,8 @@
 
   // ===== 页面的"记忆":完整聊天记录。API 不记事,每次都把它全量发给后端 =====
   // 存在浏览器的 localStorage 里,刷新/关标签页都不会丢(换浏览器或清缓存才会没)
+  var acctReady;   // 账户模块是否已初始化(见文件末尾「广告账户接入」)
+
   const STORE_KEY = "adbot-chat-history";        // 老版本的单条历史(用于一次性迁移)
   const CONVS_KEY = "adbot-conversations";       // 新版:所有会话
   const CUR_KEY = "adbot-current-conv";          // 当前打开的是哪个会话
@@ -431,13 +595,55 @@
   }
 
   function saveConversations() {
-    try {
-      if (conversations.length > MAX_CONVS) conversations.length = MAX_CONVS;
-      localStorage.setItem(CONVS_KEY, JSON.stringify(conversations));
-      localStorage.setItem(CUR_KEY, currentId);
-    } catch (e) {
-      console.warn("对话存盘失败(可能超出浏览器容量):", e);
+    if (conversations.length > MAX_CONVS) conversations.length = MAX_CONVS;
+    // 浏览器每个站点约 5MB 存储空间。攒久了会满 ——
+    // 满了不能"悄悄存不进去"(用户会以为记录莫名其妙没了),
+    // 要主动腾地方:从最旧的对话开始丢,并且明确告诉用户丢了几个。
+    let dropped = 0;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try {
+        localStorage.setItem(CONVS_KEY, JSON.stringify(conversations));
+        localStorage.setItem(CUR_KEY, currentId);
+        if (dropped) notifyStorageTrim(dropped);
+        pushToServer();            // 登录了就同步到账号里(没登录是空操作)
+        return true;
+      } catch (e) {
+        // 只有当前这个对话了还存不下 → 认输,但要如实告诉用户
+        if (conversations.length <= 1) {
+          console.warn("对话存盘失败:", e);
+          notifyStorageFull();
+          return false;
+        }
+        // 丢掉最旧的一个(数组按更新时间倒序,末尾最旧)
+        conversations.pop();
+        dropped++;
+      }
     }
+    return false;
+  }
+
+  /** 存储满时腾了地方 —— 必须让用户知道,不能默默丢数据 */
+  function notifyStorageTrim(n) {
+    if (document.getElementById("storage-tip")) return;   // 同一轮只提示一次
+    const tip = document.createElement("div");
+    tip.id = "storage-tip";
+    tip.className = "restore-tip";
+    tip.style.color = "#b54708";
+    tip.textContent = t().storageTrimmed(n);
+    messagesEl.appendChild(tip);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    setTimeout(() => tip.remove(), 15000);
+  }
+
+  function notifyStorageFull() {
+    if (document.getElementById("storage-full")) return;
+    const tip = document.createElement("div");
+    tip.id = "storage-full";
+    tip.className = "restore-tip";
+    tip.style.color = "#b42318";
+    tip.textContent = t().storageFull;
+    messagesEl.appendChild(tip);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   /** 把当前 history 写回它所属的会话(每收发一条消息都会调) */
@@ -625,24 +831,61 @@
   const attachBtn = document.getElementById("attach");
   const fileInput = document.getElementById("file-input");
 
+  function prettySize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
+    if (bytes >= 1024) return Math.round(bytes / 1024) + " KB";
+    return bytes + " B";
+  }
+
   async function uploadFile(f) {
     if (!f) return;
+    const d = t();
+    const info = `${f.name || "(未命名)"} · ${prettySize(f.size || 0)}`;
+
+    // 上传前先自查,能在本地拦下的就别白跑一趟
+    if (!f.size) { addBubble("error", d.uploadFail + d.upErrEmpty); return; }
+    if (f.size > 100 * 1024 * 1024) {
+      addBubble("error", d.uploadFail + d.upErrTooBig(prettySize(f.size)));
+      return;
+    }
+    const kind = (f.type || "").split("/")[0];
+    if (f.type && kind !== "image" && kind !== "video") {
+      addBubble("error", d.uploadFail + d.upErrWrongType(f.type));
+      return;
+    }
+
     attachBtn.disabled = true;
     attachBtn.textContent = "⏳";
+    const tip = addBubble("bot", d.upUploading(info));   // 让用户知道正在传、传的是什么
+
     const form = new FormData();
     form.append("file", f, f.name || "pasted-image.png");
+
+    // 大文件也别无限等:3 分钟没结果就主动放弃并说清楚
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 180000);
+
     try {
-      const res = await fetch("/api/upload", { method: "POST", body: form });
-      const data = await res.json();
+      const res = await fetch("/api/upload", { method: "POST", body: form, signal: ctrl.signal });
+      let data = {};
+      try { data = await res.json(); } catch (e) { /* 返回的不是 JSON,下面按状态码兜底 */ }
+      tip.remove();
       if (!res.ok) {
-        addBubble("error", t().uploadFail + (data.error || res.status));
+        // 服务器有话说就照实转达(NewsBreak 的真实原因都在这儿),没话说才用状态码兜底
+        const reason = data.error || d.upErrHttp(res.status);
+        addBubble("error", `${d.uploadFail}${reason}\n📄 ${info}`);
+      } else if (!data.asset_url) {
+        addBubble("error", `${d.uploadFail}${d.upErrNoUrl}\n📄 ${info}`);
       } else {
-        // 上传成功:自动替用户发一条消息,把素材地址告诉 AI(向导会接着走下一步)
-        send(t().uploadedMsg(data.filename, data.asset_url));
+        send(d.uploadedMsg(data.filename, data.asset_url));
       }
     } catch (err) {
-      addBubble("error", t().uploadFail + err.message);
+      tip.remove();
+      // 走到这里是「网络层就失败了」——服务器没给出任何原因,只能解释可能性
+      const reason = err.name === "AbortError" ? d.upErrTimeout : d.upErrNetwork(err.message || err.name);
+      addBubble("error", `${d.uploadFail}${reason}\n📄 ${info}`);
     } finally {
+      clearTimeout(timer);
       attachBtn.disabled = false;
       attachBtn.textContent = "📎";
       fileInput.value = "";
@@ -838,6 +1081,292 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
     inputEl.focus();
   });
+
+  // ===== 🔗 广告账户接入 =====
+  // 注意:acctReady 用 var 声明(var 会提升并初始化为 undefined),
+  // 这样 applyLang() 在本模块初始化之前读它是安全的。
+  acctReady = false;
+  const acctBtn = document.getElementById("acct-btn");
+  const acctOverlay = document.getElementById("acct-overlay");
+  const acctBody = document.getElementById("acct-body");
+  const acctMsg = document.getElementById("acct-msg");
+  let acctState = null;          // 最近一次从后端拿到的接入状态
+  let showTokenForm = false;     // 是否正在显示"填 Token"表单
+
+  function setAcctMsg(text, kind) {
+    acctMsg.textContent = text || "";
+    acctMsg.className = "modal-msg" + (kind ? " " + kind : "");
+  }
+
+  // 顶栏按钮:接入了显示账户名,没接入显示醒目的橙色提示
+  function renderAcctBtn() {
+    const d = t();
+    if (acctState && acctState.connected) {
+      const active = (acctState.accounts || []).find((a) => a.id === acctState.active_account_id);
+      const name = active ? active.name : d.acctBtn;
+      acctBtn.textContent = "🔗 " + (name.length > 12 ? name.slice(0, 12) + "…" : name);
+      acctBtn.className = "ghost-btn linked";
+    } else {
+      acctBtn.textContent = d.acctBtnUnlinked;
+      acctBtn.className = "ghost-btn unlinked";
+    }
+    acctBtn.title = d.acctBtnTitle;
+  }
+
+  // 弹窗内容:根据"接没接入"渲染两种界面
+  function renderAcctModal() {
+    const d = t();
+    document.getElementById("acct-title").textContent = d.acctTitle;
+    document.getElementById("acct-close").textContent = d.acctClose;
+    const linked = acctState && acctState.connected;
+    document.getElementById("acct-desc").textContent = linked ? d.acctDescLinked : d.acctDescUnlinked;
+    acctBody.innerHTML = "";
+
+    // ① 没接入(或点了"更换 Token"):显示填写表单
+    if (!linked || showTokenForm) {
+      if (acctState && acctState.error) {
+        const bad = document.createElement("div");
+        bad.className = "acct-status bad";
+        bad.textContent = "⚠️ " + d.acctTokenBad;
+        acctBody.appendChild(bad);
+      }
+      const label = document.createElement("label");
+      label.textContent = d.acctTokenLabel;
+      const input = document.createElement("input");
+      input.type = "password";
+      input.id = "acct-token-input";
+      input.placeholder = d.acctTokenPlaceholder;
+      const help = document.createElement("div");
+      help.className = "desc";
+      help.style.marginTop = "8px";
+      help.textContent = d.acctTokenHelp;
+      const save = document.createElement("button");
+      save.className = "btn-primary";
+      save.style.marginTop = "14px";
+      save.textContent = d.acctSave;
+      save.onclick = async () => {
+        const token = input.value.trim();
+        if (!token) return;
+        save.disabled = true;
+        save.textContent = d.acctSaving;
+        setAcctMsg("");
+        try {
+          const res = await fetch("/api/account/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            setAcctMsg(data.error || "保存失败", "err");
+          } else {
+            acctState = data;
+            showTokenForm = false;
+            setAcctMsg(d.acctSaved, "ok");
+            renderAcctBtn();
+            renderAcctModal();
+            return;
+          }
+        } catch (e) {
+          setAcctMsg(String(e), "err");
+        }
+        save.disabled = false;
+        save.textContent = d.acctSave;
+      };
+      acctBody.appendChild(label);
+      acctBody.appendChild(input);
+      acctBody.appendChild(help);
+      acctBody.appendChild(save);
+      setTimeout(() => input.focus(), 50);
+      return;
+    }
+
+    // ② 已接入:显示组织 + 账户列表(可点击切换)
+    const org = (acctState.organizations || [])[0];
+    const status = document.createElement("div");
+    status.className = "acct-status";
+    status.textContent = `✅ ${d.acctConnected} · ${d.acctOrgLabel}:${org ? org.name : "-"}`;
+    acctBody.appendChild(status);
+
+    const label = document.createElement("label");
+    label.textContent = d.acctPickLabel;
+    acctBody.appendChild(label);
+
+    const list = document.createElement("div");
+    list.className = "acct-list";
+    (acctState.accounts || []).forEach((a) => {
+      const item = document.createElement("div");
+      item.className = "acct-item" + (a.id === acctState.active_account_id ? " active" : "");
+      const dot = document.createElement("span");
+      dot.textContent = a.id === acctState.active_account_id ? "🟢" : "⚪️";
+      const name = document.createElement("span");
+      name.textContent = a.name;
+      const aid = document.createElement("span");
+      aid.className = "aid";
+      aid.textContent = a.id;
+      item.append(dot, name, aid);
+      item.onclick = async () => {
+        if (a.id === acctState.active_account_id) return;
+        setAcctMsg("");
+        try {
+          const res = await fetch("/api/account/select", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ account_id: a.id }),
+          });
+          const data = await res.json();
+          if (!res.ok) { setAcctMsg(data.error || "切换失败", "err"); return; }
+          acctState = data;
+          setAcctMsg(d.acctSwitched, "ok");
+          renderAcctBtn();
+          renderAcctModal();
+        } catch (e) {
+          setAcctMsg(String(e), "err");
+        }
+      };
+      list.appendChild(item);
+    });
+    acctBody.appendChild(list);
+
+    const change = document.createElement("button");
+    change.className = "ghost-btn";
+    change.style.marginTop = "16px";
+    change.textContent = d.acctChange + "(" + acctState.token_masked + ")";
+    change.onclick = () => { showTokenForm = true; setAcctMsg(""); renderAcctModal(); };
+    acctBody.appendChild(change);
+  }
+
+  async function refreshAcct() {
+    try {
+      const res = await fetch("/api/account");
+      acctState = await res.json();
+    } catch (e) {
+      acctState = { connected: false };
+    }
+    renderAcctBtn();
+  }
+
+  acctBtn.addEventListener("click", () => {
+    showTokenForm = false;
+    setAcctMsg("");
+    renderAcctModal();
+    acctOverlay.classList.add("show");
+    refreshAcct().then(renderAcctModal);   // 打开时顺便刷新一次最新状态
+  });
+  document.getElementById("acct-close").addEventListener("click", () => acctOverlay.classList.remove("show"));
+  acctOverlay.addEventListener("click", (e) => { if (e.target === acctOverlay) acctOverlay.classList.remove("show"); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") acctOverlay.classList.remove("show"); });
+
+  acctReady = true;   // 到这里账户模块的变量和函数才真正可用
+  refreshAcct();      // 页面打开时先查一次,顶栏按钮立刻显示当前账户
+
+  // ===== 账号同步:登录后聊天记录存在服务器上,跟着账号走 =====
+  var serverUser = "";       // 当前登录的用户名(空=没启用登录/没登录)
+  var pushTimer = null;
+
+  /** 把本地记录推到服务器(攒 1 秒再发,避免每敲一句就请求一次) */
+  function pushToServer() {
+    if (!serverUser) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(function () {
+      fetch("/api/chats", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversations: conversations }),
+      }).catch(function (e) { console.warn("同步到账号失败:", e); });
+    }, 1000);
+  }
+
+  /** 开机时和服务器对一次账:服务器有就用服务器的,服务器空就把本地的传上去 */
+  function syncFromServer() {
+    fetch("/api/me")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.username) return;                     // 没启用登录 → 保持纯本地模式
+        serverUser = d.username;
+        renderUserChip();
+        return fetch("/api/chats").then(function (r) { return r.json(); }).then(function (data) {
+          var remote = (data && data.conversations) || [];
+          if (remote.length > 0) {
+            // 服务器上有 → 以服务器为准(这样换电脑登录也能看到)
+            conversations = remote;
+            currentId = (conversations[0] && conversations[0].id) || "";
+            history.length = 0;
+            var cur = conversations.find(function (c) { return c.id === currentId; });
+            if (cur) Array.prototype.push.apply(history, cur.messages || []);
+            try {
+              localStorage.setItem(CONVS_KEY, JSON.stringify(conversations));
+              localStorage.setItem(CUR_KEY, currentId);
+            } catch (e) { /* 本地缓存存不下不影响主流程 */ }
+            messagesEl.innerHTML = "";
+            if (history.length) restoreHistory(); else showWelcome();
+            renderConvList();
+          } else if (conversations.length > 0) {
+            // 服务器还空着,但本地有 → 把本地的传上去,不丢老记录
+            pushToServer();
+          }
+        });
+      })
+      .catch(function (e) { console.warn("读取账号信息失败:", e); });
+  }
+
+  function renderUserChip() {
+    var chip = document.getElementById("user-chip");
+    if (!chip || !serverUser) return;
+    chip.style.display = "";
+    chip.textContent = "👤 " + serverUser;
+    chip.title = "点击退出登录";
+    chip.style.cursor = "pointer";
+    chip.onclick = function () {
+      if (!confirm("确定退出登录吗?(记录已存在账号里,下次登录还能看到)")) return;
+      fetch("/api/logout", { method: "POST" }).finally(function () { location.href = "/login"; });
+    };
+  }
+
+  // ===== 平台信息:更新副标题;没绑账号就明确挡一道 =====
+  function loadPlatform() {
+    fetch("/api/platforms")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var p = (data.platforms || []).find(function (x) { return x.id === PLATFORM; });
+        if (!p) return;
+        PLATFORM_NAME = p.name;
+        PLATFORM_BOUND = !!p.bound;
+        applyLang();                       // 副标题里的 {p} 换成真实平台名
+        document.getElementById("platform-btn").title = t().switchPlatform;
+        if (!PLATFORM_BOUND || WANT_BIND) showNotBound(p);
+      })
+      .catch(function (e) { console.warn("读取平台信息失败:", e); });
+  }
+
+  /** 没绑定账号:在聊天区顶部贴一条醒目提示,并把输入框停用 */
+  function showNotBound(p) {
+    var d = t();
+    var row = document.createElement("div");
+    row.className = "row bot";
+    row.id = "not-bound";
+    var body = d.notBoundBody.replace(/\{p\}/g, p.name);
+    var hint = lang === "en" ? p.bind_hint_en : p.bind_hint_zh;
+    row.innerHTML =
+      '<div class="avatar bot">🔗</div>' +
+      '<div class="bubble" style="border-color:#d97706">' +
+        '<strong>⚠️ ' + escapeHtml(d.notBoundTitle.replace(/\{p\}/g, p.name)) + '</strong>' +
+        '<p>' + escapeHtml(body) + '</p>' +
+        (hint ? '<p style="font-size:12.5px;opacity:.8">' + escapeHtml(hint) + '</p>' : '') +
+        '<button class="ghost-btn" id="go-bind" style="margin-top:6px">' + escapeHtml(d.notBoundBtn) + '</button>' +
+      '</div>';
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    var btn = document.getElementById("go-bind");
+    if (btn) btn.onclick = function () { document.getElementById("acct-btn").click(); };
+    // 没绑定就别让用户白打字
+    inputEl.disabled = true;
+    inputEl.placeholder = d.notBoundTitle.replace(/\{p\}/g, p.name);
+    sendBtn.disabled = true;
+  }
+
+  loadPlatform();
+  syncFromServer();
 
   inputEl.focus();
 </script>

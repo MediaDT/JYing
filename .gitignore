@@ -9,3 +9,6 @@ __pycache__/
 # 运行时产生的文件
 server.log
 pending_actions.json
+
+# 账号数据(密码哈希 + 每个账号的聊天记录),绝不能进 git
+data/

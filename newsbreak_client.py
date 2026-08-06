@@ -353,3 +353,74 @@ def create_ad(ad_set_id: str, name: str, creative: dict, status: str = "OFF") ->
     return _request_json("POST", "/ad/create", {
         "adSetId": ad_set_id, "name": name, "status": status, "creative": creative,
     })
+
+
+# ============ 仪表盘用的「原始数字」报表 ============
+# get_report 返回的是给 AI 看的格式化字符串($1.23 / 1.88%);
+# 画图和算总计需要的是**纯数字**,所以单独一个函数,不改动原来的。
+
+def get_report_raw(level: str = "campaign", start_date: str = "", end_date: str = "",
+                   ad_account_id: str = "") -> list[dict]:
+    """按层级拉报表,返回纯数字(金额=美元 float,百分比=百分数 float)。"""
+    dimension, id_key, name_key = _REPORT_LEVELS[level]
+    return _fetch_rows([dimension], id_key, name_key, start_date, end_date, ad_account_id)
+
+
+def get_daily_raw(start_date: str, end_date: str, ad_account_id: str = "") -> list[dict]:
+    """按天拉数据,用于画趋势图。
+
+    ⚠️ 平台规则(实测):DATE 维度**跨度上限约 31 天**,32 天就报 400 Invalid parameters。
+    调用方需自行控制区间长度。
+    """
+    return _fetch_rows(["DATE"], "date", "date", start_date, end_date, ad_account_id)
+
+
+def _fetch_rows(dimensions: list[str], id_key: str, name_key: str,
+                start_date: str, end_date: str, ad_account_id: str) -> list[dict]:
+    body = {
+        "name": "my-agent-dashboard",
+        "dateRange": "FIXED",
+        "startDate": start_date,
+        "endDate": end_date,
+        "dimensions": dimensions,
+        "metrics": ["COST", "IMPRESSION", "CPM"],   # 平台不管申请几个都返回全部 32 字段
+    }
+    if ad_account_id:
+        body["adAccountIds"] = [ad_account_id]
+    data = _post_json("/reports/getIntegratedReport", body)
+
+    def num(row: dict, keys: list[str], default: float = 0.0) -> float:
+        for k in keys:
+            v = row.get(k)
+            if v not in (None, ""):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+        return default
+
+    out = []
+    for row in data.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        key = row.get(id_key)
+        if key in (None, ""):
+            continue
+        out.append({
+            "id": str(key),
+            "name": str(row.get(name_key) or key),
+            # 金额:平台给的是"分",换成美元
+            "cost": round(num(row, ["costDecimal", "cost"]) / 100, 2),
+            "revenue": round(num(row, ["conversionValueDecimal", "conversionValue"]) / 100, 2),
+            "impressions": int(num(row, ["impression", "impressions"])),
+            "clicks": int(num(row, ["click", "clicks"])),
+            "conversions": int(num(row, ["conversion", "conversions"])),
+            # 百分比:平台给的是"万分点"(188 = 1.88%),换成百分数
+            "ctr": round(num(row, ["ctr"]) / 100, 2),
+            "cvr": round(num(row, ["cvr"]) / 100, 2),
+            "cpc": round(num(row, ["cpcDecimal", "cpc"]) / 100, 2),
+            "cpm": round(num(row, ["cpmDecimal", "cpm"]) / 100, 2),
+            "cpa": round(num(row, ["cpaDecimal", "cpa"], -100.0) / 100, 2),   # -1 表示平台没这项
+            "roas": round(num(row, ["roas"]) / 100, 2),
+        })
+    return out

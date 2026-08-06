@@ -20,7 +20,8 @@ function makeEl(tag) {
   });
   return el;
 }
-module.exports = function boot(store) {
+module.exports = function boot(store, opts) {
+  opts = opts || {};
   const registry = {};
   global.localStorage = {
     getItem: (k) => (k in store ? store[k] : null),
@@ -34,7 +35,17 @@ module.exports = function boot(store) {
     createElement: makeEl, querySelectorAll: () => [], addEventListener(){},
   };
   global.confirm = () => true;
-  global.fetch = () => Promise.resolve({ ok:true, json: async () => ({reply:"ok"}) });
+  // 网址栏(带 ?platform= / ?bind=1 时用得上)
+  global.location = { search: opts.search || "", href: "/", pathname: "/", assign(){}, replace(){} };
+  // fetch 按 URL 分发,默认还是老行为,保证旧测试不受影响
+  global.fetch = (url, init) => {
+    const u = String(url || "");
+    let body = { reply: "ok" };
+    if (u.indexOf("/api/platforms") === 0) body = opts.platforms || { platforms: [], default: "newsbreak" };
+    else if (u.indexOf("/api/me") === 0) body = opts.me || {};
+    else if (opts.fetchBody) body = opts.fetchBody(u, init) || body;
+    return Promise.resolve({ ok: true, status: 200, json: async () => body });
+  };
   global.setTimeout = () => 0; global.clearTimeout = () => {};
   const html = fs.readFileSync("/root/workspace/my-agent/static/index.html", "utf8");
   const js = html.match(/<script>([\s\S]*?)<\/script>/g).pop().replace(/<\/?script>/g, "");

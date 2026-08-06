@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>选择投放平台 · 广告投放小助手</title>
+<style>
+  :root {
+    --bg: #eef1f6; --panel: #ffffff; --text: #1d2129; --muted: #7a8190;
+    --accent1: #4f6ef7; --accent2: #7b5ff5; --border: #e4e8ef;
+    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 8px 24px -8px rgba(16,24,40,.12);
+    --good: #067647; --warn: #b54708;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1015; --panel: #171a21; --text: #e9ebef; --muted: #8b93a1;
+      --accent1: #5b7cff; --accent2: #8b6cf8; --border: #262b36;
+      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px -8px rgba(0,0,0,.6);
+      --good: #75e0a7; --warn: #fec84b;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100dvh; color: var(--text);
+    background:
+      radial-gradient(900px 480px at 18% -10%, color-mix(in srgb, var(--accent1) 15%, transparent), transparent 60%),
+      radial-gradient(800px 460px at 88% -5%, color-mix(in srgb, var(--accent2) 13%, transparent), transparent 60%),
+      var(--bg);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px clamp(16px, 4vw, 40px);
+  }
+  .logo {
+    width: 38px; height: 38px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    display: grid; place-items: center; font-size: 20px;
+  }
+  .brand h1 { font-size: 15.5px; font-weight: 700; }
+  .brand .sub { font-size: 12px; color: var(--muted); }
+  .spacer { margin-left: auto; }
+  .btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 7px 14px; font-size: 12.5px; cursor: pointer;
+    font-family: inherit; transition: all .15s ease; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent1); color: var(--accent1); }
+
+  main { max-width: 1000px; margin: 0 auto; padding: 10px clamp(16px, 4vw, 40px) 60px; }
+  .head { margin-bottom: 26px; }
+  .head h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .head p { font-size: 13.5px; color: var(--muted); line-height: 1.7; }
+
+  .cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1.5px solid var(--border); border-radius: 16px;
+    padding: 20px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 10px;
+    transition: all .16s ease;
+  }
+  .card.ready { cursor: pointer; }
+  .card.ready:hover { border-color: var(--accent1); transform: translateY(-2px); }
+  .card.coming { opacity: .62; }
+  .card-top { display: flex; align-items: center; gap: 11px; }
+  .card-icon { font-size: 26px; line-height: 1; }
+  .card-name { font-size: 15.5px; font-weight: 700; }
+  .card-desc { font-size: 12.5px; color: var(--muted); line-height: 1.65; flex: 1; }
+  .badge {
+    margin-left: auto; font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border); white-space: nowrap;
+  }
+  .badge.bound { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent);
+                 background: color-mix(in srgb, var(--good) 10%, transparent); }
+  .badge.unbound { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+                   background: color-mix(in srgb, var(--warn) 10%, transparent); }
+  .badge.coming { color: var(--muted); }
+  .card-action {
+    margin-top: 4px; padding: 9px; border-radius: 11px; border: 0; cursor: pointer;
+    font: inherit; font-size: 13px; font-weight: 600; color: #fff;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+  }
+  .card-action.ghost {
+    background: transparent; color: var(--warn); border: 1.5px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  }
+  .card-action:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+  .hint { font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+  .loading { text-align: center; color: var(--muted); padding: 50px; font-size: 13.5px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">🤖</div>
+    <div class="brand">
+      <h1 id="brand-title">广告投放小助手</h1>
+      <div class="sub" id="brand-sub">选择一个投放平台</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="btn" id="user-chip" style="display:none;cursor:pointer"></span>
+    <button class="btn" id="lang-toggle">🌐 EN</button>
+  </header>
+
+  <main>
+    <div class="head">
+      <h2 id="head-title">你想管理哪个平台的广告?</h2>
+      <p id="head-desc">选一个平台就能开始对话式投放。没绑账号的平台会提示你先绑定。</p>
+    </div>
+    <div class="cards" id="cards"><div class="loading" id="loading">加载中…</div></div>
+  </main>
+
+<script>
+  var I18N = {
+    zh: {
+      title: "广告投放小助手", sub: "选择一个投放平台",
+      headTitle: "你想管理哪个平台的广告?",
+      headDesc: "选一个平台就能开始对话式投放。没绑账号的平台会提示你先绑定。",
+      langBtn: "🌐 EN", loading: "加载中…",
+      bound: "已绑定", unbound: "未绑定", coming: "敬请期待",
+      enter: "进入对话", bind: "先绑定账号", notReady: "还没上线",
+      bindHintPrefix: "绑定方式:",
+      logoutConfirm: "确定退出登录吗?(记录已存在账号里,下次登录还能看到)",
+      loadFail: "加载平台列表失败:",
+    },
+    en: {
+      title: "Ad Campaign Assistant", sub: "Pick a platform",
+      headTitle: "Which platform do you want to manage?",
+      headDesc: "Pick a platform to start chatting. Platforms without a linked account will ask you to connect first.",
+      langBtn: "🌐 中文", loading: "Loading…",
+      bound: "Connected", unbound: "Not connected", coming: "Coming soon",
+      enter: "Open chat", bind: "Connect account first", notReady: "Not available yet",
+      bindHintPrefix: "How to connect: ",
+      logoutConfirm: "Log out? (Your chats stay in your account and will be here next time.)",
+      loadFail: "Could not load platforms: ",
+    },
+  };
+  var LANG_KEY = "adbot-lang";     // 和聊天页、大屏共用同一个语言设置
+  var lang = localStorage.getItem(LANG_KEY) === "en" ? "en" : "zh";
+  function t() { return I18N[lang]; }
+
+  var DATA = null;
+
+  function applyLang() {
+    var d = t();
+    document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
+    document.title = d.headTitle;
+    document.getElementById("brand-title").textContent = d.title;
+    document.getElementById("brand-sub").textContent = d.sub;
+    document.getElementById("head-title").textContent = d.headTitle;
+    document.getElementById("head-desc").textContent = d.headDesc;
+    document.getElementById("lang-toggle").textContent = d.langBtn;
+    if (DATA) render();
+  }
+
+  document.getElementById("lang-toggle").addEventListener("click", function () {
+    lang = lang === "en" ? "zh" : "en";
+    localStorage.setItem(LANG_KEY, lang);
+    applyLang();
+  });
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function render() {
+    var d = t();
+    var box = document.getElementById("cards");
+    box.innerHTML = "";
+    DATA.platforms.forEach(function (p) {
+      var ready = p.status === "ready";
+      var card = document.createElement("div");
+      card.className = "card " + (ready ? "ready" : "coming");
+
+      var badgeCls = !ready ? "coming" : (p.bound ? "bound" : "unbound");
+      var badgeTxt = !ready ? d.coming : (p.bound ? d.bound : d.unbound);
+
+      var html =
+        '<div class="card-top">' +
+          '<span class="card-icon">' + p.icon + '</span>' +
+          '<span class="card-name">' + esc(p.name) + '</span>' +
+          '<span class="badge ' + badgeCls + '">' + badgeTxt + '</span>' +
+        '</div>' +
+        '<div class="card-desc">' + esc(lang === "en" ? p.desc_en : p.desc_zh) + '</div>';
+
+      if (ready && !p.bound) {
+        var hint = lang === "en" ? p.bind_hint_en : p.bind_hint_zh;
+        if (hint) html += '<div class="hint">' + d.bindHintPrefix + esc(hint) + '</div>';
+      }
+
+      html += ready
+        ? '<button class="card-action' + (p.bound ? '' : ' ghost') + '">' +
+            (p.bound ? d.enter : d.bind) + '</button>'
+        : '<button class="card-action" disabled>' + d.notReady + '</button>';
+
+      card.innerHTML = html;
+
+      if (ready) {
+        var go = function () {
+          // 不管绑没绑都进聊天页 —— 没绑的话聊天页会挡一道并引导绑定,
+          // 这样用户不会卡在选择页上不知道下一步点哪
+          location.href = "/?platform=" + encodeURIComponent(p.id) + (p.bound ? "" : "&bind=1");
+        };
+        card.onclick = go;
+        card.querySelector(".card-action").onclick = function (e) { e.stopPropagation(); go(); };
+      }
+      box.appendChild(card);
+    });
+  }
+
+  // 顶栏显示当前登录的人
+  fetch("/api/me").then(function (r) { return r.json(); }).then(function (d) {
+    if (!d.username) return;
+    var chip = document.getElementById("user-chip");
+    chip.style.display = "";
+    chip.textContent = "👤 " + d.username;
+    chip.onclick = function () {
+      if (!confirm(t().logoutConfirm)) return;
+      fetch("/api/logout", { method: "POST" }).finally(function () { location.href = "/login"; });
+    };
+  }).catch(function () {});
+
+  fetch("/api/platforms")
+    .then(function (r) { return r.json(); })
+    .then(function (d) { DATA = d; render(); })
+    .catch(function (e) {
+      document.getElementById("cards").innerHTML =
+        '<div class="loading">' + t().loadFail + esc(e.message) + '</div>';
+    });
+
+  applyLang();
+</script>
+</body>
+</html>

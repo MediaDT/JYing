@@ -15,6 +15,21 @@ const t = (name, ok, extra = "") => {
   console.log(`  ${ok ? "✅" : "❌"} ${name}${extra ? " → " + extra : ""}`);
 };
 
+console.log("【0】页面初始化跑到底 + 账户按钮可用");
+{
+  // 这条专防「初始化中途抛错」:一旦中断,后面的事件监听就挂不上,
+  // 表现是「点按钮没反应」,而 JS 语法检查抓不到这类问题。
+  const app = boot({});
+  const btn = app.registry["acct-btn"];
+  const overlay = app.registry["acct-overlay"];
+  t("账户按钮挂上了点击监听(证明初始化没中断)", !!(btn._h && btn._h.click));
+  btn.fire("click");
+  t("点击后弹窗打开", overlay.classList.contains("show"));
+  app.registry["acct-close"].fire("click");
+  t("点关闭后弹窗收起", !overlay.classList.contains("show"));
+  t("输入框也挂上了监听(初始化确实走完了)", !!(app.registry["input"]._h));
+}
+
 console.log("【1】老版本单条历史 → 自动迁移,且立刻落盘");
 {
   const store = { "adbot-chat-history": JSON.stringify([

@@ -40,8 +40,31 @@ def check(name: str, fn):
 
 def test_pure_logic():
     import newsbreak_client as nb
+    import platforms as plat
 
     print("\n【1】纯逻辑(不联网)")
+
+    # 平台注册表:没写对接代码的平台绝不能标成能用,否则用户点进去踩空
+    def t_platform_registry():
+        rows = plat.public_list()
+        if not rows:
+            return "平台列表是空的"
+        bad = []
+        for p in rows:
+            if p["status"] not in ("ready", "coming"):
+                bad.append(f"{p['id']} 状态怪:{p['status']}")
+            if p["status"] == "coming" and p["bound"]:
+                bad.append(f"{p['id']} 还没对接却标成已绑定")
+            for k in ("id", "name", "icon", "desc_zh", "desc_en"):
+                if not p.get(k):
+                    bad.append(f"{p['id']} 缺字段 {k}")
+        if not plat.is_ready(plat.DEFAULT_ID):
+            bad.append(f"默认平台 {plat.DEFAULT_ID} 不是 ready")
+        if plat.get("查无此平台") is not None:
+            bad.append("不存在的平台 id 居然查到了东西")
+        return bad or True
+
+    check("平台注册表自洽(未对接的不会假装能用)", t_platform_registry)
 
     def t_creative_type():
         cases = [
@@ -218,12 +241,45 @@ def test_http():
     print("\n【5】HTTP 接口")
     client = TestClient(srv.app)
 
-    check("首页能打开", lambda: True if client.get("/").status_code == 200 else "首页打不开")
-    check("接口文档已关闭(/docs)", lambda: True if client.get("/docs").status_code == 404 else "/docs 还开着")
-    check("接口文档已关闭(/openapi.json)",
-          lambda: True if client.get("/openapi.json").status_code == 404 else "/openapi.json 还开着")
+    # 未登录时:页面应跳登录页、接口应 401 —— 这是登录门在起作用
+    check("未登录访问首页会跳登录页",
+          lambda: True if client.get("/", follow_redirects=False).status_code == 302
+          else "没跳登录页,登录门可能失效了")
+    check("未登录访问接口被拦",
+          lambda: True if client.get("/api/dashboard", follow_redirects=False).status_code in (302, 401)
+          else "接口没拦住")
+    check("未登录访问平台选择页会跳登录",
+          lambda: True if client.get("/platforms", follow_redirects=False).status_code == 302
+          else "平台页没设防")
+    check("登录页本身可访问", lambda: True if client.get("/login").status_code == 200 else "登录页打不开")
     check("Markdown 渲染库在位",
           lambda: True if client.get("/static/marked.min.js").status_code == 200 else "marked.min.js 丢了")
+
+    # 登录后再验证页面和"接口文档不可访问"
+    import accounts as acc
+    had_users = acc.user_count() > 0
+    if not had_users:
+        client.post("/api/register", json={"username": "smoketest", "password": "smoke12345"})
+    else:
+        print("     (已有真实账号,跳过登录相关的页面检查)")
+
+    if not had_users:
+        check("登录后首页能打开",
+              lambda: True if client.get("/").status_code == 200 else "首页打不开")
+        # 文档必须"拿不到" —— 关掉时是 404,登录门先拦则是 302/401,都算安全
+        for path in ("/docs", "/openapi.json"):
+            check(f"接口文档不可访问({path})",
+                  lambda p=path: True if client.get(p, follow_redirects=False).status_code in (404, 302, 401)
+                  else f"{p} 还能打开")
+        check("每个账号的聊天记录是独立的",
+              lambda: True if client.get("/api/chats").json().get("conversations") == [] else "新账号不该有记录")
+        check("登录后平台选择页能打开",
+              lambda: True if client.get("/platforms").status_code == 200 else "平台页打不开")
+        # 清理测试账号,不留痕
+        import shutil, pathlib
+        users = acc.list_users()
+        if list(users) == ["smoketest"]:
+            shutil.rmtree(pathlib.Path(__file__).with_name("data"), ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>数据大屏 · 广告投放小助手</title>
+<style>
+  /* ===== 设计变量:图表颜色取自已验证的调色板(浅/深各一套) ===== */
+  :root {
+    color-scheme: light;
+    --bg: #eef1f6;
+    --surface-1: #ffffff;          /* 卡片/图表底色 */
+    --text-primary: #1d2129;
+    --text-secondary: #52514e;
+    --muted: #7a8190;
+    --border: #e4e8ef;
+    --accent1: #4f6ef7;
+    --accent2: #7b5ff5;
+    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 6px 16px -6px rgba(16,24,40,.08);
+    --series-1: #2a78d6;           /* 分类槽1 蓝(趋势线) */
+    --series-2: #eb6834;           /* 分类槽2 橙 */
+    --series-3: #1baf7a;           /* 分类槽3 绿 */
+    --grid: #e8ecf2;
+    --good: #067647;
+    --warn: #b54708;
+    --bad:  #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --bg: #0e1015; --surface-1: #171a21; --text-primary: #e9ebef;
+      --text-secondary: #c3c2b7; --muted: #8b93a1; --border: #262b36;
+      --accent1: #5b7cff; --accent2: #8b6cf8;
+      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 16px -6px rgba(0,0,0,.5);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+      --grid: #262b36;
+      --good: #75e0a7; --warn: #fec84b; --bad: #fda29b;
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text-primary); min-height: 100vh;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+
+  /* ===== 顶栏 ===== */
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px clamp(16px, 3vw, 32px);
+    background: color-mix(in srgb, var(--surface-1) 85%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 11px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    display: grid; place-items: center; font-size: 18px;
+  }
+  h1 { font-size: 16px; font-weight: 700; }
+  .sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .spacer { margin-left: auto; }
+  .btn {
+    background: var(--surface-1); border: 1px solid var(--border); color: var(--text-secondary);
+    border-radius: 999px; padding: 7px 14px; font-size: 12.5px; cursor: pointer;
+    transition: all .15s ease; white-space: nowrap; font-family: inherit;
+  }
+  .btn:hover { border-color: var(--accent1); color: var(--accent1); }
+  .btn.active { background: var(--accent1); border-color: var(--accent1); color: #fff; }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    border: 0; border-radius: 999px; padding: 8px 18px; font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
+  .range-group { display: flex; gap: 6px; }
+
+  main { padding: 20px clamp(16px, 3vw, 32px) 40px; max-width: 1600px; margin: 0 auto; }
+
+  /* ===== KPI 卡片(headline 数字用数字卡,不用一根柱的柱状图)===== */
+  .kpi-row {
+    display: grid; gap: 12px; margin-bottom: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  }
+  .kpi {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px 16px; box-shadow: var(--shadow);
+  }
+  .kpi .label { font-size: 11.5px; color: var(--muted); letter-spacing: .2px; }
+  .kpi .value { font-size: 25px; font-weight: 700; margin-top: 5px; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .kpi .delta { font-size: 11.5px; margin-top: 5px; color: var(--muted); }
+  .kpi .delta.up { color: var(--good); }
+  .kpi .delta.down { color: var(--bad); }
+
+  /* ===== 图表卡片 ===== */
+  .grid { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 1100px) { .grid.two { grid-template-columns: 1.35fr 1fr; } }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 16px;
+    padding: 16px 18px; box-shadow: var(--shadow); margin-bottom: 14px;
+  }
+  .card h2 { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+  .card .hint { font-size: 11.5px; color: var(--muted); margin-bottom: 12px; }
+  .card-head { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card-head .hint { margin-bottom: 0; }
+  .metric-switch { display: flex; gap: 5px; margin-left: auto; flex-wrap: wrap; }
+  .metric-switch .btn { padding: 4px 11px; font-size: 11.5px; }
+
+  svg { display: block; width: 100%; overflow: visible; }
+  .axis-label { font-size: 10.5px; fill: var(--muted); }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .axis-line { stroke: var(--border); stroke-width: 1; }
+
+  /* ===== 表格 ===== */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
+  th, td { padding: 9px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface-1); }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--accent1) 5%, transparent); }
+  tbody tr:hover td:first-child { background: color-mix(in srgb, var(--accent1) 5%, var(--surface-1)); }
+  td.num { font-variant-numeric: tabular-nums; }
+
+  /* ===== AI 诊断区 ===== */
+  #ai-box { line-height: 1.75; font-size: 13.5px; }
+  #ai-box h2 { font-size: 14px; margin: 16px 0 6px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+  #ai-box h2:first-child { margin-top: 0; }
+  #ai-box ul, #ai-box ol { margin: 6px 0; padding-left: 22px; }
+  #ai-box li { margin: 5px 0; }
+  #ai-box p { margin: 7px 0; }
+  #ai-box table { margin: 10px 0; font-size: 12.5px; }
+  #ai-box code { background: color-mix(in srgb, var(--accent1) 10%, transparent); padding: 1px 6px; border-radius: 5px; }
+  #ai-box strong { color: var(--text-primary); }
+  .placeholder { color: var(--muted); font-size: 13px; text-align: center; padding: 26px 12px; }
+  .spinner { display: inline-flex; gap: 5px; }
+  .spinner i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
+  .spinner i:nth-child(2) { animation-delay: .2s; }
+  .spinner i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,80%,100% { opacity: .25 } 40% { opacity: 1 } }
+
+  .empty { text-align: center; color: var(--muted); padding: 34px 12px; font-size: 13px; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">📊</div>
+    <div>
+      <h1 id="page-title">数据大屏</h1>
+      <div class="sub" id="range-sub">加载中…</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="range-group" id="range-btns"></div>
+    <button class="btn" id="lang-toggle">🌐 EN</button>
+    <button class="btn" id="back-btn" onclick="location.href='/'">💬 回到聊天</button>
+  </header>
+
+  <main>
+    <div class="kpi-row" id="kpis"></div>
+
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 id="trend-title">每日趋势</h2>
+            <div class="hint" id="trend-hint">按天看走势</div>
+          </div>
+          <div class="metric-switch" id="metric-btns"></div>
+        </div>
+        <div id="trend-chart"></div>
+      </div>
+
+      <div class="card">
+        <h2 id="bar-title">各计划花费对比</h2>
+        <div class="hint" id="bar-hint">颜色越深花得越多</div>
+        <div id="bar-chart"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2 id="ai-title">🤖 AI 投放诊断</h2>
+          <div class="hint" id="ai-hint">让 AI 读一遍上面的真实数据,指出问题并给出可执行的优化建议</div>
+        </div>
+        <button class="btn-primary" id="analyze-btn" style="margin-left:auto"></button>
+      </div>
+      <div id="ai-box"><div class="placeholder">点右上角「开始分析」,AI 会基于当前时间段的数据给出诊断</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2 id="table-title">明细数据</h2>
+          <div class="hint" id="table-hint">点上方按钮切换层级</div>
+        </div>
+        <div class="metric-switch" id="level-btns"></div>
+      </div>
+      <div class="table-wrap" id="table-box"></div>
+    </div>
+  </main>
+
+<script src="/static/marked.min.js" async onload="window.onMarkedReady && window.onMarkedReady()"></script>
+<script>
+  // ===== 中英文词条(和聊天页共用同一个存储键,一边切换另一边也跟着) =====
+  var LANG_KEY = "adbot-lang";
+  var lang = localStorage.getItem(LANG_KEY) === "en" ? "en" : "zh";
+
+  var I18N = {
+    zh: {
+      title: "数据大屏", back: "💬 回到聊天", langBtn: "🌐 EN", langTitle: "Switch to English",
+      loading: "加载中…", rangeFmt: function (a, b, d) { return a + " ~ " + b + " · 共 " + d + " 天"; },
+      days: function (d) { return "近 " + d + " 天"; },
+      loadFail: "加载失败:",
+      kpi: { cost: "花费", impressions: "展示", clicks: "点击", ctr: "点击率 CTR",
+             conversions: "转化", cpc: "单次点击 CPC", cpa: "转化成本 CPA", roas: "投产比 ROAS" },
+      deltaSuffix: "环比上期", noPrev: "上期无数据",
+      trendTitle: "每日趋势", trendHint: "按天看走势",
+      trendHintCapped: "按天看走势(平台限制,趋势只显示最近 31 天)",
+      trendEmpty: "这段时间没有按天数据",
+      barTitle: "各计划花费对比", barHint: "颜色越深花得越多", barEmpty: "这段时间没有花费",
+      aiTitle: "🤖 AI 投放诊断", aiHint: "让 AI 读一遍上面的真实数据,指出问题并给出可执行的优化建议",
+      aiBtn: "开始分析", aiBtnAgain: "重新分析", aiBtnBusy: "分析中…",
+      aiPlaceholder: "点右上角「开始分析」,AI 会基于当前时间段的数据给出诊断",
+      aiWorking: "AI 正在读这段时间的数据…(可能要二三十秒)",
+      aiFail: "分析失败:",
+      tableTitle: "明细数据", tableHint: "点上方按钮切换层级", tableEmpty: "这段时间没有数据",
+      levels: { campaigns: "计划", ad_sets: "广告组", ads: "广告" },
+      metrics: { cost: "花费", clicks: "点击", impressions: "展示", conversions: "转化" },
+      cols: ["名称", "花费", "展示", "点击", "CTR", "转化", "CVR", "CPC", "CPM", "CPA", "收入", "ROAS"],
+      tipSpend: "花费", tipClicks: "点击",
+    },
+    en: {
+      title: "Dashboard", back: "💬 Back to chat", langBtn: "🌐 中文", langTitle: "切换为中文",
+      loading: "Loading…", rangeFmt: function (a, b, d) { return a + " ~ " + b + " · " + d + " days"; },
+      days: function (d) { return "Last " + d + "d"; },
+      loadFail: "Failed to load: ",
+      kpi: { cost: "Spend", impressions: "Impressions", clicks: "Clicks", ctr: "CTR",
+             conversions: "Conversions", cpc: "CPC", cpa: "CPA", roas: "ROAS" },
+      deltaSuffix: "vs previous", noPrev: "No prior data",
+      trendTitle: "Daily trend", trendHint: "Day-by-day movement",
+      trendHintCapped: "Day-by-day movement (platform limit: trend shows the last 31 days only)",
+      trendEmpty: "No daily data in this period",
+      barTitle: "Spend by campaign", barHint: "Darker = spent more", barEmpty: "No spend in this period",
+      aiTitle: "🤖 AI campaign review", aiHint: "Let the AI read the real data above, flag problems and give actionable fixes",
+      aiBtn: "Analyse", aiBtnAgain: "Re-analyse", aiBtnBusy: "Analysing…",
+      aiPlaceholder: "Click “Analyse” — the AI will review the data for the selected period",
+      aiWorking: "The AI is reading this period's data… (this can take 20–30s)",
+      aiFail: "Analysis failed: ",
+      tableTitle: "Detailed data", tableHint: "Switch level with the buttons above", tableEmpty: "No data in this period",
+      levels: { campaigns: "Campaigns", ad_sets: "Ad sets", ads: "Ads" },
+      metrics: { cost: "Spend", clicks: "Clicks", impressions: "Impressions", conversions: "Conversions" },
+      cols: ["Name", "Spend", "Impr.", "Clicks", "CTR", "Conv.", "CVR", "CPC", "CPM", "CPA", "Revenue", "ROAS"],
+      tipSpend: "Spend", tipClicks: "Clicks",
+    },
+  };
+  function t() { return I18N[lang]; }
+
+  // ===== 状态 =====
+  var DAYS = 30;                 // 当前时间范围
+  var METRIC = "cost";           // 趋势图当前指标(一次只看一个,不用双轴)
+  var LEVEL = "campaigns";       // 明细表当前层级
+  var DATA = null;
+
+  var METRICS = {
+    cost:        { fmt: function (v) { return "$" + fmtNum(v, 2); } },
+    clicks:      { fmt: function (v) { return fmtNum(v, 0); } },
+    impressions: { fmt: function (v) { return fmtNum(v, 0); } },
+    conversions: { fmt: function (v) { return fmtNum(v, 0); } },
+  };
+  function metricLabel(k) { return t().metrics[k]; }
+
+  function fmtNum(v, digits) {
+    if (v === null || v === undefined) return "—";
+    return Number(v).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // ===== 顶栏按钮 =====
+  [7, 30, 90, 180].forEach(function (d) {
+    var b = document.createElement("button");
+    b.className = "btn" + (d === DAYS ? " active" : "");
+    b.textContent = t().days(d);
+    b.onclick = function () { DAYS = d; renderRangeBtns(); load(); };
+    b.dataset.days = d;
+    document.getElementById("range-btns").appendChild(b);
+  });
+  function renderRangeBtns() {
+    document.querySelectorAll("#range-btns .btn").forEach(function (b) {
+      b.classList.toggle("active", Number(b.dataset.days) === DAYS);
+    });
+  }
+
+  Object.keys(METRICS).forEach(function (k) {
+    var b = document.createElement("button");
+    b.className = "btn" + (k === METRIC ? " active" : "");
+    b.textContent = metricLabel(k);
+    b.dataset.metric = k;
+    b.onclick = function () { METRIC = k; renderMetricBtns(); drawTrend(); };
+    document.getElementById("metric-btns").appendChild(b);
+  });
+  function renderMetricBtns() {
+    document.querySelectorAll("#metric-btns .btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.metric === METRIC);
+    });
+  }
+
+  ["campaigns", "ad_sets", "ads"].forEach(function (key) {
+    var b = document.createElement("button");
+    b.className = "btn" + (key === LEVEL ? " active" : "");
+    b.textContent = t().levels[key];
+    b.dataset.level = key;
+    b.onclick = function () { LEVEL = key; renderLevelBtns(); drawTable(); };
+    document.getElementById("level-btns").appendChild(b);
+  });
+  function renderLevelBtns() {
+    document.querySelectorAll("#level-btns .btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.level === LEVEL);
+    });
+  }
+
+  // ===== KPI 卡片 =====
+  function drawKPIs() {
+    var k = DATA.kpi, p = DATA.kpi_prev;
+    var L = t().kpi;
+    var cards = [
+      [L.cost,        "$" + fmtNum(k.cost, 2),  k.cost, p.cost, false],
+      [L.impressions, fmtNum(k.impressions, 0), k.impressions, p.impressions, true],
+      [L.clicks,      fmtNum(k.clicks, 0),      k.clicks, p.clicks, true],
+      [L.ctr,         k.ctr + "%",              k.ctr, p.ctr, true],
+      [L.conversions, fmtNum(k.conversions, 0), k.conversions, p.conversions, true],
+      [L.cpc,         "$" + fmtNum(k.cpc, 2),   k.cpc, p.cpc, false],
+      [L.cpa,         k.cpa === null ? "—" : "$" + fmtNum(k.cpa, 2), k.cpa, p.cpa, false],
+      [L.roas,        k.roas === null ? "—" : k.roas + "×", k.roas, p.roas, true],
+    ];
+    document.getElementById("kpis").innerHTML = cards.map(function (c) {
+      var label = c[0], value = c[1], now = c[2], prev = c[3], higherIsBetter = c[4];
+      var delta = "";
+      if (prev !== null && prev !== undefined && now !== null && Number(prev) > 0) {
+        var pct = (Number(now) - Number(prev)) / Number(prev) * 100;
+        var better = higherIsBetter ? pct > 0 : pct < 0;
+        var cls = Math.abs(pct) < 0.5 ? "" : (better ? "up" : "down");
+        delta = '<div class="delta ' + cls + '">' + (pct >= 0 ? "▲" : "▼") + " " +
+                Math.abs(pct).toFixed(1) + "% " + t().deltaSuffix + "</div>";
+      } else {
+        delta = '<div class="delta">' + t().noPrev + '</div>';
+      }
+      return '<div class="kpi"><div class="label">' + esc(label) + '</div>' +
+             '<div class="value">' + esc(value) + '</div>' + delta + '</div>';
+    }).join("");
+  }
+
+  // ===== 趋势折线(单系列,不用图例;标题已说明是什么) =====
+  function drawTrend() {
+    var box = document.getElementById("trend-chart");
+    var rows = (DATA && DATA.trend) || [];
+    document.getElementById("trend-hint").textContent =
+      DATA && DATA.trend_capped ? t().trendHintCapped : t().trendHint;
+    if (!rows.length) { box.innerHTML = '<div class="empty">' + t().trendEmpty + '</div>'; return; }
+
+    var W = 760, H = 260, ml = 56, mr = 16, mt = 12, mb = 34;
+    var iw = W - ml - mr, ih = H - mt - mb;
+    var vals = rows.map(function (r) { return Number(r[METRIC]) || 0; });
+    var max = Math.max.apply(null, vals) || 1;
+    var niceMax = niceCeil(max);
+    var x = function (i) { return ml + (rows.length === 1 ? iw / 2 : i * iw / (rows.length - 1)); };
+    var y = function (v) { return mt + ih - (v / niceMax) * ih; };
+
+    var parts = [];
+    // 横向网格线 + Y 轴刻度(recessive:细、淡)
+    // 注意:循环变量绝不能叫 t —— 全局的 t() 是翻译函数,
+    // var 会提升到整个函数开头,一旦重名,本函数里所有 t() 调用都会炸("t is not a function")
+    for (var gi = 0; gi <= 4; gi++) {
+      var v = niceMax * gi / 4, yy = y(v);
+      parts.push('<line class="grid-line" x1="' + ml + '" y1="' + yy + '" x2="' + (W - mr) + '" y2="' + yy + '"/>');
+      parts.push('<text class="axis-label" x="' + (ml - 8) + '" y="' + (yy + 3.5) + '" text-anchor="end">' +
+                 esc(shortNum(v)) + '</text>');
+    }
+    // X 轴日期(最多 6 个,避免挤在一起)
+    var step = Math.max(1, Math.ceil(rows.length / 6));
+    rows.forEach(function (r, i) {
+      if (i % step && i !== rows.length - 1) return;
+      parts.push('<text class="axis-label" x="' + x(i) + '" y="' + (H - 10) + '" text-anchor="middle">' +
+                 esc(String(r.name).slice(5)) + '</text>');
+    });
+    parts.push('<line class="axis-line" x1="' + ml + '" y1="' + (mt + ih) + '" x2="' + (W - mr) + '" y2="' + (mt + ih) + '"/>');
+
+    // 面积 + 折线(2px)+ 数据点(≥8px 命中区)
+    var line = rows.map(function (r, i) { return (i ? "L" : "M") + x(i) + " " + y(Number(r[METRIC]) || 0); }).join(" ");
+    var area = line + " L" + x(rows.length - 1) + " " + (mt + ih) + " L" + x(0) + " " + (mt + ih) + " Z";
+    parts.push('<path d="' + area + '" fill="var(--series-1)" opacity=".10"/>');
+    parts.push('<path d="' + line + '" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>');
+    rows.forEach(function (r, i) {
+      var v = Number(r[METRIC]) || 0;
+      parts.push('<circle cx="' + x(i) + '" cy="' + y(v) + '" r="3.5" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2"/>');
+      // 悬停:透明大圆做命中区,带原生 tooltip
+      parts.push('<circle cx="' + x(i) + '" cy="' + y(v) + '" r="12" fill="transparent"><title>' +
+                 esc(r.name + "\n" + metricLabel(METRIC) + ": " + METRICS[METRIC].fmt(v)) + '</title></circle>');
+    });
+
+    box.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' +
+                    metricLabel(METRIC) + '">' + parts.join("") + '</svg>';
+  }
+
+  function niceCeil(v) {
+    if (v <= 0) return 1;
+    var mag = Math.pow(10, Math.floor(Math.log10(v)));
+    return Math.ceil(v / mag * 2) / 2 * mag;
+  }
+  function shortNum(v) {
+    if (v >= 1000000) return (v / 1000000).toFixed(1) + "M";
+    if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k";
+    return v >= 10 ? Math.round(v) : Number(v.toFixed(1));
+  }
+
+  // ===== 各计划花费横向柱(量级比较 → 单色渐深) =====
+  function drawBars() {
+    var box = document.getElementById("bar-chart");
+    var rows = (DATA && DATA.campaigns || []).filter(function (r) { return r.cost > 0; }).slice(0, 8);
+    if (!rows.length) { box.innerHTML = '<div class="empty">' + t().barEmpty + '</div>'; return; }
+
+    var rowH = 34, W = 520, ml = 4, mr = 4;
+    var H = rows.length * rowH + 8;
+    var max = Math.max.apply(null, rows.map(function (r) { return r.cost; })) || 1;
+    var barW = W - ml - mr;
+
+    var parts = rows.map(function (r, i) {
+      var top = i * rowH + 4;
+      var w = Math.max(2, r.cost / max * barW * 0.72);
+      // 单色渐深:花得越多越深(sequential)
+      var op = 0.42 + 0.58 * (r.cost / max);
+      var label = String(r.name).length > 24 ? String(r.name).slice(0, 24) + "…" : String(r.name);
+      return '<g>' +
+        '<text class="axis-label" x="' + ml + '" y="' + (top + 10) + '">' + esc(label) + '</text>' +
+        '<rect x="' + ml + '" y="' + (top + 15) + '" width="' + w + '" height="10" rx="4" ' +
+              'fill="var(--series-1)" opacity="' + op.toFixed(2) + '"><title>' +
+              esc(r.name + "\n" + t().tipSpend + " $" + fmtNum(r.cost, 2) + " · " +
+                  t().tipClicks + " " + fmtNum(r.clicks, 0) + " · CTR " + r.ctr + "%") + '</title></rect>' +
+        '<text class="axis-label" x="' + (ml + w + 8) + '" y="' + (top + 24) + '" ' +
+              'style="fill:var(--text-secondary);font-variant-numeric:tabular-nums">$' +
+              esc(fmtNum(r.cost, 2)) + '</text>' +
+      '</g>';
+    });
+
+    box.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + t().barTitle + '">' +
+                    parts.join("") + '</svg>';
+  }
+
+  // ===== 明细表 =====
+  function drawTable() {
+    var rows = (DATA && DATA[LEVEL]) || [];
+    var box = document.getElementById("table-box");
+    if (!rows.length) { box.innerHTML = '<div class="empty">' + t().tableEmpty + '</div>'; return; }
+    var H = t().cols;
+    var cols = [
+      [H[0],  function (r) { return esc(r.name); }, false],
+      [H[1],  function (r) { return "$" + fmtNum(r.cost, 2); }, true],
+      [H[2],  function (r) { return fmtNum(r.impressions, 0); }, true],
+      [H[3],  function (r) { return fmtNum(r.clicks, 0); }, true],
+      [H[4],  function (r) { return r.ctr + "%"; }, true],
+      [H[5],  function (r) { return fmtNum(r.conversions, 0); }, true],
+      [H[6],  function (r) { return r.cvr + "%"; }, true],
+      [H[7],  function (r) { return "$" + fmtNum(r.cpc, 2); }, true],
+      [H[8],  function (r) { return "$" + fmtNum(r.cpm, 2); }, true],
+      [H[9],  function (r) { return r.cpa < 0 ? "—" : "$" + fmtNum(r.cpa, 2); }, true],
+      [H[10], function (r) { return "$" + fmtNum(r.revenue, 2); }, true],
+      [H[11], function (r) { return r.roas ? r.roas + "×" : "—"; }, true],
+    ];
+    box.innerHTML = '<table><thead><tr>' +
+      cols.map(function (c) { return "<th>" + c[0] + "</th>"; }).join("") +
+      '</tr></thead><tbody>' +
+      rows.map(function (r) {
+        return "<tr>" + cols.map(function (c) {
+          return '<td' + (c[2] ? ' class="num"' : "") + ">" + c[1](r) + "</td>";
+        }).join("") + "</tr>";
+      }).join("") + "</tbody></table>";
+  }
+
+  // ===== 拉数据 =====
+  function load() {
+    document.getElementById("range-sub").textContent = t().loading;
+    fetch("/api/dashboard?days=" + DAYS)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) {
+          document.getElementById("range-sub").innerHTML = '<span class="err">' + t().loadFail + esc(d.error) + "</span>";
+          return;
+        }
+        DATA = d;
+        document.getElementById("range-sub").textContent =
+          t().rangeFmt(d.range.start, d.range.end, d.range.days);
+        drawKPIs(); drawTrend(); drawBars(); drawTable();
+      })
+      .catch(function (e) {
+        document.getElementById("range-sub").innerHTML = '<span class="err">' + t().loadFail + esc(e.message) + "</span>";
+      });
+  }
+
+  // ===== AI 诊断 =====
+  var lastAnalysis = "";
+  document.getElementById("analyze-btn").addEventListener("click", function () {
+    var btn = this, box = document.getElementById("ai-box");
+    btn.disabled = true; btn.textContent = t().aiBtnBusy;
+    box.innerHTML = '<div class="placeholder"><div class="spinner"><i></i><i></i><i></i></div>' +
+                    '<div style="margin-top:10px">' + t().aiWorking + '</div></div>';
+    fetch("/api/analyze", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ days: DAYS, lang: lang }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { box.innerHTML = '<div class="placeholder err">' + t().aiFail + esc(d.error) + "</div>"; return; }
+        lastAnalysis = d.analysis || "";
+        renderAnalysis();
+      })
+      .catch(function (e) {
+        box.innerHTML = '<div class="placeholder err">' + t().aiFail + esc(e.message) + "</div>";
+      })
+      .finally(function () { btn.disabled = false; btn.textContent = t().aiBtnAgain; });
+  });
+
+  function renderAnalysis() {
+    if (!lastAnalysis) return;
+    var box = document.getElementById("ai-box");
+    box.innerHTML = window.marked ? marked.parse(esc(lastAnalysis), { breaks: true })
+                                  : "<pre style='white-space:pre-wrap'>" + esc(lastAnalysis) + "</pre>";
+  }
+  // 排版库晚到也能补上(它是 async 加载的,不阻塞页面)
+  window.onMarkedReady = renderAnalysis;
+
+  // ===== 中英切换:重画整页(和聊天页共用 adbot-lang,一边切另一边也跟着) =====
+  function applyLang() {
+    var d = t();
+    document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
+    document.title = d.title + " · " + (lang === "en" ? "Ad Campaign Assistant" : "广告投放小助手");
+    var set = function (id, text) { var el = document.getElementById(id); if (el) el.textContent = text; };
+    set("page-title", d.title);
+    set("trend-title", d.trendTitle);
+    set("bar-title", d.barTitle);
+    set("bar-hint", d.barHint);
+    set("ai-title", d.aiTitle);
+    set("ai-hint", d.aiHint);
+    set("table-title", d.tableTitle);
+    set("table-hint", d.tableHint);
+    set("back-btn", d.back);
+
+    var lb = document.getElementById("lang-toggle");
+    lb.textContent = d.langBtn; lb.title = d.langTitle;
+
+    // 三组按钮的文字
+    document.querySelectorAll("#range-btns .btn").forEach(function (b) { b.textContent = d.days(Number(b.dataset.days)); });
+    document.querySelectorAll("#metric-btns .btn").forEach(function (b) { b.textContent = d.metrics[b.dataset.metric]; });
+    document.querySelectorAll("#level-btns .btn").forEach(function (b) { b.textContent = d.levels[b.dataset.level]; });
+
+    // AI 分析按钮:已经分析过就显示"重新分析"
+    var ab = document.getElementById("analyze-btn");
+    if (!ab.disabled) ab.textContent = lastAnalysis ? d.aiBtnAgain : d.aiBtn;
+    if (!lastAnalysis) {
+      document.getElementById("ai-box").innerHTML = '<div class="placeholder">' + d.aiPlaceholder + "</div>";
+    }
+
+    // 有数据就重画(标签都变了)
+    if (DATA) {
+      document.getElementById("range-sub").textContent = d.rangeFmt(DATA.range.start, DATA.range.end, DATA.range.days);
+      drawKPIs(); drawTrend(); drawBars(); drawTable();
+    }
+  }
+
+  document.getElementById("lang-toggle").addEventListener("click", function () {
+    lang = lang === "en" ? "zh" : "en";
+    localStorage.setItem(LANG_KEY, lang);   // 和聊天页共用,那边打开也是这个语言
+    applyLang();
+    // 已有的 AI 分析是上一种语言写的,提示用户可重新分析
+    if (lastAnalysis) {
+      var note = document.createElement("div");
+      note.className = "placeholder";
+      note.style.paddingTop = "0";
+      note.textContent = lang === "en"
+        ? "↑ This review was written in the previous language — click “Re-analyse” for English."
+        : "↑ 上面这份诊断是用切换前的语言写的,点「重新分析」可换成中文。";
+      var box = document.getElementById("ai-box");
+      if (!box.querySelector(".lang-note")) { note.classList.add("lang-note"); box.appendChild(note); }
+    }
+  });
+
+  applyLang();
+  load();
+</script>
+</body>
+</html>

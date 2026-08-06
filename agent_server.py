@@ -9,7 +9,7 @@
 所以网页只跟这个后端说话,钥匙留在服务器这边。
 
 运行方法(在 my-agent 目录下):
-    ./venv/bin/uvicorn agent_server:app --host 0.0.0.0 --port 8100
+    ./venv/bin/uvicorn agent_server:app --host 0.0.0.0 --port 18100
 """
 
 import json
@@ -19,7 +19,7 @@ from pathlib import Path
 import anthropic
 import openai
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import errors as genai_errors
@@ -84,39 +84,56 @@ from fastapi import Request  # noqa: E402
 from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 
 
-class PasswordMiddleware(BaseHTTPMiddleware):
-    """给整个站点加一道密码门。没设密码就直接放行。"""
+import accounts as acc  # noqa: E402
+import platforms as plat  # noqa: E402
+
+SESSION_COOKIE = "adbot_session"
+
+# 不需要登录就能访问的地址:登录页本身、登录/注册接口、静态资源
+_PUBLIC_PATHS = {"/login", "/api/login", "/api/register", "/api/auth-status", "/favicon.ico"}
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """登录门。没登录的一律挡在外面(除了登录页和它要用的接口)。
+
+    一个账号都没有时也照样跳登录页 —— 登录页会自动切到"注册第一个账号"的界面。
+    这样打开网站永远是登录页,不会让人对着聊天页发懵。
+    """
 
     async def dispatch(self, request: Request, call_next):
-        # 每次请求都现读 .env:改密码立刻生效,不用重启
-        # (不能只靠启动时读——原本为空的键不会进环境变量,后来填了也读不到)
-        password = _read_env_value("APP_PASSWORD")
-        if not password:
-            return await call_next(request)      # 没设密码 = 不启用
+        path = request.url.path
+        if path in _PUBLIC_PATHS or path.startswith("/static/"):
+            return await call_next(request)
 
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(auth[6:]).decode("utf-8")
-                _, _, supplied = decoded.partition(":")
-                # compare_digest:防止通过"猜多久报错"来试密码
-                if secrets.compare_digest(supplied, password):
-                    return await call_next(request)
-            except Exception:
-                pass
+        user = acc.session_user(request.cookies.get(SESSION_COOKIE, ""))
+        if user:
+            request.state.user = user
+            return await call_next(request)
 
-        return JSONResponse(
-            status_code=401,
-            content={"error": "需要密码才能访问"},
-            # 注意:HTTP 头只能是 latin-1,不能写中文,否则会 500
-            headers={"WWW-Authenticate": 'Basic realm="AdBot"'},
-        )
+        # 页面请求 → 跳登录页;接口请求 → 回 401 让前端处理
+        if path.startswith("/api/"):
+            return JSONResponse(status_code=401, content={"error": "请先登录", "need_login": True})
+        return RedirectResponse("/login", status_code=302)
 
 
-app.add_middleware(PasswordMiddleware)
+app.add_middleware(AuthMiddleware)
 
 # 把 static/ 目录挂出来:页面里就能引用 /static/marked.min.js 这类文件
 app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
+
+
+def _scheduled_execute(level: str, object_id: str, status: str):
+    """定时任务到点时真正干活的函数(交给 scheduler 的看表线程调用)。"""
+    try:
+        return nb.update_status(level, object_id, status)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.on_event("startup")
+def _boot_scheduler():
+    """服务起来后挂上"看表"线程,每 30 秒检查有没有到点的定时任务。"""
+    sched.start_worker(_scheduled_execute)
 
 # 系统提示词:给 AI 大脑设定人设和职责。
 SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBreak 平台上的广告投放。
@@ -168,7 +185,14 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
 5) 执行结果只能来自 confirm_action 的返回值:所有 id 必须原样引用返回内容,严禁自己编造;
    工具返回 error 时必须如实告知失败和原因,绝不允许把失败说成成功;
    没有调用 confirm_action,就绝对不能说"已创建/已执行/已提交"。
-6) 调预算等其他写操作还没接上,涉及时说明需去后台手动操作。"""
+6) 调预算等其他写操作还没接上,涉及时说明需去后台手动操作。
+
+「定时任务」用户想让广告到点自动开/关时(如"每天早上9点打开"、"明天10点暂停"):
+- 用 propose_schedule 登记(同样要用户确认才生效);时间一律按**北京时间**理解;
+- kind 选 once(只一次)还是 daily(每天重复);不确定就问用户;
+- list_schedules 查看现有任务和上次执行结果,cancel_schedule 取消;
+- **必须提醒用户**:定时任务靠本服务持续运行,服务器关掉期间不会触发;
+  且错过超过15分钟的任务不会自动补跑(避免无人看管时突然开始花钱)。"""
 
 
 # 英文模式的人设。规则与中文版一一对应,只是换成英文表达 ——
@@ -242,6 +266,7 @@ After creation: report the three ids, stress that everything is PAUSED (OFF), an
 #       出错时返回 {"error": ...} 而不是抛异常,让大脑能把原因转告用户。
 
 import newsbreak_client as nb  # noqa: E402
+import scheduler as sched  # noqa: E402
 
 
 def list_organizations() -> dict:
@@ -579,7 +604,11 @@ def confirm_action(action_id: str) -> dict:
                          f"等用户下一条消息同意后,直接调用 confirm_action(action_id='{action_id}')。"}
     try:
         print(f"[write-op] 开始执行待办 {action_id}: {action.get('type')}", flush=True)
-        if action.get("type") == "create_campaign":
+        if action.get("type") == "schedule":
+            r = sched.add_task({k: v for k, v in action.items() if k not in ("type", "seq")})
+            result = {"error": r["error"]} if r.get("error") else {
+                "done": True, "detail": f"定时任务已生效(编号 {r['task_id']}),首次执行:{r.get('next_run', '-')}"}
+        elif action.get("type") == "create_campaign":
             result = _execute_create_campaign(action)
         else:
             result = {"done": True, "detail": nb.update_status(action["level"], action["object_id"], action["status"])}
@@ -600,6 +629,66 @@ def confirm_action(action_id: str) -> dict:
         return {"error": str(e)}
 
 
+def propose_schedule(kind: str, when: str, level: str, object_id: str,
+                     status: str, name: str = "") -> dict:
+    """登记一个「定时开启/暂停广告」待办(不会立即生效!需用户确认)。
+
+    kind: "once"(只执行一次)或 "daily"(每天重复);
+    when: once 用 "YYYY-MM-DD HH:MM",daily 用 "HH:MM"——**都按北京时间**;
+    level: "campaign"/"ad_set"/"ad";status: "ON"(到点开启)/"OFF"(到点暂停);
+    name: 对象名字,用于向用户复述。
+    登记后必须向用户复述"什么时间、对哪个对象、做什么",并附上待办编号,
+    等用户下一条消息确认后再 confirm_action。
+    """
+    status = status.upper()
+    if status not in ("ON", "OFF"):
+        return {"error": "status 只能是 ON(开启)或 OFF(暂停)"}
+    if level not in ("campaign", "ad_set", "ad"):
+        return {"error": "level 只能是 campaign / ad_set / ad"}
+    if kind not in ("once", "daily"):
+        return {"error": 'kind 只能是 once(执行一次)或 daily(每天重复)'}
+    # 先把时间校验一遍,格式不对就当场告诉用户,别等确认后才发现
+    parsed, err = sched.parse_when(kind, when)
+    if not parsed:
+        return {"error": err}
+
+    candidate = {
+        "type": "schedule",
+        "kind": kind, "when": when, "level": level,
+        "object_id": object_id, "status": status, "name": name,
+        "seq": _REQUEST_SEQ,
+    }
+    dup = _find_duplicate(candidate)
+    if dup:
+        return {"action_id": dup, "note": f"这件事此前已登记过(编号 {dup}),无需重复登记。"
+                                          f"请向用户复述并附上编号,用户同意后直接调 confirm_action。"}
+    action_id = uuid.uuid4().hex[:8]
+    PENDING_ACTIONS[action_id] = candidate
+    _save_actions()
+    verb = "开启" if status == "ON" else "暂停"
+    when_desc = f"每天 {when}(北京时间)" if kind == "daily" else sched.both_times(parsed)
+    print(f"[write-op] 登记定时任务待办 {action_id}: {when_desc} {verb} {name or object_id}", flush=True)
+    return {
+        "action_id": action_id,
+        "pending": f"定时{verb}:{when_desc} → {level}「{name or object_id}」",
+        "first_run": sched.both_times(parsed),
+        "note": "已登记待办,尚未生效。请向用户复述时间和动作(带上编号)并等确认。"
+                "另外要提醒用户:定时任务依赖本服务持续运行,服务停了就不会触发。",
+    }
+
+
+def list_schedules() -> dict:
+    """查看所有定时任务(含下次执行时间、上次执行结果)。"""
+    tasks = sched.list_tasks()
+    return {"schedules": tasks or "还没有任何定时任务",
+            "now": sched.both_times(sched.now_beijing())}
+
+
+def cancel_schedule(task_id: str) -> dict:
+    """取消一个已生效的定时任务(用 list_schedules 查到的 task_id)。"""
+    return sched.cancel_task(task_id)
+
+
 def cancel_action(action_id: str) -> dict:
     """取消之前登记的待办(用户不同意或改主意时调用)。"""
     removed = PENDING_ACTIONS.pop(action_id, None)
@@ -613,6 +702,7 @@ NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
+    propose_schedule, list_schedules, cancel_schedule,
 ]
 
 
@@ -653,10 +743,14 @@ def _all_ad_accounts() -> list[dict]:
 def _default_ad_account_id() -> str:
     """确定用哪个广告账户。
 
-    只有一个账户时直接用(绝大多数情况);**有多个时明确报错**,而不是默默挑第一个——
+    优先级:①用户在页面上选定的账户(.env 的 NEWSBREAK_AD_ACCOUNT_ID)→ ②名下唯一的账户。
+    有多个账户又没选过时**明确报错**,而不是默默挑第一个——
     静默挑错账户会把素材传进别人的账户,属于"不报错但结果全错"的坑。
     """
     global _CACHED_ACCOUNT_ID
+    picked = _read_env_value("NEWSBREAK_AD_ACCOUNT_ID")
+    if picked:
+        return picked
     if _CACHED_ACCOUNT_ID:
         return _CACHED_ACCOUNT_ID
     accounts = _all_ad_accounts()
@@ -664,9 +758,407 @@ def _default_ad_account_id() -> str:
         raise nb.NewsBreakError("名下没有任何广告账户")
     if len(accounts) > 1:
         listed = "、".join(f"{a['name']}(id={a['id']})" for a in accounts)
-        raise nb.NewsBreakError(f"你名下有 {len(accounts)} 个广告账户,请指定用哪个:{listed}")
+        raise nb.NewsBreakError(f"你名下有 {len(accounts)} 个广告账户,请在页面顶栏「🔗 账户」里选一个,或直接告诉我用哪个:{listed}")
     _CACHED_ACCOUNT_ID = accounts[0]["id"]
     return _CACHED_ACCOUNT_ID
+
+
+# ============ 广告账户接入(页面顶栏「🔗 账户」用的接口)============
+
+def _write_env_value(key: str, value: str) -> None:
+    """把某个键写进 .env(已存在就改值,不存在就追加),保留原有注释和排版。"""
+    env_path = Path(__file__).with_name(".env")
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    hit = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[i] = f"{key}={value}"
+            hit = True
+            break
+    if not hit:
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n")
+    os.environ[key] = value          # 同步进当前进程,立即生效
+    global _CACHED_ACCOUNT_ID
+    _CACHED_ACCOUNT_ID = ""          # 账户可能变了,清掉缓存
+
+
+def _mask(token: str) -> str:
+    """只回显掩码,绝不把完整 token 送回浏览器。"""
+    if not token:
+        return ""
+    return token[:4] + "•" * 8 + token[-4:] if len(token) > 10 else "•" * 8
+
+
+def _account_state() -> dict:
+    """当前接入状态:有没有 token、连到了哪个组织/账户、当前用哪个。"""
+    token = _read_env_value("NEWSBREAK_ACCESS_TOKEN") or os.environ.get("NEWSBREAK_ACCESS_TOKEN", "")
+    if not token.strip():
+        return {"connected": False, "token_masked": "", "organizations": [], "accounts": [], "active_account_id": ""}
+    try:
+        orgs = nb.list_organizations()
+        accounts = _all_ad_accounts()
+    except Exception as e:
+        # token 填了但用不了(过期/无效/网络问题)——如实告诉用户
+        return {"connected": False, "token_masked": _mask(token), "organizations": [], "accounts": [],
+                "active_account_id": "", "error": str(e)}
+    active = _read_env_value("NEWSBREAK_AD_ACCOUNT_ID")
+    if not active and len(accounts) == 1:
+        active = accounts[0]["id"]
+    return {
+        "connected": True,
+        "token_masked": _mask(token),
+        "organizations": [{"id": str(o.get("id") or o.get("orgId") or ""), "name": o.get("name") or ""} for o in orgs],
+        "accounts": [{"id": a["id"], "name": a.get("name") or a["id"]} for a in accounts],
+        "active_account_id": active,
+    }
+
+
+# ============ 数据大屏(仪表盘)============
+
+def _sum_kpi(rows: list[dict]) -> dict:
+    """把若干行汇总成总计。比率类**必须由总量重算**,不能把各行的比率平均——
+    那样小花费的行会和大花费的行等权,算出来的 CTR 是错的。"""
+    cost = sum(r["cost"] for r in rows)
+    revenue = sum(r["revenue"] for r in rows)
+    imp = sum(r["impressions"] for r in rows)
+    clicks = sum(r["clicks"] for r in rows)
+    conv = sum(r["conversions"] for r in rows)
+    return {
+        "cost": round(cost, 2),
+        "revenue": round(revenue, 2),
+        "impressions": imp,
+        "clicks": clicks,
+        "conversions": conv,
+        "ctr": round(clicks / imp * 100, 2) if imp else 0.0,
+        "cvr": round(conv / clicks * 100, 2) if clicks else 0.0,
+        "cpc": round(cost / clicks, 2) if clicks else 0.0,
+        "cpm": round(cost / imp * 1000, 2) if imp else 0.0,
+        "cpa": round(cost / conv, 2) if conv else None,      # None = 还没有转化,不是 0
+        "roas": round(revenue / cost, 2) if cost else None,
+    }
+
+
+@app.get("/api/dashboard")
+def dashboard_data(days: int = 30):
+    """仪表盘用的全部数据:总计 KPI、环比、按天趋势、三个层级的明细。"""
+    load_env_file()
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        days = max(1, min(int(days), 180))         # 平台报表上限 180 天
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=days - 1)
+        prev_start = start - timedelta(days=days)   # 上一个等长周期,用来算环比
+        prev_end = start - timedelta(days=1)
+        fmt = "%Y-%m-%d"
+        account_id = ""
+        try:
+            account_id = _default_ad_account_id()
+        except Exception:
+            pass                                    # 多账户没选时不阻塞,报表按 token 全量查
+
+        campaigns = nb.get_report_raw("campaign", start.strftime(fmt), today.strftime(fmt), account_id)
+        prev_rows = nb.get_report_raw("campaign", prev_start.strftime(fmt), prev_end.strftime(fmt), account_id)
+
+        # 趋势:DATE 维度平台限 31 天,超了就只取最近 31 天(并如实告诉前端)
+        trend_days = min(days, 31)
+        trend_start = today - timedelta(days=trend_days - 1)
+        try:
+            trend = nb.get_daily_raw(trend_start.strftime(fmt), today.strftime(fmt), account_id)
+        except Exception as e:
+            trend, trend_days = [], 0
+            print(f"[dashboard] 趋势数据获取失败: {e}", flush=True)
+
+        return {
+            "range": {"start": start.strftime(fmt), "end": today.strftime(fmt), "days": days},
+            "kpi": _sum_kpi(campaigns),
+            "kpi_prev": _sum_kpi(prev_rows),
+            "trend": sorted(trend, key=lambda r: r["name"]),
+            "trend_days": trend_days,
+            "trend_capped": days > 31,              # 前端据此说明"趋势只显示最近31天"
+            "campaigns": sorted(campaigns, key=lambda r: r["cost"], reverse=True),
+            "ad_sets": sorted(nb.get_report_raw("ad_set", start.strftime(fmt), today.strftime(fmt), account_id),
+                              key=lambda r: r["cost"], reverse=True),
+            "ads": sorted(nb.get_report_raw("ad", start.strftime(fmt), today.strftime(fmt), account_id),
+                          key=lambda r: r["cost"], reverse=True),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+class AnalyzeIn(BaseModel):
+    days: int = 30
+    lang: str = "zh"
+
+
+@app.post("/api/analyze")
+def analyze_data(body: AnalyzeIn):
+    """把仪表盘上的真实数据交给 AI,让它做诊断并给优化建议。"""
+    load_env_file()
+    data = dashboard_data(body.days)
+    if isinstance(data, JSONResponse):
+        return data
+    if not data["campaigns"]:
+        msg = ("这段时间没有任何投放数据,没什么可分析的。可以把时间范围放宽,或先把广告开起来跑几天。"
+               if body.lang != "en" else
+               "No delivery data in this period — nothing to analyse yet. Widen the date range, or start a campaign and let it run a few days.")
+        return {"analysis": msg}
+
+    zh = body.lang != "en"
+    # 数据部分两种语言共用(都是 JSON,不用翻)
+    payload = f"""[TOTALS] {json.dumps(data['kpi'], ensure_ascii=False)}
+[PREVIOUS PERIOD, same length] {json.dumps(data['kpi_prev'], ensure_ascii=False)}
+[BY CAMPAIGN] {json.dumps(data['campaigns'][:15], ensure_ascii=False)}
+[BY AD SET] {json.dumps(data['ad_sets'][:15], ensure_ascii=False)}
+[BY AD] {json.dumps(data['ads'][:20], ensure_ascii=False)}
+[DAILY TREND] {json.dumps(data['trend'][:31], ensure_ascii=False)}"""
+
+    if zh:
+        prompt = f"""你是资深的信息流广告优化师。下面是这个 NewsBreak 广告账户最近 {data['range']['days']} 天的真实投放数据。
+请做一次体检式分析,面向**完全不懂投放的新手**,用大白话。
+
+{payload}
+
+字段说明:cost花费(美元) revenue收入 impressions展示 clicks点击 conversions转化
+ctr点击率(%) cvr转化率(%) cpc单次点击成本 cpm千次展示成本 cpa单次转化成本(null=还没转化) roas投产比
+
+请按这四段输出(用 Markdown,可以用表格,但别太长):
+## 一句话结论
+整体健康度如何,一句话说清。
+## 看点(2~4条)
+表现好的地方,点名具体是哪条计划/广告,附数据。
+## 问题(2~4条)
+花钱多但没效果的、CTR 或转化异常的,点名并附数据。**要指出具体是哪一条**。
+## 建议怎么做(3~5条,按优先级)
+每条都要**具体可执行**:比如"暂停 xxx 广告(花了$X没转化)"、"把 xxx 的预算从$A调到$B"。
+如果数据太少不足以下结论,就直说"数据量还不够,建议先跑够 N 天/N 次点击再看",不要硬编结论。
+
+注意:不要编造数据里没有的数字;金额带 $ 符号;不确定的地方要说明。"""
+    else:
+        # 教训(见 CLAUDE.md):只在中文提示词末尾加一句 "reply in English" 不够牢 ——
+        # 满篇中文会把模型带跑。英文模式必须**整段提示词都用英文**,并把语言规则放在最前面。
+        prompt = f"""LANGUAGE RULE (absolute, overrides everything else): write your entire answer in **English only**.
+This holds even if the data contains Chinese names and even if you were previously answering in Chinese.
+
+You are a senior performance-marketing analyst. Below is {data['range']['days']} days of real
+delivery data from this NewsBreak ad account. Review it for someone who is **completely new to
+ad buying** — plain English, no jargon without a one-line explanation.
+
+{payload}
+
+Field guide: cost=spend(USD) revenue impressions clicks conversions
+ctr=click-through rate(%) cvr=conversion rate(%) cpc=cost per click cpm=cost per 1000 impressions
+cpa=cost per conversion (null = no conversions yet) roas=return on ad spend
+
+Answer in exactly these four sections (Markdown; tables allowed, keep it tight):
+## Bottom line
+Overall health in one sentence.
+## What is working (2-4 points)
+Name the specific campaign/ad and quote its numbers.
+## Problems (2-4 points)
+What is burning money with nothing to show, or has an abnormal CTR/conversion rate.
+**Name the specific campaign or ad** and quote its numbers.
+## What to do (3-5 points, highest priority first)
+Each must be **concrete and actionable**, e.g. "Pause ad X ($45 spent, 0 conversions)",
+"Raise the budget on Y from $A to $B".
+If there is not enough data to conclude anything, say so plainly ("not enough data yet — let it
+run N more days / until N clicks") rather than inventing a conclusion.
+
+Rules: never invent numbers that are not in the data; prefix money with $; flag anything uncertain."""
+
+    msgs = [ChatMessage(role="user", content=prompt)]
+    try:
+        brain = os.environ.get("BRAIN", "auto").strip().lower()
+        if brain == "openai" and os.environ.get("OPENAI_API_KEY"):
+            return {"analysis": ask_openai(msgs, body.lang)}
+        if os.environ.get("GEMINI_API_KEY"):
+            try:
+                return {"analysis": ask_gemini(msgs, body.lang)}
+            except genai_errors.APIError as e:
+                if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
+                    return {"analysis": ask_openai(msgs, body.lang)}
+                raise
+        if os.environ.get("OPENAI_API_KEY"):
+            return {"analysis": ask_openai(msgs, body.lang)}
+        return JSONResponse(status_code=500, content={"error": "还没配置 AI 大脑的钥匙"})
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"AI 分析失败:{e}"})
+
+
+@app.get("/dashboard")
+def dashboard_page():
+    """数据大屏页面。"""
+    return FileResponse(Path(__file__).with_name("static") / "dashboard.html")
+
+
+# ============ 登录 / 注册 / 每个账号的聊天记录 ============
+
+def _current_user(request: Request) -> dict | None:
+    return acc.session_user(request.cookies.get(SESSION_COOKIE, ""))
+
+
+@app.get("/login")
+def login_page():
+    """登录页(不需要登录就能看)。"""
+    return FileResponse(Path(__file__).with_name("static") / "login.html")
+
+
+@app.get("/platforms")
+def platforms_page():
+    """平台选择页:登录后先到这里挑一个投放平台。"""
+    return FileResponse(Path(__file__).with_name("static") / "platforms.html")
+
+
+@app.get("/api/platforms")
+def list_platforms():
+    """有哪些平台可选、各自绑没绑账号。"""
+    load_env_file()
+    return {"platforms": plat.public_list(), "default": plat.DEFAULT_ID}
+
+
+@app.get("/api/auth-status")
+def auth_status(request: Request):
+    """登录页用:问问现在是什么状态(有没有账号、要不要邀请码、是不是已登录)。"""
+    return {
+        "has_users": acc.user_count() > 0,
+        "invite_required": bool(_read_env_value("APP_PASSWORD")),
+        "logged_in_as": (_current_user(request) or {}).get("username", ""),
+    }
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterIn(BaseModel):
+    username: str
+    password: str
+    invite: str = ""
+
+
+@app.post("/api/login")
+def login(body: LoginIn):
+    user = acc.verify_user(body.username, body.password)
+    if user.get("error"):
+        return JSONResponse(status_code=401, content={"error": user["error"]})
+    token = acc.create_session(user)
+    resp = JSONResponse(content={"username": user["username"]})
+    # httponly:网页里的 JS 读不到这个 cookie,防止被脚本偷走
+    # samesite=lax:别的网站发起的请求不会自动带上它
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                    max_age=acc.SESSION_DAYS * 86400, path="/")
+    print(f"[auth] 登录: {user['username']}", flush=True)
+    return resp
+
+
+@app.post("/api/register")
+def register(body: RegisterIn):
+    """注册。若 .env 里设了 APP_PASSWORD,它就是「邀请码」,防止端口泄露后被随意注册。"""
+    invite_needed = _read_env_value("APP_PASSWORD")
+    if invite_needed and not secrets.compare_digest((body.invite or "").strip(), invite_needed):
+        return JSONResponse(status_code=403, content={"error": "邀请码不对(问管理员要 .env 里的 APP_PASSWORD)"})
+
+    created = acc.create_user(body.username, body.password)
+    if created.get("error"):
+        return JSONResponse(status_code=400, content={"error": created["error"]})
+    token = acc.create_session(created)
+    resp = JSONResponse(content={"username": created["username"]})
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                    max_age=acc.SESSION_DAYS * 86400, path="/")
+    return resp
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    acc.destroy_session(request.cookies.get(SESSION_COOKIE, ""))
+    resp = JSONResponse(content={"ok": True})
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/me")
+def me(request: Request):
+    user = _current_user(request)
+    return {"username": user["username"]} if user else {"username": ""}
+
+
+class ChatsIn(BaseModel):
+    conversations: list
+
+
+@app.get("/api/chats")
+def get_chats(request: Request):
+    """取当前账号的聊天记录(别的账号看不到)。"""
+    user = _current_user(request)
+    if not user:
+        return {"conversations": []}          # 没启用登录时:前端自己用本地存储
+    return {"conversations": acc.load_chats(user["id"])}
+
+
+@app.put("/api/chats")
+def put_chats(request: Request, body: ChatsIn):
+    """存当前账号的聊天记录。"""
+    user = _current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "请先登录"})
+    return acc.save_chats(user["id"], body.conversations)
+
+
+@app.get("/api/account")
+def get_account():
+    """查询当前广告账户接入状态。"""
+    load_env_file()
+    try:
+        return _account_state()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class TokenIn(BaseModel):
+    token: str
+
+
+@app.post("/api/account/token")
+def set_account_token(body: TokenIn):
+    """保存 NewsBreak Access Token。先验证再存,无效的不会写进去。"""
+    token = (body.token or "").strip()
+    if not token:
+        return JSONResponse(status_code=400, content={"error": "请先粘贴 Access Token"})
+
+    old = os.environ.get("NEWSBREAK_ACCESS_TOKEN", "")
+    os.environ["NEWSBREAK_ACCESS_TOKEN"] = token      # 先临时生效,拿它去试一次
+    try:
+        nb.list_organizations()                       # 验证:能查到组织就说明 token 有效
+    except Exception as e:
+        os.environ["NEWSBREAK_ACCESS_TOKEN"] = old     # 验证失败,原样还回去
+        return JSONResponse(status_code=400, content={
+            "error": f"这个 Access Token 用不了:{e}。请确认是从 NewsBreak Ad Manager → Resources → API Access Tokens 生成的"})
+
+    _write_env_value("NEWSBREAK_ACCESS_TOKEN", token)
+    _write_env_value("NEWSBREAK_AD_ACCOUNT_ID", "")   # 换了 token,之前选的账户作废
+    print("[account] 已更新 NewsBreak Access Token 并验证通过", flush=True)
+    return _account_state()
+
+
+class AccountIn(BaseModel):
+    account_id: str
+
+
+@app.post("/api/account/select")
+def select_account(body: AccountIn):
+    """选定当前要操作的广告账户(多账户时用)。"""
+    account_id = (body.account_id or "").strip()
+    try:
+        valid = {a["id"] for a in _all_ad_accounts()}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    if account_id and account_id not in valid:
+        return JSONResponse(status_code=400, content={"error": "这个账户不在你名下,换一个"})
+    _write_env_value("NEWSBREAK_AD_ACCOUNT_ID", account_id)
+    print(f"[account] 当前广告账户切换为 {account_id or '(自动)'}", flush=True)
+    return _account_state()
 
 
 @app.post("/api/upload")
@@ -727,6 +1219,9 @@ def _system_prompt_now(lang: str = "zh") -> str:
     else:
         prompt = SYSTEM_PROMPT + f"\n\n今天的日期(UTC)是 {today},计算\"最近N天\"等日期范围时以此为准。"
 
+    if sched.recent_runs:
+        prompt += ("\n\n【定时任务最近的执行结果】(代码层记录,若用户还不知道,主动告知一句):\n"
+                   + "\n".join(f"- {m}" for m in sched.recent_runs))
     if PENDING_ACTIONS:
         lines = []
         for aid, a in PENDING_ACTIONS.items():
@@ -743,6 +1238,12 @@ def _system_prompt_now(lang: str = "zh") -> str:
             prompt += ("\n\n【保险箱现状】以下待办已登记完毕,严禁重新登记:\n" + "\n".join(lines) +
                        "\n用户已确认/同意时,直接调 confirm_action(用上面的编号)执行,不要再要求确认。")
     return prompt
+
+
+# 遇到这些错误码就"换人再试":429=额度用尽或太频繁,5xx=上游服务繁忙/临时故障。
+# 血泪:原来只认 429,结果 Gemini 一报 503(服务繁忙)整条链就断了,
+# 明明有 ofox 兜底也不去用,用户只看到一句"稍后再试"。
+_RETRYABLE_CODES = (429, 500, 502, 503, 504)
 
 
 def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
@@ -773,7 +1274,7 @@ def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
             )
             return response.text or "(Gemini 没有返回文字)"
         except genai_errors.APIError as e:
-            if e.code == 429:   # 这个型号的额度用完了,换备胎接着试
+            if e.code in _RETRYABLE_CODES:   # 额度用尽或上游繁忙,换备胎接着试
                 last_error = e
                 continue
             raise
@@ -834,6 +1335,15 @@ OPENAI_TOOL_SCHEMAS = [
     _oa_tool("cancel_action", "取消之前登记的待办", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("list_pending_actions", "查看保险箱里所有已登记待确认的待办(含编号);忘了编号用它查,严禁重复登记", {}, []),
     _oa_tool("list_conversion_events", "查询账户下的转化事件列表(建新广告第3步让用户挑)", {"ad_account_id": _ID}, ["ad_account_id"]),
+    _oa_tool("propose_schedule", "登记一个定时开启/暂停广告的待办(需用户确认后生效)",
+             {"kind": {"type": "string", "enum": ["once", "daily"], "description": "once=只执行一次,daily=每天重复"},
+              "when": {"type": "string", "description": 'once 用 "YYYY-MM-DD HH:MM",daily 用 "HH:MM",均为北京时间'},
+              "level": _LEVEL, "object_id": _ID,
+              "status": {"type": "string", "enum": ["ON", "OFF"], "description": "ON=到点开启 OFF=到点暂停"},
+              "name": {"type": "string", "description": "对象名字,用于复述"}},
+             ["kind", "when", "level", "object_id", "status"]),
+    _oa_tool("list_schedules", "查看所有定时任务(下次执行时间、上次结果)", {}, []),
+    _oa_tool("cancel_schedule", "取消一个定时任务", {"task_id": {"type": "string"}}, ["task_id"]),
 ]
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
@@ -841,6 +1351,7 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
     get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
+    propose_schedule, list_schedules, cancel_schedule,
 ]}
 
 
@@ -979,8 +1490,10 @@ def chat(req: ChatRequest):
             try:
                 return _finalize(ask_gemini(req.messages, req.lang), req.lang)
             except genai_errors.APIError as e:
-                if e.code == 429 and os.environ.get("OPENAI_API_KEY"):
-                    return _finalize(ask_openai(req.messages, req.lang), req.lang)  # Gemini 额度尽,顶上
+                if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
+                    # Gemini 用不了(额度尽/服务繁忙)→ 交给 ofox/ChatGPT 接着办
+                    print(f"[brain] Gemini 报错 {e.code},切换到 OPENAI 通道", flush=True)
+                    return _finalize(ask_openai(req.messages, req.lang), req.lang)
                 raise
         if os.environ.get("OPENAI_API_KEY"):
             return _finalize(ask_openai(req.messages, req.lang), req.lang)
@@ -996,7 +1509,9 @@ def chat(req: ChatRequest):
         if e.code in (400, 401, 403):
             return JSONResponse(status_code=500, content={"error": "Gemini 钥匙无效(检查 .env 里的 GEMINI_API_KEY 是否粘贴完整)"})
         if e.code == 429:
-            return JSONResponse(status_code=429, content={"error": "Gemini 免费额度暂时用完/太频繁,稍等一分钟再试"})
+            return JSONResponse(status_code=429, content={"error": "Gemini 免费额度暂时用完/太频繁,稍等一分钟再试(或在 .env 里把 BRAIN 改成 openai 走 ofox 通道)"})
+        if e.code in _RETRYABLE_CODES:
+            return JSONResponse(status_code=502, content={"error": f"Google 那边服务繁忙({e.code}),不是你的操作问题。重发一次通常就好;老是这样就把 .env 里的 BRAIN 改成 openai 走 ofox 通道"})
         return JSONResponse(status_code=502, content={"error": f"Gemini 服务返回错误({e.code}),稍后再试"})
 
     # ===== ChatGPT 的错误翻译 =====

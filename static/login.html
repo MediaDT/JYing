@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>登录 · 广告投放小助手</title>
+<style>
+  :root {
+    --bg: #eef1f6; --panel: #ffffff; --text: #1d2129; --muted: #7a8190;
+    --accent1: #4f6ef7; --accent2: #7b5ff5; --border: #e4e8ef;
+    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 12px 32px -8px rgba(16,24,40,.14);
+    --bad: #b42318; --good: #067647;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1015; --panel: #171a21; --text: #e9ebef; --muted: #8b93a1;
+      --accent1: #5b7cff; --accent2: #8b6cf8; --border: #262b36;
+      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 12px 32px -8px rgba(0,0,0,.6);
+      --bad: #fda29b; --good: #75e0a7;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100dvh; display: grid; place-items: center; padding: 20px;
+    background:
+      radial-gradient(900px 480px at 20% -10%, color-mix(in srgb, var(--accent1) 16%, transparent), transparent 60%),
+      radial-gradient(800px 460px at 85% -5%, color-mix(in srgb, var(--accent2) 14%, transparent), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  .card {
+    width: 100%; max-width: 400px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 32px 30px; box-shadow: var(--shadow);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .logo {
+    width: 42px; height: 42px; border-radius: 13px;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    display: grid; place-items: center; font-size: 22px;
+    box-shadow: 0 4px 14px -3px color-mix(in srgb, var(--accent1) 50%, transparent);
+  }
+  h1 { font-size: 18px; font-weight: 700; }
+  label { display: block; font-size: 12.5px; font-weight: 600; margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 11px 14px; font: inherit; font-size: 14px;
+    border: 1.5px solid var(--border); border-radius: 12px;
+    background: var(--bg); color: var(--text); outline: none;
+  }
+  input:focus { border-color: var(--accent1); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent1) 12%, transparent); }
+  button {
+    width: 100%; margin-top: 22px; padding: 12px; font: inherit; font-size: 14.5px; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    border: 0; border-radius: 12px; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .switch { text-align: center; margin-top: 18px; font-size: 12.5px; color: var(--muted); }
+  .switch a { color: var(--accent1); cursor: pointer; text-decoration: none; font-weight: 600; }
+  .msg { margin-top: 14px; font-size: 12.5px; line-height: 1.6; min-height: 18px; }
+  .msg.err { color: var(--bad); }
+  .msg.ok { color: var(--good); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="logo">🤖</div>
+      <div>
+        <h1 id="title">登录</h1>
+        <div style="font-size:12px;color:var(--muted)" id="subtitle">广告投放小助手</div>
+      </div>
+    </div>
+
+    <form id="form" autocomplete="on" style="margin-top:22px">
+      <label for="username">用户名</label>
+      <input id="username" name="username" type="text" autocomplete="username" required />
+
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+      <div id="invite-wrap" style="display:none">
+        <label for="invite">邀请码</label>
+        <input id="invite" name="invite" type="password" autocomplete="off" />
+      </div>
+
+      <button type="submit" id="submit">登录</button>
+    </form>
+
+    <div class="msg" id="msg"></div>
+    <div class="switch" id="switch"></div>
+  </div>
+
+<script>
+  var mode = "login";          // login | register
+  var inviteRequired = false;
+
+  var $ = function (id) { return document.getElementById(id); };
+  function setMsg(text, kind) {
+    $("msg").textContent = text || "";
+    $("msg").className = "msg" + (kind ? " " + kind : "");
+  }
+
+  function render() {
+    var isReg = mode === "register";
+    $("title").textContent = isReg ? "注册账号" : "登录";
+    $("submit").textContent = isReg ? "注册并进入" : "登录";
+    $("password").setAttribute("autocomplete", isReg ? "new-password" : "current-password");
+    $("invite-wrap").style.display = (isReg && inviteRequired) ? "block" : "none";
+    $("switch").innerHTML = isReg
+      ? '已经有账号了?<a id="to-login">去登录</a>'
+      : '还没有账号?<a id="to-reg">注册一个</a>';
+    var a = $("to-login") || $("to-reg");
+    if (a) a.onclick = function () { mode = isReg ? "login" : "register"; setMsg(""); render(); };
+  }
+
+  // 先问后端:有没有账号?要不要邀请码?
+  fetch("/api/auth-status")
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      inviteRequired = !!d.invite_required;
+      if (d.logged_in_as) { location.href = "/platforms"; return; }   // 已登录 → 去挑平台
+      if (!d.has_users) {                                     // 一个账号都没有 → 直接进注册
+        mode = "register";
+        setMsg("还没有任何账号,先注册第一个吧。", "ok");
+      }
+      render();
+    })
+    .catch(function () { render(); });
+
+  $("form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var btn = $("submit");
+    var body = {
+      username: $("username").value.trim(),
+      password: $("password").value,
+    };
+    if (mode === "register") body.invite = $("invite").value;
+    if (!body.username || !body.password) { setMsg("用户名和密码都要填", "err"); return; }
+
+    btn.disabled = true;
+    setMsg(mode === "register" ? "注册中…" : "登录中…");
+    fetch(mode === "register" ? "/api/register" : "/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (!res.ok) { setMsg(res.d.error || "失败了,再试一次", "err"); btn.disabled = false; return; }
+        setMsg("成功,正在进入…", "ok");
+        location.href = "/platforms";
+      })
+      .catch(function (err) {
+        setMsg("连不上服务器:" + err.message, "err");
+        btn.disabled = false;
+      });
+  });
+</script>
+</body>
+</html>
