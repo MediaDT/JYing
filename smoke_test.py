@@ -252,6 +252,30 @@ def test_http():
           lambda: True if client.get("/platforms", follow_redirects=False).status_code == 302
           else "平台页没设防")
     check("登录页本身可访问", lambda: True if client.get("/login").status_code == 200 else "登录页打不开")
+    # 登录 cookie 的 secure 标志:https 下必须有(防明文抓包),http 下必须没有
+    # (写死 True 会让本地 http://localhost 开发时浏览器直接不存 cookie,登不进去)
+    def t_cookie_secure():
+        from starlette.requests import Request
+        from fastapi.responses import JSONResponse
+
+        def fake_req(scheme):
+            return Request({"type": "http", "scheme": scheme, "method": "GET",
+                            "path": "/", "query_string": b"", "headers": [],
+                            "server": ("testserver", 443 if scheme == "https" else 80)})
+
+        bad = []
+        for scheme, want in (("https", True), ("http", False)):
+            resp = JSONResponse(content={})
+            srv._set_session_cookie(resp, "dummy-token", fake_req(scheme))
+            raw = resp.headers.get("set-cookie", "").lower()
+            has = "secure" in raw
+            if has != want:
+                bad.append(f"{scheme} 下 secure={has}(应为 {want})")
+            if "httponly" not in raw:
+                bad.append(f"{scheme} 下丢了 httponly")
+        return bad or True
+
+    check("登录 cookie:https 加 secure、http 不加", t_cookie_secure)
     check("Markdown 渲染库在位",
           lambda: True if client.get("/static/marked.min.js").status_code == 200 else "marked.min.js 丢了")
 

@@ -1038,23 +1038,39 @@ class RegisterIn(BaseModel):
     invite: str = ""
 
 
+def _set_session_cookie(resp, token: str, request: Request) -> None:
+    """下发登录 cookie。
+
+    · httponly:网页里的 JS 读不到它,防止被脚本偷走;
+    · samesite=lax:别的网站发起的请求不会自动带上它;
+    · secure:**只在 https 下才加**。加了之后浏览器绝不会用明文 http 发送这个 cookie,
+      中间人抓不到登录态。之所以要判断而不是写死 True:本地开发走的是
+      http://localhost,写死会导致浏览器根本不存这个 cookie,直接登不进去。
+
+    判断依据是 `request.url.scheme`。放在 nginx 后面时,它来自
+    `X-Forwarded-Proto` 请求头 —— 所以 nginx 里那行
+    `proxy_set_header X-Forwarded-Proto $scheme;` 不能少;缺了只是退回不加 secure
+    (跟以前一样),不会把人挡在门外。
+    """
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                    secure=(request.url.scheme == "https"),
+                    max_age=acc.SESSION_DAYS * 86400, path="/")
+
+
 @app.post("/api/login")
-def login(body: LoginIn):
+def login(body: LoginIn, request: Request):
     user = acc.verify_user(body.username, body.password)
     if user.get("error"):
         return JSONResponse(status_code=401, content={"error": user["error"]})
     token = acc.create_session(user)
     resp = JSONResponse(content={"username": user["username"]})
-    # httponly:网页里的 JS 读不到这个 cookie,防止被脚本偷走
-    # samesite=lax:别的网站发起的请求不会自动带上它
-    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
-                    max_age=acc.SESSION_DAYS * 86400, path="/")
+    _set_session_cookie(resp, token, request)
     print(f"[auth] 登录: {user['username']}", flush=True)
     return resp
 
 
 @app.post("/api/register")
-def register(body: RegisterIn):
+def register(body: RegisterIn, request: Request):
     """注册。若 .env 里设了 APP_PASSWORD,它就是「邀请码」,防止端口泄露后被随意注册。"""
     invite_needed = _read_env_value("APP_PASSWORD")
     if invite_needed and not secrets.compare_digest((body.invite or "").strip(), invite_needed):
@@ -1065,8 +1081,7 @@ def register(body: RegisterIn):
         return JSONResponse(status_code=400, content={"error": created["error"]})
     token = acc.create_session(created)
     resp = JSONResponse(content={"username": created["username"]})
-    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
-                    max_age=acc.SESSION_DAYS * 86400, path="/")
+    _set_session_cookie(resp, token, request)
     return resp
 
 

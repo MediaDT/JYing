@@ -399,6 +399,7 @@
       acctOrgLabel: "组织",
       acctClose: "关闭",
       acctSaved: "✅ 已连接!现在可以直接问我数据了。",
+      boundOk: "✅ {p} 账号已连接,输入框解锁了,现在可以问我数据了。",
       acctSwitched: "✅ 已切换账户。",
       acctTokenBad: "Token 无效或已过期,请重新生成一个。",
       newChat: "✚ 新对话",
@@ -473,6 +474,7 @@
       acctOrgLabel: "Organization",
       acctClose: "Close",
       acctSaved: "✅ Connected! You can start asking about your data.",
+      boundOk: "✅ {p} account connected. The message box is unlocked — ask me anything about your data.",
       acctSwitched: "✅ Account switched.",
       acctTokenBad: "Token is invalid or expired — please generate a new one.",
       newChat: "✚ New chat",
@@ -1165,6 +1167,7 @@
             setAcctMsg(d.acctSaved, "ok");
             renderAcctBtn();
             renderAcctModal();
+            refreshPlatformBinding();   // 绑上了就把聊天界面解锁,不用用户手动刷新
             return;
           }
         } catch (e) {
@@ -1363,6 +1366,31 @@
     inputEl.disabled = true;
     inputEl.placeholder = d.notBoundTitle.replace(/\{p\}/g, p.name);
     sendBtn.disabled = true;
+  }
+
+  /** 存完 token 后回头问一次后端:这个平台现在算绑定了吗?算就把界面放开。
+   *  特意不"存成功就直接放开"——以后端的 bound() 为准,才不会界面和实际不一致。*/
+  function refreshPlatformBinding() {
+    fetch("/api/platforms")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var p = (data.platforms || []).find(function (x) { return x.id === PLATFORM; });
+        if (p && p.bound) clearNotBound(p);
+      })
+      .catch(function (e) { console.warn("回查平台绑定状态失败:", e); });
+  }
+
+  /** 撤掉 ⚠️ 提示、解锁输入框,并在聊天区说一句,让用户立刻知道成了 */
+  function clearNotBound(p) {
+    if (PLATFORM_BOUND) return;          // 本来就没锁,不用重复说
+    PLATFORM_BOUND = true;
+    var row = document.getElementById("not-bound");
+    if (row && row.remove) row.remove();
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.placeholder = t().placeholder;
+    addBubble("bot", t().boundOk.replace(/\{p\}/g, (p && p.name) || PLATFORM_NAME));
+    inputEl.focus();
   }
 
   loadPlatform();

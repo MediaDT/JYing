@@ -31,6 +31,12 @@ const FAKE = (bound) => ({
 // fetch 是异步的,等一拍让 .then 里的回调跑完
 const tick = () => new Promise((r) => process.nextTick(r));
 
+// 把一个节点连同子孙的文字全捞出来 —— addBubble 建的气泡文字在子节点里,
+// 只看顶层的 innerHTML 是空的,会得出"没显示"的错误结论
+const allText = (el) =>
+  (el.innerHTML || "") + (el.textContent || "") +
+  (el.children || []).map(allText).join("");
+
 (async () => {
 
 console.log("【0】默认进入(不带参数):页面初始化不能中断");
@@ -76,6 +82,33 @@ console.log("\n【3】没绑定账号:必须挡一道并引导");
   t("提示里带上了绑定方法", bubble.indexOf("Ad Manager") >= 0);
   t("输入框被停用(别让用户白打字)", app.registry["input"].disabled === true);
   t("发送按钮也停用", app.registry["send"].disabled === true);
+}
+
+console.log("\n【3.5】绑好账号后:界面要自动解锁,不用用户手动刷新");
+{
+  // 一开始没绑 → 输入框锁住;绑好之后再问 /api/platforms 就变成 bound
+  let bound = false;
+  const app = boot({}, {
+    fetchBody: (u) => {
+      if (u.indexOf("/api/platforms") === 0) return FAKE(bound);
+      return { reply: "ok" };
+    },
+  });
+  await tick(); await tick();
+  t("一开始输入框是锁的", app.registry["input"].disabled === true);
+
+  // 模拟"用户存好了 token":后端现在说已绑定,前端回查一次
+  bound = true;
+  app.win.refreshPlatformBinding();
+  await tick(); await tick();
+
+  t("输入框自动解锁了(不用按 F5)", app.registry["input"].disabled === false);
+  t("发送键也解锁了", app.registry["send"].disabled === false);
+  const html = app.registry["messages"].children.map(allText).join("");
+  t("聊天区告诉用户已连接", html.indexOf("已连接") >= 0, html.slice(0, 60));
+  t("⚠️ 那条提示被撤掉了", !app.registry["messages"].children.some((c) => c.id === "not-bound"));
+  t("输入框提示词恢复正常", app.registry["input"].placeholder.indexOf("回车发送") >= 0,
+    app.registry["input"].placeholder);
 }
 
 console.log("\n【4】带 &bind=1 进来(从平台页点「先绑定账号」)");
