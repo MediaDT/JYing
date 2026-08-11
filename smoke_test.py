@@ -327,6 +327,42 @@ def test_http():
     if srv._read_env_value("APP_PASSWORD"):
         check("邀请码填中文/emoji 也只是被拒,不会 500", t_invite_non_ascii)
 
+    # 流式接口:必须是 SSE,而且要带上"别缓冲"的头,否则放在 nginx 后面
+    # 会被攒成一坨再发,用户看到的还是转半天圈然后一次蹦出来。
+    # 直接调函数(绕开登录门),并把大脑换成假的(不烧 AI 额度)。
+    def t_stream_sse():
+        orig = srv._route_brain
+        srv._route_brain = lambda req: "冒烟测试的回答"
+        try:
+            resp = srv.chat_stream(srv.ChatRequest(
+                messages=[srv.ChatMessage(role="user", content="hi")], lang="zh"))
+            bad = []
+            if resp.media_type != "text/event-stream":
+                bad.append(f"不是 SSE:{resp.media_type}")
+            if resp.headers.get("x-accel-buffering") != "no":
+                bad.append("少了 X-Accel-Buffering: no(nginx 会把流缓冲住)")
+            # StreamingResponse 会把同步生成器包成异步迭代器,这里手动收干
+            import asyncio
+
+            async def drain():
+                out = []
+                async for piece in resp.body_iterator:
+                    out.append(piece if isinstance(piece, str) else piece.decode("utf-8"))
+                return "".join(out)
+
+            body = asyncio.new_event_loop().run_until_complete(drain())
+            if "data: " not in body:
+                bad.append("响应里没有 SSE 事件")
+            if '"type": "done"' not in body.replace('"type":"done"', '"type": "done"'):
+                bad.append(f"没有 done 事件:{body[:120]}")
+            if "冒烟测试的回答" not in body:
+                bad.append("done 里没带上回复正文")
+            return bad or True
+        finally:
+            srv._route_brain = orig
+
+    check("流式接口是 SSE、禁用代理缓冲、能吐出 done", t_stream_sse)
+
     check("Markdown 渲染库在位",
           lambda: True if client.get("/static/marked.min.js").status_code == 200 else "marked.min.js 丢了")
 

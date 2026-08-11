@@ -15,12 +15,14 @@
 import contextvars
 import json
 import os
+import queue
+import threading
 from pathlib import Path
 
 import anthropic
 import openai
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import errors as genai_errors
@@ -94,6 +96,41 @@ SESSION_COOKIE = "adbot_session"
 # 拿不到 request,所以在中间件里设一次,它们直接读。
 # 空字符串 = 不在请求里(定时任务线程 / 命令行 / 测试)。
 CURRENT_USER_ID: contextvars.ContextVar = contextvars.ContextVar("adbot_user_id", default="")
+
+# 流式回复时,用来把「进度/文字」一小段一小段递给前端的回调。
+# None = 这次不是流式请求,大脑那边照常一次性返回。
+CURRENT_EMIT: contextvars.ContextVar = contextvars.ContextVar("adbot_emit", default=None)
+
+
+_TOOL_LABELS = {
+    "list_organizations": "正在查组织…",
+    "list_ad_accounts": "正在查广告账户…",
+    "list_campaigns": "正在查广告计划…",
+    "list_ad_sets": "正在查广告组…",
+    "list_ads": "正在查广告…",
+    "list_conversion_events": "正在查转化事件…",
+    "get_report": "正在拉报表数据…",
+    "propose_status_change": "正在登记开关待办…",
+    "propose_create_campaign": "正在登记建广告待办…",
+    "propose_schedule": "正在登记定时任务…",
+    "confirm_action": "正在执行你确认的操作…",
+    "cancel_action": "正在取消待办…",
+    "list_pending_actions": "正在查待办…",
+    "list_schedules": "正在查定时任务…",
+    "cancel_schedule": "正在取消定时任务…",
+}
+
+
+def _tool_label(name: str) -> str:
+    """把工具名说成人话 —— 用户不该看到 list_ad_sets 这种东西。"""
+    return _TOOL_LABELS.get(name, "正在查数据…")
+
+
+def _emit(kind: str, **data) -> None:
+    """播报一个事件给前端(不是流式请求就什么也不做)。"""
+    fn = CURRENT_EMIT.get()
+    if fn:
+        fn({"type": kind, **data})
 
 # 不需要登录就能访问的地址:登录页本身、登录/注册接口、静态资源
 _PUBLIC_PATHS = {"/login", "/api/login", "/api/register", "/api/auth-status", "/favicon.ico"}
@@ -1334,16 +1371,21 @@ def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
     last_error = None
     for model in models_to_try:
         try:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=_system_prompt_now(lang),
-                    # 把工具递给它:Gemini 会"自动工具调用"——自己挑工具、自己执行、
-                    # 拿到结果接着想,循环到能回答为止,最后只把人话答案给我们
-                    tools=NEWSBREAK_TOOLS,
-                ),
+            cfg = genai_types.GenerateContentConfig(
+                system_instruction=_system_prompt_now(lang),
+                # 把工具递给它:Gemini 会"自动工具调用"——自己挑工具、自己执行、
+                # 拿到结果接着想,循环到能回答为止,最后只把人话答案给我们
+                tools=NEWSBREAK_TOOLS,
             )
+            # 注意:Gemini 这条路**不能流式**。generate_content_stream 配上
+            # 「自动工具调用」时,实测只回一个 text='' 的空块就 STOP 了 ——
+            # 工具循环没跑起来。硬上流式的结果是用户收到一句"没有返回文字"。
+            # 所以这里保持一次性返回,只播报一句进度,让界面有个交代。
+            # 要在免费通道上也做到真流式,得把 Gemini 也改成"手动挡"
+            # (自己跑工具循环,像 ask_openai 那样),那是另一件事。
+            _emit("status", text="正在思考…")
+            response = client.models.generate_content(
+                model=model, contents=contents, config=cfg)
             return response.text or "(Gemini 没有返回文字)"
         except genai_errors.APIError as e:
             if e.code in _RETRYABLE_CODES:   # 额度用尽或上游繁忙,换备胎接着试
@@ -1440,36 +1482,79 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
     if custom_model:
         models_to_try = [custom_model] + [m for m in models_to_try if m != custom_model]
 
+    streaming = CURRENT_EMIT.get() is not None
+
     for _ in range(10):  # 工具调用循环:一轮没答完就继续,设个上限防转圈
-        response = None
+        content, tool_calls, ok_model = "", [], None
         for model in models_to_try:
             try:
-                response = client.chat.completions.create(
-                    model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS)
-                models_to_try = [model]  # 记住能用的型号,后面几轮不再试错
+                content, tool_calls = _openai_once(client, model, msgs, streaming)
+                ok_model = model
                 break
             except openai.NotFoundError:
                 continue
-        if response is None:
+        if ok_model is None:
             raise openai.NotFoundError.__new__(openai.NotFoundError)  # 型号全不可用
+        models_to_try = [ok_model]   # 记住能用的型号,后面几轮不再试错
 
-        msg = response.choices[0].message
-        if not msg.tool_calls:
-            return msg.content or "(ChatGPT 没有返回文字)"
+        if not tool_calls:
+            return content or "(ChatGPT 没有返回文字)"
 
-        # 它想用工具:替它执行,把结果贴回对话,再让它接着想
-        msgs.append({"role": "assistant", "content": msg.content,
-                     "tool_calls": [tc.model_dump() for tc in msg.tool_calls]})
-        for tc in msg.tool_calls:
-            fn = OPENAI_TOOL_FUNCS.get(tc.function.name)
+        # 它想用工具:说明刚才吐的那点字只是开场白,不是最终答案 → 让前端作废重来
+        if streaming and content:
+            _emit("reset")
+        msgs.append({"role": "assistant", "content": content or None,
+                     "tool_calls": [{"id": tc["id"], "type": "function",
+                                     "function": {"name": tc["name"],
+                                                  "arguments": tc["arguments"]}}
+                                    for tc in tool_calls]})
+        for tc in tool_calls:
+            _emit("status", text=_tool_label(tc["name"]))
+            fn = OPENAI_TOOL_FUNCS.get(tc["name"])
             try:
-                args = json.loads(tc.function.arguments or "{}")
-                result = fn(**args) if fn else {"error": f"未知工具 {tc.function.name}"}
+                args = json.loads(tc["arguments"] or "{}")
+                result = fn(**args) if fn else {"error": f"未知工具 {tc['name']}"}
             except Exception as e:
                 result = {"error": str(e)}
-            msgs.append({"role": "tool", "tool_call_id": tc.id,
+            msgs.append({"role": "tool", "tool_call_id": tc["id"],
                          "content": json.dumps(result, ensure_ascii=False)})
     return "(工具调用轮数过多,已中止,请换个问法)"
+
+
+def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, list]:
+    """问一轮 OpenAI/ofox,返回 (文字, 工具调用清单)。
+
+    流式时边收边把文字播报出去;工具调用是分片来的(名字和参数会拆成好几块),
+    要按 index 拼起来才完整。
+    """
+    if not streaming:
+        r = client.chat.completions.create(model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS)
+        m = r.choices[0].message
+        return (m.content or "",
+                [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or ""}
+                 for tc in (m.tool_calls or [])])
+
+    parts, slots = [], {}
+    for chunk in client.chat.completions.create(
+            model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS, stream=True):
+        if not chunk.choices:
+            continue
+        d = chunk.choices[0].delta
+        if d is None:
+            continue
+        if d.content:
+            parts.append(d.content)
+            _emit("delta", text=d.content)
+        for tc in (d.tool_calls or []):
+            slot = slots.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+            if tc.id:
+                slot["id"] = tc.id
+            if tc.function:
+                if tc.function.name:
+                    slot["name"] += tc.function.name
+                if tc.function.arguments:
+                    slot["arguments"] += tc.function.arguments
+    return "".join(parts), [slots[i] for i in sorted(slots)]
 
 
 def ask_claude(messages: list[ChatMessage], lang: str = "zh") -> str:
@@ -1536,74 +1621,151 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
     return {"reply": reply}
 
 
-@app.post("/api/chat")
-def chat(req: ChatRequest):
-    """核心接口:收聊天记录 → 问 AI 大脑 → 回答案。填了哪家的钥匙就用哪家。"""
-    # 保险丝计数:用户每发一条消息 +1,用来区分"登记"和"确认"是不是同一条消息
-    global _REQUEST_SEQ
-    _REQUEST_SEQ += 1
-    _EXECUTED_THIS_REQUEST.clear()  # 本轮"真实执行台账"清零
-
-    # 每次都现读 .env:这样刚填好钥匙不用重启服务器,发条消息就生效
-    load_env_file()
-
-    # BRAIN 可在 .env 里指定主力大脑:gemini / openai(含 ofox 中转) / claude;
-    # 不填或填 auto = 走默认三级火箭(Gemini 免费优先,额度尽了自动接力)
+def _route_brain(req: ChatRequest) -> str:
+    """按 BRAIN 配置选大脑并拿到回答。三级火箭的接力逻辑只写这一份,
+    普通接口和流式接口共用 —— 否则改了一边忘了另一边,行为就会不一致。"""
     brain = os.environ.get("BRAIN", "auto").strip().lower()
 
-    try:
-        if brain == "openai" and os.environ.get("OPENAI_API_KEY"):
-            return _finalize(ask_openai(req.messages, req.lang), req.lang)
-        if brain == "claude" and (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-            return _finalize(ask_claude(req.messages, req.lang), req.lang)
+    if brain == "openai" and os.environ.get("OPENAI_API_KEY"):
+        return ask_openai(req.messages, req.lang)
+    if brain == "claude" and (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        return ask_claude(req.messages, req.lang)
 
-        # 三级火箭:Gemini(免费)→ 额度尽了切 ChatGPT/ofox → 都没有再看 Claude
-        if os.environ.get("GEMINI_API_KEY"):
-            try:
-                return _finalize(ask_gemini(req.messages, req.lang), req.lang)
-            except genai_errors.APIError as e:
-                if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
-                    # Gemini 用不了(额度尽/服务繁忙)→ 交给 ofox/ChatGPT 接着办
-                    print(f"[brain] Gemini 报错 {e.code},切换到 OPENAI 通道", flush=True)
-                    return _finalize(ask_openai(req.messages, req.lang), req.lang)
-                raise
-        if os.environ.get("OPENAI_API_KEY"):
-            return _finalize(ask_openai(req.messages, req.lang), req.lang)
-        if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-            return _finalize(ask_claude(req.messages, req.lang), req.lang)
-        return JSONResponse(
-            status_code=500,
-            content={"error": "还没配置 AI 大脑的钥匙:打开 .env,填 GEMINI_API_KEY(免费)/ OPENAI_API_KEY / ANTHROPIC_API_KEY 任意一把,填完直接重发消息即可。"},
-        )
+    # 三级火箭:Gemini(免费)→ 额度尽了切 ChatGPT/ofox → 都没有再看 Claude
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            return ask_gemini(req.messages, req.lang)
+        except genai_errors.APIError as e:
+            if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
+                print(f"[brain] Gemini 报错 {e.code},切换到 OPENAI 通道", flush=True)
+                _emit("status", text="正在切换到备用通道…")
+                return ask_openai(req.messages, req.lang)
+            raise
+    if os.environ.get("OPENAI_API_KEY"):
+        return ask_openai(req.messages, req.lang)
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return ask_claude(req.messages, req.lang)
+    raise _NoBrainKey()
 
-    # ===== Gemini 的错误翻译 =====
-    except genai_errors.APIError as e:
+
+class _NoBrainKey(Exception):
+    """一把 AI 钥匙都没配。"""
+
+
+def _brain_error(e: Exception) -> tuple[int, str]:
+    """把各家 SDK 的异常翻译成人话。返回 (HTTP 状态码, 给用户看的话)。
+
+    这份翻译也是两个接口共用的。原则:**钥匙/配置错误绝不掩盖**,
+    要让用户看到真实原因,而不是笼统的"稍后再试"。
+    """
+    if isinstance(e, _NoBrainKey):
+        return 500, ("还没配置 AI 大脑的钥匙:打开 .env,填 GEMINI_API_KEY(免费)/ "
+                     "OPENAI_API_KEY / ANTHROPIC_API_KEY 任意一把,填完直接重发消息即可。")
+
+    # ===== Gemini =====
+    if isinstance(e, genai_errors.APIError):
         if e.code in (400, 401, 403):
-            return JSONResponse(status_code=500, content={"error": "Gemini 钥匙无效(检查 .env 里的 GEMINI_API_KEY 是否粘贴完整)"})
+            return 500, "Gemini 钥匙无效(检查 .env 里的 GEMINI_API_KEY 是否粘贴完整)"
         if e.code == 429:
-            return JSONResponse(status_code=429, content={"error": "Gemini 免费额度暂时用完/太频繁,稍等一分钟再试(或在 .env 里把 BRAIN 改成 openai 走 ofox 通道)"})
+            return 429, "Gemini 免费额度暂时用完/太频繁,稍等一分钟再试(或在 .env 里把 BRAIN 改成 openai 走 ofox 通道)"
         if e.code in _RETRYABLE_CODES:
-            return JSONResponse(status_code=502, content={"error": f"Google 那边服务繁忙({e.code}),不是你的操作问题。重发一次通常就好;老是这样就把 .env 里的 BRAIN 改成 openai 走 ofox 通道"})
-        return JSONResponse(status_code=502, content={"error": f"Gemini 服务返回错误({e.code}),稍后再试"})
+            return 502, (f"Google 那边服务繁忙({e.code}),不是你的操作问题。重发一次通常就好;"
+                         "老是这样就把 .env 里的 BRAIN 改成 openai 走 ofox 通道")
+        return 502, f"Gemini 服务返回错误({e.code}),稍后再试"
 
-    # ===== ChatGPT 的错误翻译 =====
-    except openai.AuthenticationError:
-        return JSONResponse(status_code=500, content={"error": "ChatGPT 钥匙无效(检查 .env 里的 OPENAI_API_KEY)"})
-    except openai.RateLimitError:
-        return JSONResponse(status_code=429, content={"error": "ChatGPT 也限流了(免费额度/余额可能不足),稍后再试"})
-    except openai.NotFoundError:
-        return JSONResponse(status_code=502, content={"error": "ChatGPT 候选型号都不可用(key 可能没开通这些模型)"})
-    except openai.APIStatusError as e:
-        return JSONResponse(status_code=502, content={"error": f"ChatGPT 服务返回错误({e.status_code}),稍后再试"})
-    except openai.APIConnectionError:
-        return JSONResponse(status_code=502, content={"error": "连不上 ChatGPT 服务(如用转发服务,检查 OPENAI_BASE_URL)"})
+    # ===== ChatGPT / ofox =====
+    if isinstance(e, openai.AuthenticationError):
+        return 500, "ChatGPT 钥匙无效(检查 .env 里的 OPENAI_API_KEY)"
+    if isinstance(e, openai.RateLimitError):
+        return 429, "ChatGPT 也限流了(免费额度/余额可能不足),稍后再试"
+    if isinstance(e, openai.NotFoundError):
+        return 502, "ChatGPT 候选型号都不可用(key 可能没开通这些模型)"
+    if isinstance(e, openai.APIConnectionError):
+        return 502, "连不上 ChatGPT 服务(如用转发服务,检查 OPENAI_BASE_URL)"
+    if isinstance(e, openai.APIStatusError):
+        return 502, f"ChatGPT 服务返回错误({e.status_code}),稍后再试"
 
-    # ===== Claude 的错误翻译(从具体到笼统依次接住)=====
-    except anthropic.AuthenticationError:
-        return JSONResponse(status_code=500, content={"error": "Claude 钥匙无效(检查 .env 里的 ANTHROPIC_API_KEY)"})
-    except anthropic.RateLimitError:
-        return JSONResponse(status_code=429, content={"error": "请求太频繁,被限流了,稍等一会儿再试"})
-    except anthropic.APIStatusError as e:
-        return JSONResponse(status_code=502, content={"error": f"Claude 服务返回错误({e.status_code}),稍后再试"})
-    except anthropic.APIConnectionError:
-        return JSONResponse(status_code=502, content={"error": "连不上 AI 服务,请检查网络"})
+    # ===== Claude =====
+    if isinstance(e, anthropic.AuthenticationError):
+        return 500, "Claude 钥匙无效(检查 .env 里的 ANTHROPIC_API_KEY)"
+    if isinstance(e, anthropic.RateLimitError):
+        return 429, "请求太频繁,被限流了,稍等一会儿再试"
+    if isinstance(e, anthropic.APIConnectionError):
+        return 502, "连不上 AI 服务,请检查网络"
+    if isinstance(e, anthropic.APIStatusError):
+        return 502, f"Claude 服务返回错误({e.status_code}),稍后再试"
+
+    # ===== 平台自己的报错(比如没绑账号)直接说人话 =====
+    if isinstance(e, nb.NewsBreakError):
+        return 400, str(e)
+
+    return 500, f"出了点问题:{e}"
+
+
+def _new_turn() -> None:
+    """每条用户消息开始时要做的两件事(两个接口共用)。"""
+    global _REQUEST_SEQ
+    _REQUEST_SEQ += 1               # 保险丝计数:区分"登记"和"确认"是不是同一条消息
+    _EXECUTED_THIS_REQUEST.clear()  # 本轮"真实执行台账"清零
+    load_env_file()                 # 现读 .env:刚填的钥匙不用重启就生效
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest):
+    """核心接口:收聊天记录 → 问 AI 大脑 → 一次性回答案。
+
+    流式版本见 /api/chat/stream。这个保留着当兜底 —— 流式一旦被中间的
+    反向代理缓冲住(nginx 默认会),前端可以退回来用这个。
+    """
+    _new_turn()
+    try:
+        return _finalize(_route_brain(req), req.lang)
+    except Exception as e:
+        code, msg = _brain_error(e)
+        return JSONResponse(status_code=code, content={"error": msg})
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest):
+    """流式版:边想边出字,并播报"正在查什么"。
+
+    用 SSE(Server-Sent Events),事件类型:
+      status  正在做什么(查列表/拉报表…),给用户一个"它没死"的交代
+      reset   前面吐的字作废(模型先说了句开场白又去调工具了)
+      delta   新的一小段文字
+      done    结束,带上**盖过钢印的完整回复**(前端用它做最终渲染)
+      error   出错了,带人话说明
+
+    大脑那几个函数是同步阻塞的,所以丢到线程里跑,靠队列把事件递出来。
+    """
+    _new_turn()
+
+    q: "queue.Queue" = queue.Queue()
+    ctx = contextvars.copy_context()     # 把当前用户的凭据等上下文带进线程
+
+    def work():
+        CURRENT_EMIT.set(q.put)
+        try:
+            text = _route_brain(req)
+            q.put({"type": "done", **_finalize(text, req.lang)})
+        except Exception as e:
+            code, msg = _brain_error(e)
+            q.put({"type": "error", "error": msg, "code": code})
+        finally:
+            q.put(None)                  # 收摊信号
+
+    threading.Thread(target=lambda: ctx.run(work), daemon=True, name="chat-stream").start()
+
+    def gen():
+        while True:
+            ev = q.get()
+            if ev is None:
+                break
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        # 关键:让 nginx 别缓冲这条响应。不加的话 nginx 会攒够一块才发,
+        # 用户看到的还是"转半天圈然后一次蹦出来",流式等于白做。
+        "X-Accel-Buffering": "no",
+    })

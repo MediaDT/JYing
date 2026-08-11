@@ -170,7 +170,11 @@
   .bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 
   /* "正在思考"动画 */
-  .typing-bubble { display: flex; gap: 5px; padding: 15px 18px; }
+  .typing-note {
+    margin-left: 8px; font-size: 12.5px; color: var(--muted);
+    align-self: center; white-space: nowrap;
+  }
+  .typing-bubble { display: flex; gap: 5px; padding: 15px 18px; align-items: center; }
   .typing-bubble i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
   .typing-bubble i:nth-child(2) { animation-delay: .2s; }
   .typing-bubble i:nth-child(3) { animation-delay: .4s; }
@@ -431,6 +435,7 @@
       errPrefix: "出错了:",
       netErr: "网络错误:",
       timeout: "等太久了(超过 3 分钟没响应),这条没发出去。可能是后端卡住了,请重试;还不行就重启服务。",
+      streamBroken: "回复传到一半断了,这条没算数,请重发一次。",
       uploadFail: "素材上传失败:",
       uploadedMsg: (name, url) => `我已上传素材「${name}」,assetUrl: ${url}`,
     },
@@ -506,6 +511,7 @@
       errPrefix: "Something went wrong: ",
       netErr: "Network error: ",
       timeout: "Timed out (no response for 3 minutes) — this message wasn't sent. The backend may be stuck; please retry, or restart the service.",
+      streamBroken: "The reply was cut off midway; it did not count. Please send again.",
       uploadFail: "Upload failed: ",
       uploadedMsg: (name, url) => `I've uploaded the creative "${name}", assetUrl: ${url}`,
     },
@@ -746,10 +752,64 @@
   function showTyping() {
     const row = document.createElement("div");
     row.className = "row bot";
-    row.innerHTML = '<div class="avatar bot">🤖</div><div class="bubble typing-bubble"><i></i><i></i><i></i></div>';
+    const avatar = document.createElement("div");
+    avatar.className = "avatar bot";
+    avatar.textContent = "🤖";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble typing-bubble";
+    bubble.innerHTML = "<i></i><i></i><i></i>";
+    // 进度文字用真节点建(不写进 innerHTML 字符串):这样才查得到、改得动
+    const note = document.createElement("span");
+    note.className = "typing-note";
+    bubble.appendChild(note);
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    row._note = note;          // 直接挂上,免得每次都去 querySelector
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return row;
+  }
+
+  /** 把「正在查报表…」这类进度写到打字气泡上,让用户知道它在干活而不是卡死 */
+  function setTypingNote(row, text) {
+    if (!row) return;
+    const note = row._note || (row.querySelector && row.querySelector(".typing-note"));
+    if (note) note.textContent = text || "";
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  /** 流式过程中,先用一个「纯文本」气泡承接不断到来的字。
+   *  为什么不边收边渲染 Markdown:表格写到一半是断的,渲染出来一片乱码,
+   *  看着像出错了。所以过程中显示纯文本,收尾时再整体排版一次。 */
+  function startStreamBubble() {
+    const row = addBubble("bot", "");
+    const bubble = row.children[1] || row.lastElementChild;
+    return {
+      row: row,
+      append: function (piece) {
+        bubble.textContent = (bubble.textContent || "") + piece;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      },
+      clear: function () { bubble.textContent = ""; },
+      isEmpty: function () { return !(bubble.textContent || "").trim(); },
+      remove: function () { row.remove(); },
+    };
+  }
+
+  /** 后端明确说明了原因的错误(区别于网络故障)。用 function 声明,会被提升。 */
+  function ChatError(message) {
+    const e = new Error(String(message));
+    e.name = "ChatError";
+    return e;
+  }
+
+  /** 一轮问答收尾:用排好版的最终文本建气泡、记进历史、存盘。
+   *  流式过程中显示的是纯文本,这里才做 Markdown 排版(表格要完整才排得对),
+   *  而且 done 事件带的是**盖过钢印的**回复,和非流式接口完全一致。 */
+  function finishReply(reply) {
+    addBubble("bot", reply);
+    history.push({ role: "assistant", content: reply });
+    saveHistory();
   }
 
   let busy = false;   // 正在等回复时为 true,挡住重复发送
@@ -783,31 +843,87 @@
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 180000);   // 3 分钟
 
+    let stream = null;   // 承接流式文字的气泡(只有真出字了才建)
     try {
-      const res = await fetch("/api/chat", {
+      const body = JSON.stringify({ messages: history, lang: lang });
+      const common = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history, lang: lang }),
+        body: body,
         signal: controller.signal,
-      });
-      const data = await res.json();
-      typing.remove();
+      };
 
-      if (!res.ok) {
-        addBubble("error", t().errPrefix + (data.error || res.status));
-        history.pop();  // 这轮没成功,撤掉刚才那句,方便重发
-        markUndelivered(userRow);
-        saveHistory();
-      } else {
-        addBubble("bot", data.reply);
-        history.push({ role: "assistant", content: data.reply });
-        saveHistory();
+      let res = await fetch("/api/chat/stream", common);
+
+      // 流式接口不可用(旧版后端 404、或被中间的代理拦了)→ 退回一次性接口。
+      // 宁可慢一点全须全尾地回来,也不能让用户对着空白页面干等。
+      if (!res.ok && (res.status === 404 || res.status === 405)) {
+        res = await fetch("/api/chat", common);
+        const data = await res.json();
+        typing.remove();
+        if (!res.ok) throw new ChatError(data.error || res.status);
+        finishReply(data.reply);
+        return;
       }
-    } catch (err) {
+
+      const ctype = res.headers.get("content-type") || "";
+      if (!ctype.includes("text/event-stream")) {
+        // 后端直接回了 JSON(多半是出错了)
+        const data = await res.json().catch(() => ({}));
+        typing.remove();
+        throw new ChatError(data.error || ("HTTP " + res.status));
+      }
+
+      // ===== 逐块读 SSE =====
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "", finalReply = null, failed = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        // SSE 以空行分隔一条事件;最后可能是半条,留在缓冲里等下一块
+        const chunks = buf.split("\n\n");
+        buf = chunks.pop();
+        for (const chunk of chunks) {
+          const line = chunk.split("\n").find((l) => l.indexOf("data: ") === 0);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch (e) { continue; }
+
+          if (ev.type === "status") {
+            setTypingNote(typing, ev.text);
+          } else if (ev.type === "delta") {
+            if (!stream) stream = startStreamBubble();
+            stream.append(ev.text || "");
+          } else if (ev.type === "reset") {
+            // 模型先说了句开场白又跑去调工具了 —— 那段不是答案,作废
+            if (stream) { stream.remove(); stream = null; }
+          } else if (ev.type === "done") {
+            finalReply = ev.reply;
+          } else if (ev.type === "error") {
+            failed = ev.error;
+          }
+        }
+      }
+
       typing.remove();
-      const msg = err.name === "AbortError" ? t().timeout : t().netErr + err.message;
+      if (stream) { stream.remove(); stream = null; }   // 换成排好版的最终气泡
+      if (failed) throw new ChatError(failed);
+      if (finalReply === null) throw new ChatError(t().streamBroken);
+      finishReply(finalReply);
+    } catch (err) {
+      if (stream) stream.remove();
+      typing.remove();
+      // ChatError = 后端明确告诉我们的原因(钥匙不对、额度用完…),原样转给用户;
+      // 其它异常才是"网络问题",别把后端的真实原因盖成"连不上"
+      const msg = err.name === "AbortError" ? t().timeout
+                : err.name === "ChatError" ? t().errPrefix + err.message
+                : t().netErr + err.message;
       addBubble("error", msg);
-      history.pop();
+      history.pop();          // 这轮没成功,撤掉刚才那句,方便重发
       markUndelivered(userRow);
       saveHistory();
     } finally {

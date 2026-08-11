@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑四套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(29)、`node frontend_test.js`(16)、`node dashboard_test.js`(9)、`node platform_test.js`(22)
+5. **改完代码必跑四套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(29)、`node frontend_test.js`(16)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -45,7 +45,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-四套测试:`smoke_test.py` 后端冒烟(31)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+四套测试:`smoke_test.py` 后端冒烟(32)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -170,6 +170,25 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 - `.env` 里的 `NEWSBREAK_ACCESS_TOKEN` 现在只给「不在用户上下文」的场景兜底
   (冒烟测试、命令行脚本)。**网页上的用户一律各绑各的。**
 
+## 六之五、流式回复(SSE)
+
+`POST /api/chat/stream`,事件类型:`status`(正在查什么)/ `delta`(新的一小段字)/
+`reset`(前面吐的字作废)/ `done`(带**盖过钢印**的完整回复)/ `error`。
+
+- **两个接口共用同一套逻辑**:`_route_brain()` 选大脑、`_brain_error()` 翻译报错。
+  非流式的 `/api/chat` 保留着当兜底 —— 流式一旦被中间的代理缓冲住,前端会自动退回它。
+- **`X-Accel-Buffering: no` 这个响应头不能少**:nginx 默认会把流攒成一坨再发,
+  用户看到的还是"转半天圈然后一次蹦出来",流式等于白做。加了这个头就不用改 nginx 配置。
+- **大脑函数是同步阻塞的**,所以丢进线程跑、用 `queue` 把事件递出来;
+  线程要 `contextvars.copy_context()`,否则当前用户的凭据带不进去。
+- **`reset` 是干嘛的**:模型可能先说句开场白再去调工具,那段不是答案,要让前端作废。
+- **前端过程中只显示纯文本**,`done` 到了才整体渲染 Markdown ——
+  表格写到一半是断的,边收边渲染会显示成一片乱码,看着像出错了。
+- **Gemini 那条路不能流式**(实测):`generate_content_stream` 配上「自动工具调用」
+  只回一个 `text=''` 的空块就 STOP,工具循环根本没跑。所以 Gemini 保持一次性返回、
+  只播报一句"正在思考…";**真流式目前只在 ofox/OpenAI 通道上**(它是手动挡,
+  工具循环在我们自己手里,能边收边吐)。要让免费通道也流式,得把 Gemini 也改成手动挡。
+
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
 两阶段 + 物理保险丝:
@@ -199,6 +218,9 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 | **循环变量遮蔽全局函数** | `dashboard.html` 里 `for (var t = 0; ...)` 和全局翻译函数 `t()` 撞名 → **var 提升到整个函数开头**,该函数里所有 `t()` 调用都变成"调用一个数字",报 `t is not a function`。表现:KPI 显示了但趋势图/柱状图/明细表全空(因为 drawTrend 抛错后,后面的 drawBars/drawTable 没机会跑)。`node --check` 抓不到(语法合法),**必须真实执行**:已加 `dashboard_test.js`(最小 DOM 模拟跑三个绘图函数,9 项)|
 | **点按钮没反应 = 初始化中途抛错** | 新写的模块放在文件末尾(`const` 声明),但早期就被 `applyLang()` 调用 → **函数声明会提升、`const` 变量不会** → 抛 `Cannot access 'X' before initialization` → 后面的 `addEventListener` 全没挂上 → 表现为"点按钮没反应"。**`node --check` 抓不到这类问题**,必须跑 `frontend_test.js` 真实执行一遍。解法:用 `var` 声明一个 `acctReady` 就绪标志(var 会提升且初始化为 undefined,早期读取安全),模块初始化完成后置 true |
 | **`.gitignore` 不支持行尾注释** | 写成 `scheduled_tasks.json   # 说明文字` → `#` 只有在**行首**才算注释,这行整体被当成一个字面 pattern,匹配不到任何文件 → 下次 `git add -A` 又把它加回版本库了。注释必须**单独占一行**。改完用 `git check-ignore -v <文件>` 验一下真的生效 |
+| **SSE 要加 `X-Accel-Buffering: no`** | 不加的话 nginx 会缓冲整条流,用户看到的还是"转圈很久然后一次蹦出来",流式白做。加在响应头里比改 nginx 配置省事(而且换机器不会忘) |
+| **Gemini 流式 + 自动工具调用 = 不工作** | `generate_content_stream` 配 `tools=` 时实测只回一个 `text=''` 的空块就 `finish_reason=STOP`,工具循环没跑。表现是用户收到一句"(Gemini 没有返回文字)"。别硬凑,要么保持一次性返回,要么把 Gemini 改成手动挡自己跑工具循环 |
+| **测"一闪而过"的东西别按时序抓** | 进度文字这类中途状态,用 `await tick()` 轮询去抓极不稳定(事件全在微任务里瞬间跑完,而且 helper 把 `setTimeout` 桩成了空函数)。改成**记账**:helper 记录每一次 `textContent` 写入,测试查记录 |
 | **contextvars 要设在 call_next 之前** | 在 `BaseHTTPMiddleware` 里设的上下文变量,只有设在 `await call_next(request)` **之前**才会传到下游;设在之后不生效。同步接口被丢进线程池也没问题——`run_in_threadpool` 会复制当前上下文 |
 | **"没绑就回落公用 token"= 没隔离** | 按人隔离时,`_token()` 必须区分「不在用户上下文」(None,回落 .env)和「在用户上下文但没绑」(空 dict,直接报错)。少了这个区分,B 登录后会直接用上 .env 里的公用 token,隔离形同虚设。冒烟测试里有一条专门守这个 |
 | **cookie 的 secure 不能写死 True** | 写死了本地 `http://localhost` 开发时浏览器**根本不存这个 cookie**,直接登不进去。要按 `request.url.scheme` 判断。放在 nginx 后面时这个 scheme 来自 `X-Forwarded-Proto` 请求头,所以反代配置里那行不能少;缺了只是退回不加 secure,不会把人挡在门外 |
