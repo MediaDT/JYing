@@ -1356,7 +1356,13 @@ _RETRYABLE_CODES = (429, 500, 502, 503, 504)
 
 
 def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
-    """大脑 A:Gemini。钥匙从环境变量 GEMINI_API_KEY 自动读取。"""
+    """大脑 A:Gemini。钥匙从环境变量 GEMINI_API_KEY 自动读取。
+
+    走「手动挡」:关掉 SDK 的自动工具调用,自己跑工具循环。
+    为什么不用自动挡 —— 自动挡配上流式实测是坏的(`generate_content_stream`
+    只回一个 text='' 的空块就 STOP,工具循环根本没跑)。自己跑循环之后,
+    既能边收边吐字,也能在每次调工具时播报"正在查什么"。
+    """
     client = genai.Client()
     # 把聊天记录翻译成 Gemini 的格式:它管助手叫 "model",不叫 "assistant"
     contents = [
@@ -1371,22 +1377,7 @@ def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
     last_error = None
     for model in models_to_try:
         try:
-            cfg = genai_types.GenerateContentConfig(
-                system_instruction=_system_prompt_now(lang),
-                # 把工具递给它:Gemini 会"自动工具调用"——自己挑工具、自己执行、
-                # 拿到结果接着想,循环到能回答为止,最后只把人话答案给我们
-                tools=NEWSBREAK_TOOLS,
-            )
-            # 注意:Gemini 这条路**不能流式**。generate_content_stream 配上
-            # 「自动工具调用」时,实测只回一个 text='' 的空块就 STOP 了 ——
-            # 工具循环没跑起来。硬上流式的结果是用户收到一句"没有返回文字"。
-            # 所以这里保持一次性返回,只播报一句进度,让界面有个交代。
-            # 要在免费通道上也做到真流式,得把 Gemini 也改成"手动挡"
-            # (自己跑工具循环,像 ask_openai 那样),那是另一件事。
-            _emit("status", text="正在思考…")
-            response = client.models.generate_content(
-                model=model, contents=contents, config=cfg)
-            return response.text or "(Gemini 没有返回文字)"
+            return _gemini_loop(client, model, contents, lang)
         except genai_errors.APIError as e:
             if e.code in _RETRYABLE_CODES:   # 额度用尽或上游繁忙,换备胎接着试
                 last_error = e
@@ -1394,6 +1385,77 @@ def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
             raise
     raise last_error
 
+
+def _gemini_parts(obj) -> list:
+    """从一个响应/流块里把 parts 掏出来(结构层层嵌套,单独封一下省得到处判空)。"""
+    cand = (getattr(obj, "candidates", None) or [None])[0]
+    content = getattr(cand, "content", None)
+    return list(getattr(content, "parts", None) or [])
+
+
+def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
+    """Gemini 的工具调用循环(手动挡)。流式时边收边把文字播报出去。"""
+    cfg = genai_types.GenerateContentConfig(
+        system_instruction=_system_prompt_now(lang),
+        tools=NEWSBREAK_TOOLS,
+        # 关掉自动工具调用:我们自己执行、自己把结果贴回去。
+        # 这样才能在流式下正常工作,也才能播报每一步在干什么。
+        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    streaming = CURRENT_EMIT.get() is not None
+    contents = list(contents)
+
+    for _ in range(10):   # 设个上限防转圈
+        texts, calls, model_parts = [], [], []
+
+        def take(part):
+            """收下模型吐出来的一个 part。
+
+            **必须原样留着这个对象**,不能自己重新造一个 Part —— 里面带着
+            `thought_signature`,把它贴回对话时 Gemini 要拿来校验,
+            少了会直接报 400「Function call is missing a thought_signature」。
+            """
+            model_parts.append(part)
+            if getattr(part, "function_call", None):
+                calls.append(part.function_call)
+            elif getattr(part, "text", None):
+                texts.append(part.text)
+                if streaming:
+                    _emit("delta", text=part.text)
+
+        if streaming:
+            for chunk in client.models.generate_content_stream(
+                    model=model, contents=contents, config=cfg):
+                for part in _gemini_parts(chunk):
+                    take(part)
+        else:
+            resp = client.models.generate_content(model=model, contents=contents, config=cfg)
+            for part in _gemini_parts(resp):
+                take(part)
+
+        if not calls:
+            return "".join(texts) or "(Gemini 没有返回文字)"
+
+        # 它要用工具:说明刚才吐的那点字只是开场白,不是最终答案 → 让前端作废重来
+        if streaming and texts:
+            _emit("reset")
+
+        contents.append(genai_types.Content(role="model", parts=model_parts))
+
+        # 替它执行,把结果贴回去,再让它接着想
+        result_parts = []
+        for fc in calls:
+            _emit("status", text=_tool_label(fc.name))
+            fn = OPENAI_TOOL_FUNCS.get(fc.name)
+            try:
+                result = fn(**dict(fc.args or {})) if fn else {"error": f"未知工具 {fc.name}"}
+            except Exception as e:
+                result = {"error": str(e)}
+            result_parts.append(genai_types.Part.from_function_response(
+                name=fc.name, response={"result": result}))
+        contents.append(genai_types.Content(role="user", parts=result_parts))
+
+    return "(工具调用轮数过多,已中止,请换个问法)"
 
 # ============ 大脑 B:ChatGPT(OpenAI) ============
 # ChatGPT 的工具调用是"手动挡":要给每个工具写 JSON 说明书,并自己跑调用循环。

@@ -184,10 +184,9 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 - **`reset` 是干嘛的**:模型可能先说句开场白再去调工具,那段不是答案,要让前端作废。
 - **前端过程中只显示纯文本**,`done` 到了才整体渲染 Markdown ——
   表格写到一半是断的,边收边渲染会显示成一片乱码,看着像出错了。
-- **Gemini 那条路不能流式**(实测):`generate_content_stream` 配上「自动工具调用」
-  只回一个 `text=''` 的空块就 STOP,工具循环根本没跑。所以 Gemini 保持一次性返回、
-  只播报一句"正在思考…";**真流式目前只在 ofox/OpenAI 通道上**(它是手动挡,
-  工具循环在我们自己手里,能边收边吐)。要让免费通道也流式,得把 Gemini 也改成手动挡。
+- **两条大脑路径现在都是手动挡**:Gemini 也关掉了 SDK 的自动工具调用
+  (`AutomaticFunctionCallingConfig(disable=True)`),自己跑工具循环。
+  原因见第八节坑表那两条 —— 自动挡配流式是坏的,而且自动挡也没法播报进度。
 
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
@@ -219,7 +218,8 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 | **点按钮没反应 = 初始化中途抛错** | 新写的模块放在文件末尾(`const` 声明),但早期就被 `applyLang()` 调用 → **函数声明会提升、`const` 变量不会** → 抛 `Cannot access 'X' before initialization` → 后面的 `addEventListener` 全没挂上 → 表现为"点按钮没反应"。**`node --check` 抓不到这类问题**,必须跑 `frontend_test.js` 真实执行一遍。解法:用 `var` 声明一个 `acctReady` 就绪标志(var 会提升且初始化为 undefined,早期读取安全),模块初始化完成后置 true |
 | **`.gitignore` 不支持行尾注释** | 写成 `scheduled_tasks.json   # 说明文字` → `#` 只有在**行首**才算注释,这行整体被当成一个字面 pattern,匹配不到任何文件 → 下次 `git add -A` 又把它加回版本库了。注释必须**单独占一行**。改完用 `git check-ignore -v <文件>` 验一下真的生效 |
 | **SSE 要加 `X-Accel-Buffering: no`** | 不加的话 nginx 会缓冲整条流,用户看到的还是"转圈很久然后一次蹦出来",流式白做。加在响应头里比改 nginx 配置省事(而且换机器不会忘) |
-| **Gemini 流式 + 自动工具调用 = 不工作** | `generate_content_stream` 配 `tools=` 时实测只回一个 `text=''` 的空块就 `finish_reason=STOP`,工具循环没跑。表现是用户收到一句"(Gemini 没有返回文字)"。别硬凑,要么保持一次性返回,要么把 Gemini 改成手动挡自己跑工具循环 |
+| **Gemini 手动挡要原样带回 part** | 自己跑工具循环时,把函数调用贴回对话**不能自己重新造 `Part`** —— 原始 part 里带着 `thought_signature`,Gemini 要拿它校验,少了直接报 400「Function call is missing a thought_signature」。解法:收下模型吐的 part 对象**原样存着**,别只取 `function_call` 再重建 |
+| **Gemini 流式 + 自动工具调用 = 不工作** | `generate_content_stream` 配 `tools=` 时实测只回一个 `text=''` 的空块就 `finish_reason=STOP`,工具循环没跑。表现是用户收到一句"(Gemini 没有返回文字)"。**解法:关掉自动工具调用改手动挡**(已实施),顺带还能播报每一步在查什么 |
 | **测"一闪而过"的东西别按时序抓** | 进度文字这类中途状态,用 `await tick()` 轮询去抓极不稳定(事件全在微任务里瞬间跑完,而且 helper 把 `setTimeout` 桩成了空函数)。改成**记账**:helper 记录每一次 `textContent` 写入,测试查记录 |
 | **contextvars 要设在 call_next 之前** | 在 `BaseHTTPMiddleware` 里设的上下文变量,只有设在 `await call_next(request)` **之前**才会传到下游;设在之后不生效。同步接口被丢进线程池也没问题——`run_in_threadpool` 会复制当前上下文 |
 | **"没绑就回落公用 token"= 没隔离** | 按人隔离时,`_token()` 必须区分「不在用户上下文」(None,回落 .env)和「在用户上下文但没绑」(空 dict,直接报错)。少了这个区分,B 登录后会直接用上 .env 里的公用 token,隔离形同虚设。冒烟测试里有一条专门守这个 |
