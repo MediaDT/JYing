@@ -45,7 +45,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-四套测试:`smoke_test.py` 后端冒烟(29)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+四套测试:`smoke_test.py` 后端冒烟(30)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -109,10 +109,8 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
   `ready`(有对接代码,能用)/ `coming`(还没接,只显示「敬请期待」且按钮禁用)。
   **铁律:没有真正对接代码的平台绝不许标 ready** —— 用户满怀期待点进去发现什么都干不了,
   比不列出来更糟。冒烟测试里有一条专门查这个。
-- `bound` 是个**函数**(不是死值),每次问都现查:NewsBreak 现在的判断是
-  「`.env` 里有非空的 `NEWSBREAK_ACCESS_TOKEN`」。注意 **token 目前全局共享**,
-  所有登录用户操作同一个广告账户(符合团队共管一批广告);
-  将来要每人绑自己的账户,只改这个函数为按 user_id 查即可。
+- `bound` 是个**函数**,签名是 `bound(user_id)` —— **每人绑自己的**,
+  判断依据是 `data/creds.json` 里这个人有没有存过 token,**不看 `.env`**。
 - `GET /api/platforms` 吐 `public_list()`(去掉函数、带上当前绑定状态)给两个前端页用。
 - **聊天页不再写死 NewsBreak**:`PLATFORM` / `PLATFORM_NAME` / `PLATFORM_BOUND` 三个
   **var** 变量(必须 var,见第八节的提升坑)在 I18N 之前声明,副标题文案用 `{p}` 占位符
@@ -151,6 +149,27 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 - **NewsBreak token 仍是全局的**(在 `.env` 里),所有登录用户操作同一个广告账户 ——
   登录解决的是"记录跟人走",不是"数据隔离"。要每人管自己的账户,见第六之二节 `bound()` 那段。
 
+## 六之四、每人绑自己的平台账号(按人隔离)
+
+**为什么**:token 原来是全局一份存在 `.env` 里,A 绑好之后 B 登录进来直接就能操作 A 的广告账户。
+现在每人一份。
+
+- **存哪儿**:`data/creds.json`,结构 `{user_id: {platform: {token, account_id}}}`,
+  写入后 `chmod 600`。`data/` 已被 `.gitignore` 排除。
+- **怎么一路带下去**:工具函数散落在很深的调用链里,逐层传参不现实,所以用
+  **`contextvars`** —— `newsbreak_client.CURRENT_CREDS` 在 `AuthMiddleware` 里设一次
+  (必须设在 `call_next` **之前**,下游才读得到;FastAPI 把同步接口丢进线程池时会复制上下文)。
+  同理还有 `agent_server.CURRENT_USER_ID`,给 AI 的工具函数用(比如登记定时任务要记下是谁定的)。
+- **取值约定(关键)**:`CURRENT_CREDS` 为 `None` = 不在用户上下文(定时任务线程 / 命令行 / 测试)
+  → 回落 `.env`;为 `dict` = 在用户上下文,**只认这个人的**,他没绑就报错,
+  **绝不偷偷回落 `.env`** —— 一旦回落,B 就会用上公用 token,等于没隔离。
+- **定时任务**:登记时把 `user_id` 存进任务里,看表线程执行时用**当初那个人**的凭据
+  (`execute_fn(level, object_id, status, user_id)`)。
+- **`_account_state()` 也要按人读**:以前读 `.env`,导致没绑账号的人也能看到公用 token 的
+  掩码 —— 那是别人的东西,不该露给他。
+- `.env` 里的 `NEWSBREAK_ACCESS_TOKEN` 现在只给「不在用户上下文」的场景兜底
+  (冒烟测试、命令行脚本)。**网页上的用户一律各绑各的。**
+
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
 两阶段 + 物理保险丝:
@@ -180,6 +199,8 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 | **循环变量遮蔽全局函数** | `dashboard.html` 里 `for (var t = 0; ...)` 和全局翻译函数 `t()` 撞名 → **var 提升到整个函数开头**,该函数里所有 `t()` 调用都变成"调用一个数字",报 `t is not a function`。表现:KPI 显示了但趋势图/柱状图/明细表全空(因为 drawTrend 抛错后,后面的 drawBars/drawTable 没机会跑)。`node --check` 抓不到(语法合法),**必须真实执行**:已加 `dashboard_test.js`(最小 DOM 模拟跑三个绘图函数,9 项)|
 | **点按钮没反应 = 初始化中途抛错** | 新写的模块放在文件末尾(`const` 声明),但早期就被 `applyLang()` 调用 → **函数声明会提升、`const` 变量不会** → 抛 `Cannot access 'X' before initialization` → 后面的 `addEventListener` 全没挂上 → 表现为"点按钮没反应"。**`node --check` 抓不到这类问题**,必须跑 `frontend_test.js` 真实执行一遍。解法:用 `var` 声明一个 `acctReady` 就绪标志(var 会提升且初始化为 undefined,早期读取安全),模块初始化完成后置 true |
 | **`.gitignore` 不支持行尾注释** | 写成 `scheduled_tasks.json   # 说明文字` → `#` 只有在**行首**才算注释,这行整体被当成一个字面 pattern,匹配不到任何文件 → 下次 `git add -A` 又把它加回版本库了。注释必须**单独占一行**。改完用 `git check-ignore -v <文件>` 验一下真的生效 |
+| **contextvars 要设在 call_next 之前** | 在 `BaseHTTPMiddleware` 里设的上下文变量,只有设在 `await call_next(request)` **之前**才会传到下游;设在之后不生效。同步接口被丢进线程池也没问题——`run_in_threadpool` 会复制当前上下文 |
+| **"没绑就回落公用 token"= 没隔离** | 按人隔离时,`_token()` 必须区分「不在用户上下文」(None,回落 .env)和「在用户上下文但没绑」(空 dict,直接报错)。少了这个区分,B 登录后会直接用上 .env 里的公用 token,隔离形同虚设。冒烟测试里有一条专门守这个 |
 | **cookie 的 secure 不能写死 True** | 写死了本地 `http://localhost` 开发时浏览器**根本不存这个 cookie**,直接登不进去。要按 `request.url.scheme` 判断。放在 nginx 后面时这个 scheme 来自 `X-Forwarded-Proto` 请求头,所以反代配置里那行不能少;缺了只是退回不加 secure,不会把人挡在门外 |
 | **测试的 DOM 模拟要够真** | helper 里 `remove()` 曾是空函数、`getElementById` 找不到动态创建的元素 → 测「提示有没有被撤掉」永远是假通过。已修:`appendChild` 记父节点、`remove()` 真摘、`id` setter 自动登记。另外 fetch 桩失败时要返回**失败的 Promise**而不是同步抛,否则测不出页面的 `.catch` 分支 |
 | **探活别 curl `/`** | 加了登录门之后,未登录访问 `/` 返回 **302**(跳 `/login`),这是**正常**的。老口诀「不是 200 就重启」会把好端端的服务白重启一遍。改用 `curl .../login` 看 200,或接受 200/302 都算活 |

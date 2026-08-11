@@ -27,6 +27,7 @@ _DIR = Path(__file__).with_name("data")
 _CHATS = _DIR / "chats"
 _USERS_FILE = _DIR / "users.json"
 _SESSIONS_FILE = _DIR / "sessions.json"
+_CREDS_FILE = _DIR / "creds.json"     # 每个人自己的投放平台凭据
 
 SESSION_DAYS = 30           # 登录后多久要重新登录
 _lock = threading.Lock()    # 多个请求同时写文件时上锁
@@ -50,6 +51,48 @@ def _write(path: Path, data) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
     tmp.replace(path)        # 先写临时文件再改名:中途断电也不会写出半个坏文件
+
+
+# ============ 每个人自己的投放平台凭据 ============
+#
+# 结构:{user_id: {platform: {"token": "...", "account_id": "..."}}}
+#
+# 为什么按人存:token 一旦全局共享,A 绑好之后 B 登录进来就直接操作 A 的广告账户了。
+# 团队共管同一批广告时那样也能用,但"谁都能动谁的账户"不是能默认的事。
+
+def get_creds(user_id: str, platform: str = "newsbreak") -> dict:
+    """读某人在某个平台的凭据。没有就返回空字典。"""
+    if not user_id:
+        return {}
+    all_creds = _read(_CREDS_FILE, {})
+    return dict((all_creds.get(user_id) or {}).get(platform) or {})
+
+
+def set_creds(user_id: str, platform: str = "newsbreak", **fields) -> None:
+    """写某人在某个平台的凭据(只覆盖传进来的字段,其余保留)。"""
+    if not user_id:
+        return
+    with _lock:
+        all_creds = _read(_CREDS_FILE, {})
+        rec = all_creds.setdefault(user_id, {}).setdefault(platform, {})
+        rec.update(fields)
+        _write(_CREDS_FILE, all_creds)
+        # 里面是真 token,只让文件属主读写
+        try:
+            _CREDS_FILE.chmod(0o600)
+        except OSError:
+            pass
+
+
+def clear_creds(user_id: str, platform: str = "newsbreak") -> None:
+    """解绑:把某人某个平台的凭据删掉。"""
+    if not user_id:
+        return
+    with _lock:
+        all_creds = _read(_CREDS_FILE, {})
+        if user_id in all_creds:
+            all_creds[user_id].pop(platform, None)
+            _write(_CREDS_FILE, all_creds)
 
 
 # ============ 密码 ============

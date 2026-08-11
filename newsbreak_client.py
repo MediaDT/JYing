@@ -10,6 +10,7 @@ NewsBreak 只读客户端 —— agent 的"手",目前只会"看",不会"动"。
 这里全部是"查询"类操作(GET),不会修改 NewsBreak 上的任何东西,放心用。
 """
 
+import contextvars
 import os
 from pathlib import Path
 
@@ -23,8 +24,36 @@ class NewsBreakError(Exception):
     """NewsBreak 返回了错误,message 里是人能看懂的原因。"""
 
 
+# ===== 「当前是谁在用」的上下文 =====
+# 每个登录用户绑自己的 NewsBreak token。但工具函数散落在很深的调用链里,
+# 一层层传参数不现实,所以用 contextvars:在每个请求的入口设一次,
+# 这条调用链上的所有代码(包括 FastAPI 丢进线程池的同步函数)都能读到。
+#
+# 取值约定:
+#   None  = 不在"某个登录用户"的上下文里(定时任务线程 / 命令行脚本 / 测试)→ 回落到 .env
+#   dict  = 在用户上下文里,就**只认**这个人的凭据;他没绑就报错,
+#           绝不偷偷回落到 .env —— 否则 A 绑过之后 B 进来会直接用上 A 的账户,
+#           那就等于没隔离。
+CURRENT_CREDS: contextvars.ContextVar = contextvars.ContextVar("nb_current_creds", default=None)
+
+NOT_BOUND_MSG = "你还没绑定 NewsBreak 账号 —— 点顶栏的 🔗 按钮,粘贴你自己的 Access Token 就能用了"
+
+
+def current_account_id() -> str:
+    """当前用户选定的广告账户 id(没在用户上下文里就返回空)。"""
+    cur = CURRENT_CREDS.get()
+    return (cur or {}).get("account_id", "") or ""
+
+
 def _token() -> str:
-    """拿 NewsBreak 钥匙:优先环境变量,没有就自己读一遍 .env。"""
+    """拿 NewsBreak 钥匙:先看当前用户绑的,不在用户上下文才回落到 .env。"""
+    cur = CURRENT_CREDS.get()
+    if cur is not None:
+        tok = (cur.get("token") or "").strip()
+        if not tok:
+            raise NewsBreakError(NOT_BOUND_MSG)
+        return tok
+
     token = os.environ.get("NEWSBREAK_ACCESS_TOKEN", "").strip()
     if not token:
         env_path = Path(__file__).with_name(".env")

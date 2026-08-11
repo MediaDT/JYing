@@ -12,6 +12,7 @@
     ./venv/bin/uvicorn agent_server:app --host 0.0.0.0 --port 18100
 """
 
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -89,6 +90,11 @@ import platforms as plat  # noqa: E402
 
 SESSION_COOKIE = "adbot_session"
 
+# 当前请求是谁发的。AI 的工具函数(比如登记定时任务)藏在很深的调用链里,
+# 拿不到 request,所以在中间件里设一次,它们直接读。
+# 空字符串 = 不在请求里(定时任务线程 / 命令行 / 测试)。
+CURRENT_USER_ID: contextvars.ContextVar = contextvars.ContextVar("adbot_user_id", default="")
+
 # 不需要登录就能访问的地址:登录页本身、登录/注册接口、静态资源
 _PUBLIC_PATHS = {"/login", "/api/login", "/api/register", "/api/auth-status", "/favicon.ico"}
 
@@ -108,6 +114,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         user = acc.session_user(request.cookies.get(SESSION_COOKIE, ""))
         if user:
             request.state.user = user
+            # 把「这个人绑的 NewsBreak 凭据」放进上下文。设在 call_next 之前,
+            # 下游(包括 FastAPI 丢进线程池跑的同步接口)才读得到。
+            # 没绑的人这里是空 dict —— 关键是**不为 None**,这样 _token() 就知道
+            # "在用户上下文里,他没绑",会直接报错而不是偷偷用 .env 里的公用 token。
+            nb.CURRENT_CREDS.set(acc.get_creds(user["id"], "newsbreak"))
+            CURRENT_USER_ID.set(user["id"])
             return await call_next(request)
 
         # 页面请求 → 跳登录页;接口请求 → 回 401 让前端处理
@@ -122,9 +134,15 @@ app.add_middleware(AuthMiddleware)
 app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
 
 
-def _scheduled_execute(level: str, object_id: str, status: str):
-    """定时任务到点时真正干活的函数(交给 scheduler 的看表线程调用)。"""
+def _scheduled_execute(level: str, object_id: str, status: str, user_id: str = ""):
+    """定时任务到点时真正干活的函数(交给 scheduler 的看表线程调用)。
+
+    看表线程不在任何请求里,没有"当前用户",所以要**用当初登记这条任务的人**
+    的凭据来执行 —— 否则按人隔离之后,定时任务就不知道该用谁的账户了。
+    """
     try:
+        if user_id:
+            nb.CURRENT_CREDS.set(acc.get_creds(user_id, "newsbreak"))
         return nb.update_status(level, object_id, status)
     except Exception as e:
         return {"error": str(e)}
@@ -656,6 +674,8 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
         "type": "schedule",
         "kind": kind, "when": when, "level": level,
         "object_id": object_id, "status": status, "name": name,
+        # 记下是谁定的:到点时看表线程要用他自己的凭据去执行
+        "user_id": CURRENT_USER_ID.get(),
         "seq": _REQUEST_SEQ,
     }
     dup = _find_duplicate(candidate)
@@ -725,7 +745,7 @@ def index():
 # ============ 素材上传中转:浏览器 → 这里 → NewsBreak ============
 from fastapi import File, UploadFile  # noqa: E402
 
-_CACHED_ACCOUNT_ID = ""
+_CACHED_ACCOUNT_ID: dict = {}    # {token前12位: 账户id} —— 按 token 分桶,不同用户不串号
 # 素材地址 → 素材类型(IMAGE/GIF/VIDEO),上传时记下,建广告时查回
 _ASSET_TYPES: dict[str, str] = {}
 
@@ -748,19 +768,28 @@ def _default_ad_account_id() -> str:
     静默挑错账户会把素材传进别人的账户,属于"不报错但结果全错"的坑。
     """
     global _CACHED_ACCOUNT_ID
-    picked = _read_env_value("NEWSBREAK_AD_ACCOUNT_ID")
+    picked = nb.current_account_id() or _read_env_value("NEWSBREAK_AD_ACCOUNT_ID")
     if picked:
         return picked
-    if _CACHED_ACCOUNT_ID:
-        return _CACHED_ACCOUNT_ID
+    # 缓存按 token 分桶:不同用户的 token 不同,不会串号
+    key = ""
+    try:
+        key = nb._token()[:12]
+    except Exception:
+        pass
+    if key and isinstance(_CACHED_ACCOUNT_ID, dict) and _CACHED_ACCOUNT_ID.get(key):
+        return _CACHED_ACCOUNT_ID[key]
     accounts = _all_ad_accounts()
     if not accounts:
         raise nb.NewsBreakError("名下没有任何广告账户")
     if len(accounts) > 1:
         listed = "、".join(f"{a['name']}(id={a['id']})" for a in accounts)
         raise nb.NewsBreakError(f"你名下有 {len(accounts)} 个广告账户,请在页面顶栏「🔗 账户」里选一个,或直接告诉我用哪个:{listed}")
-    _CACHED_ACCOUNT_ID = accounts[0]["id"]
-    return _CACHED_ACCOUNT_ID
+    if not isinstance(_CACHED_ACCOUNT_ID, dict):
+        _CACHED_ACCOUNT_ID = {}
+    if key:
+        _CACHED_ACCOUNT_ID[key] = accounts[0]["id"]
+    return accounts[0]["id"]
 
 
 # ============ 广告账户接入(页面顶栏「🔗 账户」用的接口)============
@@ -780,7 +809,7 @@ def _write_env_value(key: str, value: str) -> None:
     env_path.write_text("\n".join(lines) + "\n")
     os.environ[key] = value          # 同步进当前进程,立即生效
     global _CACHED_ACCOUNT_ID
-    _CACHED_ACCOUNT_ID = ""          # 账户可能变了,清掉缓存
+    _CACHED_ACCOUNT_ID = {}          # 账户可能变了,清掉缓存
 
 
 def _mask(token: str) -> str:
@@ -791,8 +820,17 @@ def _mask(token: str) -> str:
 
 
 def _account_state() -> dict:
-    """当前接入状态:有没有 token、连到了哪个组织/账户、当前用哪个。"""
-    token = _read_env_value("NEWSBREAK_ACCESS_TOKEN") or os.environ.get("NEWSBREAK_ACCESS_TOKEN", "")
+    """当前接入状态:有没有 token、连到了哪个组织/账户、当前用哪个。
+
+    **只看当前登录用户自己绑的那把钥匙**。以前这里读 `.env`,
+    结果没绑账号的人也会看到公用 token 的掩码 —— 那是别人的东西,不该露给他。
+    """
+    cur = nb.CURRENT_CREDS.get()
+    if cur is not None:
+        token = (cur.get("token") or "")
+    else:
+        # 不在用户上下文(命令行/测试)才回落到 .env
+        token = _read_env_value("NEWSBREAK_ACCESS_TOKEN") or os.environ.get("NEWSBREAK_ACCESS_TOKEN", "")
     if not token.strip():
         return {"connected": False, "token_masked": "", "organizations": [], "accounts": [], "active_account_id": ""}
     try:
@@ -802,7 +840,7 @@ def _account_state() -> dict:
         # token 填了但用不了(过期/无效/网络问题)——如实告诉用户
         return {"connected": False, "token_masked": _mask(token), "organizations": [], "accounts": [],
                 "active_account_id": "", "error": str(e)}
-    active = _read_env_value("NEWSBREAK_AD_ACCOUNT_ID")
+    active = nb.current_account_id() or _read_env_value("NEWSBREAK_AD_ACCOUNT_ID")
     if not active and len(accounts) == 1:
         active = accounts[0]["id"]
     return {
@@ -1011,10 +1049,12 @@ def platforms_page():
 
 
 @app.get("/api/platforms")
-def list_platforms():
-    """有哪些平台可选、各自绑没绑账号。"""
+def list_platforms(request: Request):
+    """有哪些平台可选、**当前这个人**各自绑没绑账号。"""
     load_env_file()
-    return {"platforms": plat.public_list(), "default": plat.DEFAULT_ID}
+    user = _current_user(request)
+    return {"platforms": plat.public_list(user["id"] if user else ""),
+            "default": plat.DEFAULT_ID}
 
 
 @app.get("/api/auth-status")
@@ -1136,24 +1176,31 @@ class TokenIn(BaseModel):
 
 
 @app.post("/api/account/token")
-def set_account_token(body: TokenIn):
-    """保存 NewsBreak Access Token。先验证再存,无效的不会写进去。"""
+def set_account_token(body: TokenIn, request: Request):
+    """保存**当前登录用户自己**的 NewsBreak Access Token。先验证再存,无效的不会写进去。"""
     token = (body.token or "").strip()
     if not token:
         return JSONResponse(status_code=400, content={"error": "请先粘贴 Access Token"})
 
-    old = os.environ.get("NEWSBREAK_ACCESS_TOKEN", "")
-    os.environ["NEWSBREAK_ACCESS_TOKEN"] = token      # 先临时生效,拿它去试一次
+    user = _current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "请先登录"})
+
+    # 拿这个 token 临时试一次:能查到组织才算有效。验证失败就原样退回,
+    # 用户原来那把好钥匙纹丝不动。
+    old = nb.CURRENT_CREDS.get()
+    nb.CURRENT_CREDS.set({"token": token})
     try:
-        nb.list_organizations()                       # 验证:能查到组织就说明 token 有效
+        nb.list_organizations()
     except Exception as e:
-        os.environ["NEWSBREAK_ACCESS_TOKEN"] = old     # 验证失败,原样还回去
+        nb.CURRENT_CREDS.set(old)
         return JSONResponse(status_code=400, content={
             "error": f"这个 Access Token 用不了:{e}。请确认是从 NewsBreak Ad Manager → Resources → API Access Tokens 生成的"})
 
-    _write_env_value("NEWSBREAK_ACCESS_TOKEN", token)
-    _write_env_value("NEWSBREAK_AD_ACCOUNT_ID", "")   # 换了 token,之前选的账户作废
-    print("[account] 已更新 NewsBreak Access Token 并验证通过", flush=True)
+    # 换了 token,之前选的账户作废(那是上一把钥匙下的账户)
+    acc.set_creds(user["id"], "newsbreak", token=token, account_id="")
+    nb.CURRENT_CREDS.set({"token": token, "account_id": ""})
+    print(f"[account] {user['username']} 已绑定自己的 NewsBreak Token 并验证通过", flush=True)
     return _account_state()
 
 
@@ -1162,17 +1209,23 @@ class AccountIn(BaseModel):
 
 
 @app.post("/api/account/select")
-def select_account(body: AccountIn):
-    """选定当前要操作的广告账户(多账户时用)。"""
+def select_account(body: AccountIn, request: Request):
+    """选定当前要操作的广告账户(多账户时用)。也是按人存的。"""
     account_id = (body.account_id or "").strip()
+    user = _current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "请先登录"})
     try:
         valid = {a["id"] for a in _all_ad_accounts()}
     except Exception as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
     if account_id and account_id not in valid:
         return JSONResponse(status_code=400, content={"error": "这个账户不在你名下,换一个"})
-    _write_env_value("NEWSBREAK_AD_ACCOUNT_ID", account_id)
-    print(f"[account] 当前广告账户切换为 {account_id or '(自动)'}", flush=True)
+    acc.set_creds(user["id"], "newsbreak", account_id=account_id)
+    cur = dict(nb.CURRENT_CREDS.get() or {})
+    cur["account_id"] = account_id
+    nb.CURRENT_CREDS.set(cur)
+    print(f"[account] {user['username']} 的当前广告账户切换为 {account_id or '(自动)'}", flush=True)
     return _account_state()
 
 

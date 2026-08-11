@@ -66,6 +66,41 @@ def test_pure_logic():
 
     check("平台注册表自洽(未对接的不会假装能用)", t_platform_registry)
 
+    # 每人绑自己的 token:A 绑过之后 B 绝不能蹭到。这是安全边界,不能退化。
+    def t_per_user_isolation():
+        import accounts as acc
+        import newsbreak_client as nb
+        bad = []
+        acc.set_creds("_smoke_A", "newsbreak", token="tok-A")
+        try:
+            if acc.get_creds("_smoke_B"):
+                bad.append("B 居然读到了 A 的凭据")
+            if not plat.is_bound("newsbreak", "_smoke_A"):
+                bad.append("A 绑了却说没绑")
+            if plat.is_bound("newsbreak", "_smoke_B"):
+                bad.append("B 没绑却说绑了")
+            if plat.is_bound("newsbreak"):
+                bad.append("不传 user_id 时居然算已绑定")
+
+            old = nb.CURRENT_CREDS.get()
+            try:
+                nb.CURRENT_CREDS.set({"token": "tok-A"})
+                if nb._token() != "tok-A":
+                    bad.append("用户上下文里没拿到他自己的 token")
+                nb.CURRENT_CREDS.set({})          # 登录了但没绑
+                try:
+                    nb._token()
+                    bad.append("没绑的人居然拿到了 token(偷偷回落 .env 了)")
+                except nb.NewsBreakError:
+                    pass
+            finally:
+                nb.CURRENT_CREDS.set(old)
+        finally:
+            acc.clear_creds("_smoke_A")
+        return bad or True
+
+    check("每人一份 token,互相蹭不到", t_per_user_isolation)
+
     def t_creative_type():
         cases = [
             ("a.png", "image/png", "IMAGE"),

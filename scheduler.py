@@ -200,7 +200,9 @@ def _run_due_tasks(execute_fn) -> None:
 
             # 到点了,执行
             try:
-                result = execute_fn(t["level"], t["object_id"], t["status"])
+                # 带上「当初是谁登记的」—— 按人隔离之后,要用他自己的凭据去执行
+                result = execute_fn(t["level"], t["object_id"], t["status"],
+                                    t.get("user_id", ""))
                 ok = not (isinstance(result, dict) and result.get("error"))
                 detail = str(result.get("error"))[:150] if not ok else "成功"
             except Exception as e:

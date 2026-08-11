@@ -154,8 +154,9 @@ cd ~/workspace/my-agent
 
 点开后:
 
-- **还没接入** → 粘贴 NewsBreak Access Token 就能连上
-  (去哪拿:Ad Manager → Resources → API Access Tokens);
+- **还没接入** → 粘贴**你自己的** NewsBreak Access Token 就能连上
+  (去哪拿:Ad Manager → Resources → API Access Tokens)。
+  **每个账号各绑各的**——别人绑过不代表你能用,你绑的别人也看不到;
 - **已接入** → 看到组织名和账户列表,🟢 是当前在用的,**点另一个即可切换**;
   底部「更换 Token」可以换钥匙。
 
@@ -479,9 +480,9 @@ APP_PASSWORD=你自己定一串字
 
 他的聊天记录和你的**各自独立**,互相看不到。
 
-> 但要清楚:**广告账户是共用的**。所有人操作的是同一个 NewsBreak 账户
->(因为 Token 存在 `.env` 里,是全局的)。这符合"团队共管一批广告",
-> 但**不等于权限隔离**——谁登录进来都能开关你的真实广告。邀请码务必设好。
+> **每个人绑自己的 NewsBreak 账号**:第一次进聊天页会提示绑定,
+> 粘贴自己的 Access Token 即可。别人看不到你的 token,也动不了你的广告。
+> 想让同事管同一批广告,就把同一个 Access Token 发给他,让他自己绑一次。
 
 ### 情况 B:同事要自己跑一套(开发)
 
@@ -506,10 +507,10 @@ python3 -m venv venv
 **改了代码要提交前,四套测试必须全绿**:
 
 ```bash
-./venv/bin/python smoke_test.py    # 后端 28 项
+./venv/bin/python smoke_test.py    # 后端 30 项
 node frontend_test.js              # 多会话 16 项
 node dashboard_test.js             # 大屏 9 项
-node platform_test.js              # 多平台 16 项
+node platform_test.js              # 多平台 22 项
 ```
 
 ---

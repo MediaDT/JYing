@@ -10,24 +10,18 @@
   3. 把这里的 status 从 "coming" 改成 "ready",并实现它的 bound() 检查。
 """
 
-from pathlib import Path
+def _newsbreak_bound(user_id: str = "") -> bool:
+    """这个人绑没绑 NewsBreak —— **按人查**,不看 .env。
 
+    以前是"看 .env 里有没有 token",那是全局一份:A 绑好之后 B 登录进来
+    直接就能操作 A 的广告账户。现在每人绑自己的。
 
-def _newsbreak_bound() -> bool:
-    """NewsBreak 算不算"已绑定":.env 里有 token 就算。
-
-    注意:目前 token 是**全局共享**的(存在 .env 里),
-    即所有登录用户操作同一个广告账户 —— 符合团队共管一批广告的场景。
-    将来若要每人绑自己的账户,把这里改成按 user_id 查即可。
+    没传 user_id(比如没登录)一律算没绑。
     """
-    env = Path(__file__).with_name(".env")
-    if not env.exists():
+    if not user_id:
         return False
-    for line in env.read_text().splitlines():
-        line = line.strip()
-        if line.startswith("NEWSBREAK_ACCESS_TOKEN=") and line.split("=", 1)[1].strip():
-            return True
-    return False
+    import accounts as acc
+    return bool(acc.get_creds(user_id, "newsbreak").get("token"))
 
 
 # 注册表。status: ready=能用 / coming=还没对接
@@ -50,7 +44,7 @@ PLATFORMS = [
         "status": "coming",
         "desc_zh": "美国社区邻里社交平台。对接开发中,还不能用。",
         "desc_en": "US neighbourhood social network. Integration in progress — not usable yet.",
-        "bound": lambda: False,
+        "bound": lambda user_id="": False,
         "bind_hint_zh": "",
         "bind_hint_en": "",
     },
@@ -61,7 +55,7 @@ PLATFORMS = [
         "status": "coming",
         "desc_zh": "Facebook / Instagram 广告。对接开发中,还不能用。",
         "desc_en": "Facebook / Instagram ads. Integration in progress — not usable yet.",
-        "bound": lambda: False,
+        "bound": lambda user_id="": False,
         "bind_hint_zh": "",
         "bind_hint_en": "",
     },
@@ -80,13 +74,13 @@ def is_ready(platform_id: str) -> bool:
     return bool(p and p["status"] == "ready")
 
 
-def is_bound(platform_id: str) -> bool:
+def is_bound(platform_id: str, user_id: str = "") -> bool:
     p = get(platform_id)
-    return bool(p and p["status"] == "ready" and p["bound"]())
+    return bool(p and p["status"] == "ready" and p["bound"](user_id))
 
 
-def public_list() -> list[dict]:
-    """给前端用的列表(不含函数,带上当前绑定状态)。"""
+def public_list(user_id: str = "") -> list[dict]:
+    """给前端用的列表(不含函数,带上**这个人**的绑定状态)。"""
     out = []
     for p in PLATFORMS:
         out.append({
@@ -94,7 +88,7 @@ def public_list() -> list[dict]:
             "name": p["name"],
             "icon": p["icon"],
             "status": p["status"],
-            "bound": p["status"] == "ready" and p["bound"](),
+            "bound": p["status"] == "ready" and p["bound"](user_id),
             "desc_zh": p["desc_zh"],
             "desc_en": p["desc_en"],
             "bind_hint_zh": p["bind_hint_zh"],
