@@ -45,7 +45,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-四套测试:`smoke_test.py` 后端冒烟(30)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+四套测试:`smoke_test.py` 后端冒烟(31)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -225,6 +225,7 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 | 素材类型判断 | 必须**优先用浏览器给的 MIME**,只看文件名后缀会把粘贴的 GIF、无后缀视频判错 → 平台拒收。上传时把类型记进 `_ASSET_TYPES[assetUrl]` |
 | 前端并发发送 | AI 思考时再按回车会发出第二个请求(双倍额度+旧上下文);已用 `busy` 标志挡住 |
 | 失败消息错位 | 发送失败会把消息从 history 撤回,但气泡还在屏幕上 → 必须打"未送达"标记,否则用户以为 AI 听见了 |
+| **compare_digest 不吃非 ASCII** | `secrets.compare_digest("中文", ...)` 抛 `TypeError`。邀请码校验没转 bytes → 用户在邀请码栏敲中文/emoji,看到的是 **500 Internal Server Error** 而不是「邀请码不对」。**两边都 `.encode("utf-8")` 再比**,仍然是定时安全的。密码那条是 hex 字符串所以没踩到 |
 | HTTP 头不能写中文 | `WWW-Authenticate` 里放中文会 500(只认 latin-1) |
 | 空值配置读不到 | `.env` 里原本留空、后来才填的键(如 APP_PASSWORD),运行中的进程永远读不到 → 安全开关必须用 `_read_env_value()` 每次现读文件 |
 | 语言切换的"假失效" | 切语言**只影响之后发出的请求**:切换前已在路上的那条回复仍是旧语言,而"切换提示"会插在它前面 → 看起来像切换没生效。已修:切换时若 `busy` 就额外提示一句;欢迎语(界面文字)跟着换;反复切换时替换旧提示不堆叠 |

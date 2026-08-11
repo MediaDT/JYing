@@ -1113,7 +1113,11 @@ def login(body: LoginIn, request: Request):
 def register(body: RegisterIn, request: Request):
     """注册。若 .env 里设了 APP_PASSWORD,它就是「邀请码」,防止端口泄露后被随意注册。"""
     invite_needed = _read_env_value("APP_PASSWORD")
-    if invite_needed and not secrets.compare_digest((body.invite or "").strip(), invite_needed):
+    # 比较前先转成 bytes:compare_digest 不支持非 ASCII 字符串,
+    # 用户在邀请码栏敲个中文就会抛 TypeError → 500,看到的是「Internal Server Error」
+    # 而不是「邀请码不对」。转成 bytes 后任何字符都能比,而且仍是定时安全的。
+    if invite_needed and not secrets.compare_digest(
+            (body.invite or "").strip().encode("utf-8"), invite_needed.encode("utf-8")):
         return JSONResponse(status_code=403, content={"error": "邀请码不对(问管理员要 .env 里的 APP_PASSWORD)"})
 
     created = acc.create_user(body.username, body.password)

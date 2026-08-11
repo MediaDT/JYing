@@ -311,6 +311,22 @@ def test_http():
         return bad or True
 
     check("登录 cookie:https 加 secure、http 不加", t_cookie_secure)
+    # 邀请码填中文/emoji 不能把服务搞成 500 —— compare_digest 不吃非 ASCII 字符串
+    def t_invite_non_ascii():
+        bad = []
+        for bogus in ("错的码", "🔑", "wrong", ""):
+            r = client.post("/api/register",
+                            json={"username": "_smoke_probe", "password": "whatever12345",
+                                  "invite": bogus})
+            if r.status_code == 500:
+                bad.append(f"邀请码「{bogus}」把服务搞崩了(500)")
+            elif r.status_code == 200:
+                bad.append(f"邀请码「{bogus}」居然放行了")
+        return bad or True
+
+    if srv._read_env_value("APP_PASSWORD"):
+        check("邀请码填中文/emoji 也只是被拒,不会 500", t_invite_non_ascii)
+
     check("Markdown 渲染库在位",
           lambda: True if client.get("/static/marked.min.js").status_code == 200 else "marked.min.js 丢了")
 
