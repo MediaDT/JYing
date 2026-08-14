@@ -507,10 +507,11 @@ python3 -m venv venv
 **改了代码要提交前,四套测试必须全绿**:
 
 ```bash
-./venv/bin/python smoke_test.py    # 后端 30 项
+./venv/bin/python smoke_test.py    # 后端 32 项
 node frontend_test.js              # 多会话 16 项
 node dashboard_test.js             # 大屏 9 项
 node platform_test.js              # 多平台 22 项
+node stream_test.js                # 流式 13 项
 ```
 
 ---
@@ -541,7 +542,9 @@ node platform_test.js              # 多平台 22 项
 | `smoke_test.py` | 后端冒烟测试:`./venv/bin/python smoke_test.py`,28 项全绿才提交 |
 | `frontend_test.js` | 前端流程测试(多会话):`node frontend_test.js`,16 项 |
 | `dashboard_test.js` | 大屏测试:`node dashboard_test.js`,9 项 |
-| `platform_test.js` | 多平台测试(选平台 / 未绑定引导):`node platform_test.js`,16 项 |
+| `platform_test.js` | 多平台测试(选平台 / 未绑定引导):`node platform_test.js`,22 项 |
+| `stream_test.js` | 流式回复测试:`node stream_test.js`,13 项 |
+| `check_brain.py` | 部署自检:三个外部接口到底能不能用(拿真钥匙各发一次) |
 | `chat.py` / `newsbreak_hello.py` | 早期学习用的小练习,可以不管 |
 
 ---

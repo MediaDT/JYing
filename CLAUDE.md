@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑四套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(29)、`node frontend_test.js`(16)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(32)、`node frontend_test.js`(16)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -40,12 +40,12 @@
 ⑤ 安全层  agent_server.py     写操作"保险箱+保险丝"(第七节)+ AuthMiddleware 登录门
           accounts.py         账号/加盐哈希密码/会话/每人的聊天记录(第六之三节)
 ⑥ 平台层  platforms.py        投放平台注册表(NewsBreak 已通;Nextdoor/Meta 标 coming)
-⑦ 配置层  .env                APP_PASSWORD(现在是注册邀请码)+ BRAIN
+⑦ 配置层  .env                APP_PASSWORD(注册邀请码)+ BRAIN;每人的平台 token 在 data/creds.json
                              + 四把钥匙:GEMINI / OPENAI / ANTHROPIC / NEWSBREAK
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-四套测试:`smoke_test.py` 后端冒烟(32)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(32)+ `frontend_test.js` 多会话(16)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -188,6 +188,36 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
   (`AutomaticFunctionCallingConfig(disable=True)`),自己跑工具循环。
   原因见第八节坑表那两条 —— 自动挡配流式是坏的,而且自动挡也没法播报进度。
 
+## 六之六、线上部署(宝塔面板,2026-08-14 首次上线)
+
+跑在一台 **Debian 13 / Python 3.13** 的服务器上(**在欧洲,不是国内** —— 所以 Gemini 通、
+pip 用官方源比国内镜像快)。代码在 `/www/wwwroot/<域名>/`,域名见宝塔站点列表。
+
+**四条硬约束**(踩了都是隐蔽故障):
+
+1. **进程数必须是 1**。多进程会让定时任务**执行多次**,而且写操作的保险丝
+   (`_REQUEST_SEQ` 在进程内存里)会失灵 —— 在 A 进程登记的待办,请求转到 B 进程
+   确认时会说"找不到"。要扛并发只能加机器,不能加 worker。
+2. **绑 `127.0.0.1` 不是 `0.0.0.0`**,让 nginx 反代进来,端口不暴露公网。
+3. **不加 `--reload`**,那是开发用的。所以**改完代码必须手动重启 Supervisor**。
+4. **nginx 必须加这几行**,少一行就是一类故障:
+   ```nginx
+   client_max_body_size 100m;   # 默认只让传 1MB → 上传素材报 413
+   proxy_read_timeout 300s;     # 默认 60s → AI 回复到一半被掐断
+   proxy_send_timeout 300s;
+   proxy_set_header X-Forwarded-Proto $scheme;   # 少了 cookie 的 secure 标志不会生效
+   ```
+   (SSE 不用改 nginx —— 响应头里已经带了 `X-Accel-Buffering: no`。)
+
+**部署时踩过的**:改目录名会**废掉 venv**(脚本首行写死绝对路径,报 `bad interpreter`),
+要 `rm -rf venv` 重建;Debian 默认不带 `venv` 模块,先 `apt install python3-venv`;
+宝塔建的目录属主是 `www`,而 git 拉的文件是 root 的,所以 Supervisor 的启动用户填 `root`
+(测试期够用,正式投产再统一 chown 给 `www`)。
+
+**部署前先跑 `check_brain.py`**:它拿真钥匙各发一次最小请求。
+"网络能连上"和"API 真能用"是两回事 —— Gemini 会按请求来源地区拒绝服务,
+curl 测出来是通的,实际一句话都回不了。
+
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
 两阶段 + 物理保险丝:
@@ -216,6 +246,8 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 | **迁移数据要先存后删** | 把老的 `adbot-chat-history` 迁成多会话时,原先"先删旧键、等下次发消息才落盘"→ 用户迁移后不发消息就刷新会**永久丢历史**。改成:先 `saveConversations()`,确认 `CONVS_KEY` 写成了才删旧键。前端流程测试抓到的 |
 | **循环变量遮蔽全局函数** | `dashboard.html` 里 `for (var t = 0; ...)` 和全局翻译函数 `t()` 撞名 → **var 提升到整个函数开头**,该函数里所有 `t()` 调用都变成"调用一个数字",报 `t is not a function`。表现:KPI 显示了但趋势图/柱状图/明细表全空(因为 drawTrend 抛错后,后面的 drawBars/drawTable 没机会跑)。`node --check` 抓不到(语法合法),**必须真实执行**:已加 `dashboard_test.js`(最小 DOM 模拟跑三个绘图函数,9 项)|
 | **点按钮没反应 = 初始化中途抛错** | 新写的模块放在文件末尾(`const` 声明),但早期就被 `applyLang()` 调用 → **函数声明会提升、`const` 变量不会** → 抛 `Cannot access 'X' before initialization` → 后面的 `addEventListener` 全没挂上 → 表现为"点按钮没反应"。**`node --check` 抓不到这类问题**,必须跑 `frontend_test.js` 真实执行一遍。解法:用 `var` 声明一个 `acctReady` 就绪标志(var 会提升且初始化为 undefined,早期读取安全),模块初始化完成后置 true |
+| **改目录名会废掉 venv** | `venv/bin/` 里的脚本第一行写死了 python 的**绝对路径**,目录一改名就报 `bad interpreter: No such file`。`venv` 是纯依赖包,`rm -rf venv` 重建即可(代码和 `.env` 都不在里面)。同理 git 也会因为属主对不上报 `dubious ownership`,要重新加 `safe.directory` |
+| **VS Code 的 git 凭据会突然失效** | 报 `ECONNREFUSED /tmp/vscode-git-*.sock` + `No anonymous write access` = VS Code 重启后凭据 socket 失效,`GIT_ASKPASS` 指向死进程,git 又因为有 askpass 就不肯退回让你手动输,于是当匿名推。**解法:`Cmd+Shift+P → Reload Window`**,别去折腾 token |
 | **`.gitignore` 不支持行尾注释** | 写成 `scheduled_tasks.json   # 说明文字` → `#` 只有在**行首**才算注释,这行整体被当成一个字面 pattern,匹配不到任何文件 → 下次 `git add -A` 又把它加回版本库了。注释必须**单独占一行**。改完用 `git check-ignore -v <文件>` 验一下真的生效 |
 | **SSE 要加 `X-Accel-Buffering: no`** | 不加的话 nginx 会缓冲整条流,用户看到的还是"转圈很久然后一次蹦出来",流式白做。加在响应头里比改 nginx 配置省事(而且换机器不会忘) |
 | **Gemini 手动挡要原样带回 part** | 自己跑工具循环时,把函数调用贴回对话**不能自己重新造 `Part`** —— 原始 part 里带着 `thought_signature`,Gemini 要拿它校验,少了直接报 400「Function call is missing a thought_signature」。解法:收下模型吐的 part 对象**原样存着**,别只取 `function_call` 再重建 |
@@ -273,7 +305,7 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 - 建计划向导:6步对话收集(落地页→预算→转化事件→素材→文案→命名),
   📎按钮 / 直接粘贴图片上传中转,命名默认「关键词-月日」,建好默认全 OFF;
 - 前端:全屏 UI(渐变主题/头像气泡/快捷提问/动画)、Markdown 表格渲染、输入法回车修复、
-  **聊天记录存盘**(localStorage 键 `adbot-chat-history`,只留最近200条,顶栏「🗑 新对话」清空)、
+  **聊天记录按账号存服务器**(`data/chats/<uid>.json`,换电脑登录同一账号还在;左栏多会话)、
   **中英文切换**(顶栏 🌐,界面 + AI 回复语言一起切,选择会记住)、
   并发发送保护(`busy` 标志)、失败消息打"未送达"标记、请求 3 分钟超时;
 - 大脑:三级火箭 + `BRAIN` 开关;工具共 15 个;
@@ -281,9 +313,12 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 - 定时任务:一次性 + 每天重复,看表线程每 30 秒检查,错过 >15 分钟不补跑;
 - **登录 + 多平台**:账号密码登录(加盐哈希)、聊天记录按账号存服务器(换电脑也能看到);
   登录后先进 `/platforms` 选平台,聊天页标题/副标题跟着选的平台变,没绑账号会明确挡一道并引导;
+- **每人绑自己的平台账号**:token 按 user_id 存 `data/creds.json`,A 绑过 B 也蹭不到(第六之四节);
+- **流式回复**:`/api/chat/stream`(SSE),边想边出字 + 播报"正在查什么",
+  两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、四套测试(冒烟 28 + 前端 16 + 大屏 9 + 平台 16)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 32 + 前端 16 + 大屏 9 + 平台 22 + 流式 13)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -301,6 +336,9 @@ MAX_CONVERSION),均已固化进代码和第五节速查。
 (`https://api.ofox.ai/v1` + `google/gemini-3.1-pro-preview`,公司通道);
 Gemini 官方免费额度每日重置(北京时间下午 3~4 点);OpenAI 官方账户无余额(key 在 .env 里注释保留)。
 
+**线上部署(2026-08-14)**:已上线到宝塔服务器(Debian 13 / Python 3.13,机器在欧洲),
+Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
+
 **定时任务(2026-08-05 实测跑通)**:19:34 登记 → 确认 → 19:45 看表线程自动执行 → 成功打开
 `gutter-0805`(存档 `state: done, last_result: 成功`);之后 Cole 在平台手动关回 OFF(测试结束)。
 顺带验证:平台上的手动改动,助手查询时能立刻反映真实状态,没有缓存问题。
@@ -310,7 +348,7 @@ Gemini 官方免费额度每日重置(北京时间下午 3~4 点);OpenAI 官方�
 2. 真接第二个平台(Nextdoor / Meta):现在只是注册表占位,按第六之二节最后那三步做;
 3. 补齐 Claude 那一级的工具支持(现在 `BRAIN=claude` 只能闲聊,见第八节坑表);
 4. 调预算等更多写操作(需先在 qx-ad-bot 里查 update 接口的 payload 格式);
-5. 流式回复(边想边出字);把 README + start.sh 推广给团队。
+5. ~~流式回复(边想边出字)~~ ✅ 已完成(2026-08-14);把 README 推广给团队。
 
 ## 十、下次接手先做这三件事
 
@@ -322,5 +360,5 @@ Gemini 官方免费额度每日重置(北京时间下午 3~4 点);OpenAI 官方�
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑四套测试**(冒烟 28 / 前端 16 / 大屏 9 / 平台 16)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 32 / 前端 16 / 大屏 9 / 平台 22 / 流式 13)
 → 更新本文件相关章节 → 提交 git。
