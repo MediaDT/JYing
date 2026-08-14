@@ -217,16 +217,25 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
 - 不要让用户手动"选账户":只有一个组织/账户时直接用它;
   真的有多个时,才把选项列出来请用户挑一个,并在本轮对话里记住这个选择。
 
-「建计划向导」:用户想投新广告时,严格按 6 步逐项收集(一步一问 + 报进度「第N步/共6步」):
+「建计划向导」:用户想投新广告时,**只问必须由他决定的 4 件事**,预算和文案你来配默认值
+(一步一问 + 报进度「第N步/共5步」):
 第1步 落地页:要推广的链接(解释:用户点广告后打开的网页);
-第2步 预算:先问日预算还是总预算(推荐日预算),再问金额(最低$10,新手建议$10~$50);
-第3步 转化事件:用 list_conversion_events 列出账户里的事件让用户挑一个
+第2步 转化事件:用 list_conversion_events 列出账户里的事件让用户挑一个
    (解释:平台靠它统计"广告带来了多少成果";用户不懂就推荐 submit form 或第一个);
    出价不用问:系统用平台自动出价(MAX_CONVERSION),平台会自动优化;
-第4步 素材:请用户点击输入框左侧的 📎 按钮上传图片或视频;上传成功后会自动出现一条带 assetUrl 的消息,记住其中的 assetUrl 和文件名;
-第5步 文案:标题和描述;用户嫌麻烦可以由你根据落地页主题代拟再请他过目;品牌名和按钮文案给默认值;
-第6步 命名:请用户给一个英文关键词(如 gutter),名字自动生成为「关键词-月日」;用户想手动指定也行。
+第3步 素材:请用户点击输入框左侧的 📎 按钮上传图片或视频;上传成功后会自动出现一条带 assetUrl 的消息,记住其中的 assetUrl 和文件名;
+第4步 命名:请用户给一个英文关键词(如 gutter),名字自动生成为「关键词-月日」;用户想手动指定也行。
+第5步 **预算和文案:不要问,直接配好给他看,并讲清为什么**。一次性列出这几项:
+   · 日预算 $20 —— 理由:平台最低 $10,但太低跑不出量、几天都攒不够数据看不出效果;
+     $20 一两天就能看出苗头,又不至于烧太多。**而且建好是暂停的,你确认前一分钱不花。**
+   · 用日预算而不是总预算 —— 理由:日预算随时能关,不会一次性花光。
+   · 标题和描述 —— 你根据落地页主题和关键词拟,拟完把原文贴给他看;
+     说明这是根据他的落地页拟的,长度已卡在平台限制内(标题≤90 字符、描述 3~90 字符)。
+   · 品牌名(默认用关键词)、按钮文案(默认 Learn More)。
+   列完必须明确说一句:**「这些是我替你配的默认值,想改哪一项直接告诉我,比如『预算改成 50』
+   或『标题换成 XXX』。」** 用户说改就照改,不要争辩,也不要再问一遍其它项。
 收集齐后调 propose_create_campaign 登记,把返回的整单内容用表格完整复述,等用户下一条消息确认后再 confirm_action。
+**返回里的 defaults_used 列出了哪些值是系统默认的,复述时要把这几项单独点出来说明。**
 创建结果出来后:告知三层 id、强调目前是暂停(OFF)状态、说「开启 计划名」即可开始投放。
 
 「写操作」(开启/暂停、新建广告)必须走这套流程,一步不能少:
@@ -284,19 +293,28 @@ You have read-only tools that pull real data from NewsBreak:
 - Don't make the user pick an account manually: if there's only one organization/account, just use it.
   Only when there are genuinely several should you list them and ask, then remember the choice for this conversation.
 
-"NEW CAMPAIGN WIZARD": when the user wants to launch a new ad, collect these 6 steps strictly one at a time,
-showing progress ("Step N of 6"):
+"NEW CAMPAIGN WIZARD": when the user wants to launch a new ad, **only ask about the 4 things they must decide**;
+you fill in budget and copy yourself. One question at a time, showing progress ("Step N of 5"):
 Step 1 Landing page: the URL to promote (explain: the page that opens when someone clicks the ad);
-Step 2 Budget: first daily or lifetime (recommend daily), then the amount (minimum $10; suggest $10-$50 for beginners);
-Step 3 Conversion event: use list_conversion_events to show the account's events and let them pick one
+Step 2 Conversion event: use list_conversion_events to show the account's events and let them pick one
    (explain: it's how the platform counts results; if they're unsure, recommend "submit form" or the first one);
    Don't ask about bidding — the system uses the platform's automatic bidding (MAX_CONVERSION);
-Step 4 Creative: ask them to click the 📎 button to the left of the input box and upload an image or video.
+Step 3 Creative: ask them to click the 📎 button to the left of the input box and upload an image or video.
    After a successful upload a message with an assetUrl appears automatically — remember that assetUrl and the filename;
-Step 5 Copy: headline and description; if they'd rather not write it, draft it from the landing page topic and
-   ask them to approve. Give defaults for brand name and call to action;
-Step 6 Naming: ask for an English keyword (e.g. gutter); the name is generated as "keyword-MMDD".
+Step 4 Naming: ask for an English keyword (e.g. gutter); the name is generated as "keyword-MMDD".
    They can also specify a name manually.
+Step 5 **Budget and copy: do NOT ask — set them, show them, and explain why.** List all of these at once:
+   · Daily budget $20 — why: the platform minimum is $10, but that's too low to gather data in a few days;
+     $20 shows a signal within a day or two without burning much. **And it's created PAUSED — nothing is
+     spent until they confirm.**
+   · Daily rather than lifetime — why: a daily budget can be stopped any time and won't be spent all at once.
+   · Headline and description — draft them from the landing page topic and keyword, then show the exact text.
+     Say they were drafted from their landing page and already fit the platform limits
+     (headline ≤ 90 chars, description 3-90 chars).
+   · Brand name (defaults to the keyword) and call to action (defaults to "Learn More").
+   After listing them you MUST say: **"These are defaults I picked for you — tell me if you want any of them
+   changed, e.g. 'make the budget 50' or 'change the headline to XXX'."** If they ask for a change, just do it;
+   don't argue and don't re-ask the other items.
 Once everything is collected, call propose_create_campaign, restate the whole order back as a table,
 and wait for confirmation in their NEXT message before calling confirm_action.
 After creation: report the three ids, stress that everything is PAUSED (OFF), and tell them to say
@@ -469,26 +487,35 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
     }
 
 
+# 建广告的默认值。**改这里就等于改向导的推荐值**,别把数字散写进提示词。
+# 每个默认值都要有个说得出口的理由 —— 向导要把理由讲给用户听(见 SYSTEM_PROMPT)。
+DEFAULT_BUDGET_DOLLARS = 20.0     # 日预算。平台最低 $10,但太低跑不出量、数据少看不准
+DEFAULT_BUDGET_TYPE = "DAILY"     # 日预算比总预算好控:随时能关,不会一次性花光
+DEFAULT_CALL_TO_ACTION = "Learn More"   # 最通用的按钮文案,适合大多数落地页
+
+
 def propose_create_campaign(
     ad_account_id: str,
     keyword: str,
     landing_url: str,
-    budget_dollars: float,
     headline: str,
     description: str,
     asset_url: str,
+    budget_dollars: float = 0,   # 不传就用 DEFAULT_BUDGET_DOLLARS
     asset_filename: str = "",
     tracking_id: str = "",
-    budget_type: str = "DAILY",
+    budget_type: str = DEFAULT_BUDGET_TYPE,
     brand_name: str = "",
-    call_to_action: str = "Learn More",
+    call_to_action: str = DEFAULT_CALL_TO_ACTION,
     campaign_name: str = "",
 ) -> dict:
     """登记一个「新建广告」待办(不会立即执行!),会一次建好 campaign+ad set+ad 三层。
 
     必填:ad_account_id(广告账户id)、keyword(英文命名关键词,如 gutter)、
-    landing_url(落地页链接)、budget_dollars(预算,美元,最低10)、
-    headline(标题)、description(描述)、asset_url(素材地址,来自用户上传后的系统消息)。
+    landing_url(落地页链接)、headline(标题)、description(描述)、
+    asset_url(素材地址,来自用户上传后的系统消息)。
+    budget_dollars(预算,美元,最低10)**可以不传**:不传就用默认日预算,
+    但你必须在复述时告诉用户用的是多少、以及为什么。
     出价无需提供:系统使用平台自动出价(MAX_CONVERSION)。
     tracking_id(转化事件id)可选:不填则自动选用账户里的 submit form 或第一个事件。
     可选:asset_filename(素材文件名,用于判断图片/视频)、budget_type(DAILY日预算/TOTAL总预算)、
@@ -496,6 +523,12 @@ def propose_create_campaign(
     登记后必须用表格向用户完整复述整单,等用户下一条消息确认后再 confirm_action。
     """
     # ---- 参数体检:把明显的问题挡在登记之前 ----
+    # 没给预算就用默认值(向导会把这个默认值和理由讲给用户听,用户能改)
+    used_default_budget = False
+    if not budget_dollars or budget_dollars <= 0:
+        budget_dollars = DEFAULT_BUDGET_DOLLARS
+        used_default_budget = True
+
     problems = []
     if not landing_url.startswith("http"):
         problems.append("landing_url 必须是 http(s) 开头的完整链接")
@@ -551,13 +584,20 @@ def propose_create_campaign(
         "action_id": action_id,
         "pending": {
             "计划名": a["campaign_name"], "广告组名": a["ad_set_name"], "广告名": a["ad_name"],
-            "落地页": landing_url, budget_word: f"${budget_dollars:g}", "出价": "自动(MAX_CONVERSION)",
+            "落地页": landing_url,
+            budget_word: f"${budget_dollars:g}" + ("(系统默认值)" if used_default_budget else ""),
+            "出价": "自动(MAX_CONVERSION)",
             "转化事件": tracking_id or "自动选用(优先 submit form)",
             "标题": headline, "描述": description, "品牌名": a["brand_name"],
             "按钮": a["call_to_action"], "素材": asset_filename or asset_url,
             "创建后状态": "暂停(OFF),需用户确认无误后再开启",
         },
-        "note": "已登记待办,尚未执行。请用表格向用户完整复述以上内容并等确认。",
+        # 哪些值是系统替用户定的,要明确列出来 —— 用户有权知道"我没说过的东西是谁定的"
+        "defaults_used": ([f"{budget_word} ${budget_dollars:g}"] if used_default_budget else [])
+                         + ([] if tracking_id else ["转化事件(自动选 submit form)"]),
+        "note": ("已登记待办,尚未执行。请用表格向用户完整复述以上内容并等确认。"
+                 "**凡是 defaults_used 里列出的项,要额外说明这是系统默认值、为什么这么定、"
+                 "以及用户可以直接说要改成多少。**"),
     }
 
 
@@ -1496,7 +1536,7 @@ OPENAI_TOOL_SCHEMAS = [
              {"ad_account_id": _ID,
               "keyword": {"type": "string", "description": "英文命名关键词,如 gutter"},
               "landing_url": {"type": "string", "description": "落地页链接,http(s)开头"},
-              "budget_dollars": {"type": "number", "description": "预算(美元),最低10"},
+              "budget_dollars": {"type": "number", "description": "预算(美元),最低10。**可以不传**:不传就用默认日预算 $20,但要在复述时告诉用户这是默认值、为什么、以及可以改"},
               "tracking_id": {"type": "string", "description": "转化事件id(可选,不填自动选)"},
               "headline": {"type": "string", "description": "广告标题"},
               "description": {"type": "string", "description": "广告描述"},
@@ -1506,7 +1546,7 @@ OPENAI_TOOL_SCHEMAS = [
               "brand_name": {"type": "string", "description": "品牌名,默认用关键词"},
               "call_to_action": {"type": "string", "description": "按钮文案,默认 Learn More"},
               "campaign_name": {"type": "string", "description": "手动指定计划名(可选)"}},
-             ["ad_account_id", "keyword", "landing_url", "budget_dollars", "headline", "description", "asset_url"]),
+             ["ad_account_id", "keyword", "landing_url", "headline", "description", "asset_url"]),
     _oa_tool("confirm_action", "执行之前登记的待办(仅在用户新消息中明确同意后)", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("cancel_action", "取消之前登记的待办", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("list_pending_actions", "查看保险箱里所有已登记待确认的待办(含编号);忘了编号用它查,严禁重复登记", {}, []),

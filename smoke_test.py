@@ -162,6 +162,49 @@ def test_validation():
     rejects("关键词为空被拒", keyword="  ")
     rejects("预算类型非法被拒", budget_type="WEEKLY")
 
+    # 预算可以不传(向导用默认值),但**必须如实标出来是系统定的**,
+    # 否则用户不知道有东西是替他决定的 —— 那就成了偷偷替用户花钱
+    def t_default_budget():
+        no_budget = {k: v for k, v in base.items() if k != "budget_dollars"}
+        no_budget["keyword"] = "smokedefault"
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_create_campaign(**no_budget)
+        if "error" in r:
+            return f"不传预算居然被拒:{r['error']}"
+        bad = []
+        try:
+            shown = r["pending"].get("日预算", "")
+            if f"${srv.DEFAULT_BUDGET_DOLLARS:g}" not in shown:
+                bad.append(f"没用默认预算:{shown}")
+            if "默认" not in shown:
+                bad.append(f"没标出这是默认值:{shown}")
+            if not any("预算" in x for x in r.get("defaults_used", [])):
+                bad.append("defaults_used 里没列出预算")
+            if "默认值" not in r.get("note", ""):
+                bad.append("note 没要求 AI 向用户说明默认值")
+        finally:
+            srv.cancel_action(r["action_id"])
+        return bad or True
+
+    def t_user_budget_wins():
+        mine = {**base, "keyword": "smokemine", "budget_dollars": 50}
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_create_campaign(**mine)
+        if "error" in r:
+            return f"用户指定预算被拒:{r['error']}"
+        bad = []
+        try:
+            if "$50" not in r["pending"].get("日预算", ""):
+                bad.append(f"没用用户给的 50:{r['pending'].get('日预算')}")
+            if any("预算" in x for x in r.get("defaults_used", [])):
+                bad.append("用户自己定的预算被当成了默认值")
+        finally:
+            srv.cancel_action(r["action_id"])
+        return bad or True
+
+    check("不传预算 → 用默认值,并如实标注是系统定的", t_default_budget)
+    check("用户指定预算 → 照用,且不算默认值", t_user_budget_wins)
+
 
 # ============ 3. 写操作护栏(用假 id,不会真改) ============
 
