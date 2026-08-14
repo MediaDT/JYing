@@ -109,6 +109,7 @@ _TOOL_LABELS = {
     "list_ad_sets": "正在查广告组…",
     "list_ads": "正在查广告…",
     "list_conversion_events": "正在查转化事件…",
+    "recommend_creatives": "正在从你的历史广告里挑好素材…",
     "get_report": "正在拉报表数据…",
     "propose_status_change": "正在登记开关待办…",
     "propose_create_campaign": "正在登记建广告待办…",
@@ -223,7 +224,14 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
 第2步 转化事件:用 list_conversion_events 列出账户里的事件让用户挑一个
    (解释:平台靠它统计"广告带来了多少成果";用户不懂就推荐 submit form 或第一个);
    出价不用问:系统用平台自动出价(MAX_CONVERSION),平台会自动优化;
-第3步 素材:请用户点击输入框左侧的 📎 按钮上传图片或视频;上传成功后会自动出现一条带 assetUrl 的消息,记住其中的 assetUrl 和文件名;
+第3步 素材:**先问他"你这条广告主要推什么?有现成的图片/视频吗?"**
+   · 有 → 请他点输入框左侧的 📎 按钮上传;上传成功后会自动出现一条带 assetUrl 的消息,记住 assetUrl 和文件名;
+   · **没有 / 说"帮我推荐" → 调 recommend_creatives**,把账户里效果好的历史素材列给他挑。
+     用表格展示,每个素材用 `![素材N](asset_url)` 插图让他直接看到,并附上真实的 CTR/转化/花费。
+     说清两点:①这些是他自己账户投过的,**版权和平台审核都没问题**;②选哪个说编号就行。
+     他选了之后,直接用那个 asset_url 继续(不用再上传)。
+   · **绝对不要**从网上找图、编造素材链接、或声称能生成图片 —— 版权会出事,平台也会拒审。
+     账户里没有历史素材时如实说没有,并告诉他上传自己的图就行(建议 1200×628 以上、清晰、别放大段文字);
 第4步 命名:请用户给一个英文关键词(如 gutter),名字自动生成为「关键词-月日」;用户想手动指定也行。
 第5步 **预算和文案:不要问,直接配好给他看,并讲清为什么**。一次性列出这几项:
    · 日预算 $20 —— 理由:平台最低 $10,但太低跑不出量、几天都攒不够数据看不出效果;
@@ -299,8 +307,16 @@ Step 1 Landing page: the URL to promote (explain: the page that opens when someo
 Step 2 Conversion event: use list_conversion_events to show the account's events and let them pick one
    (explain: it's how the platform counts results; if they're unsure, recommend "submit form" or the first one);
    Don't ask about bidding — the system uses the platform's automatic bidding (MAX_CONVERSION);
-Step 3 Creative: ask them to click the 📎 button to the left of the input box and upload an image or video.
-   After a successful upload a message with an assetUrl appears automatically — remember that assetUrl and the filename;
+Step 3 Creative: **first ask "what is this ad promoting, and do you already have an image/video?"**
+   · If yes → ask them to click the 📎 button to the left of the input box and upload. After a successful upload
+     a message with an assetUrl appears automatically — remember that assetUrl and the filename;
+   · If no / they ask for suggestions → **call recommend_creatives** and show the account's best past creatives.
+     Use a table, embed each one with `![Creative N](asset_url)` so they can actually see it, and include the
+     real CTR / conversions / spend. Make two things clear: (1) these are from their own account, so licensing and
+     ad review are not an issue; (2) they just reply with a number to pick one. Then reuse that asset_url directly.
+   · **NEVER** pull images from the web, invent asset URLs, or claim you can generate images — that creates
+     copyright exposure and the platform will reject them. If the account has no past creatives, say so plainly
+     and ask them to upload their own (suggest 1200×628 or larger, sharp, not covered in text);
 Step 4 Naming: ask for an English keyword (e.g. gutter); the name is generated as "keyword-MMDD".
    They can also specify a name manually.
 Step 5 **Budget and copy: do NOT ask — set them, show them, and explain why.** List all of these at once:
@@ -387,6 +403,72 @@ def list_conversion_events(ad_account_id: str) -> dict:
     """查询账户下的转化事件(conversion events)列表,建新广告第3步用它让用户挑一个。"""
     try:
         return {"events": nb.list_events(ad_account_id)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def recommend_creatives(ad_account_id: str = "", days: int = 90, top_n: int = 5) -> dict:
+    """推荐素材:从**这个账户自己投过的广告**里,挑效果最好的几个素材给用户复用。
+
+    建新广告第3步(素材)时,用户说"没有素材"/"帮我推荐"就调它。
+
+    为什么只推荐账户自己的素材:①有真实投放数据背书,不是凭空说"这个好";
+    ②版权干净 —— 从网上找图投广告会有法律风险,平台也可能拒审。
+    返回里带 asset_url(可直接用于建广告)、尺寸、类型、当时的文案,以及真实的
+    花费/点击/CTR/转化。按「有转化的优先,其次 CTR 高的」排序。
+    没有历史广告时会如实说没有,不要编。
+    """
+    try:
+        acct = ad_account_id or _default_ad_account_id()
+        ads = nb.list_ads(acct, limit=50).get("items", [])
+        if not ads:
+            return {"creatives": [], "note": "这个账户还没有投过广告,没有可推荐的历史素材"}
+
+        # 拉 ad 层的真实数据,用来给素材排序(没数据的排最后,但仍可选)
+        from datetime import datetime, timedelta, timezone
+        end = datetime.now(timezone.utc).date()
+        start = end - timedelta(days=max(1, min(days, 180)))
+        stats = {}
+        try:
+            for row in nb.get_report_raw("ad", start.isoformat(), end.isoformat(), acct):
+                stats[str(row.get("id"))] = row
+        except Exception:
+            pass   # 报表拿不到不影响推荐,只是没法按效果排序
+
+        seen, out = set(), []
+        for ad in ads:
+            c = (ad.get("creative") or {}).get("content") or {}
+            url = c.get("assetUrl")
+            if not url or url in seen:
+                continue          # 同一张图被多条广告用过,只推荐一次
+            seen.add(url)
+            m = stats.get(str(ad.get("id")), {})
+            out.append({
+                "asset_url": url,
+                "type": (ad.get("creative") or {}).get("type") or "IMAGE",
+                "size": f"{c.get('width') or '?'}×{c.get('height') or '?'}",
+                "来自广告": ad.get("name"),
+                "当时的标题": c.get("headline"),
+                "当时的描述": c.get("description"),
+                "花费": m.get("cost"), "点击": m.get("clicks"),
+                "CTR": m.get("ctr"), "转化": m.get("conversions"),
+            })
+
+        out.sort(key=lambda x: (-(x["转化"] or 0), -(x["CTR"] or 0), -(x["花费"] or 0)))
+        out = out[:max(1, min(top_n, 10))]
+        for item in out:                       # 记住类型,复用时才不会判错图片/视频
+            _ASSET_TYPES[item["asset_url"]] = item["type"]
+
+        return {
+            "creatives": out,
+            "period": f"{start} ~ {end}",
+            "note": ("请用**表格**列给用户看,并把每个素材用 Markdown 图片语法 "
+                     "![素材N](asset_url) 插进去让他直接看到图;"
+                     "带上真实数据(花费/CTR/转化)说明为什么推荐它。"
+                     "明确告诉用户:①这些是他自己账户投过的素材,版权和审核都没问题;"
+                     "②想用哪个就说编号,也可以自己点 📎 传新的。"
+                     "**没有数据的素材要如实说'这条还没跑出数据',不要编效果。**"),
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -797,6 +879,7 @@ def cancel_action(action_id: str) -> dict:
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
+    recommend_creatives,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
     propose_schedule, list_schedules, cancel_schedule,
@@ -1550,6 +1633,12 @@ OPENAI_TOOL_SCHEMAS = [
     _oa_tool("confirm_action", "执行之前登记的待办(仅在用户新消息中明确同意后)", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("cancel_action", "取消之前登记的待办", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("list_pending_actions", "查看保险箱里所有已登记待确认的待办(含编号);忘了编号用它查,严禁重复登记", {}, []),
+    _oa_tool("recommend_creatives",
+             "推荐素材:从这个账户投过的广告里挑效果最好的几个素材给用户复用(带真实数据,版权干净)。"
+             "建新广告第3步用户说没素材/要推荐时调它",
+             {"ad_account_id": _ID,
+              "days": {"type": "integer", "description": "看最近多少天的数据,默认90"},
+              "top_n": {"type": "integer", "description": "推荐几个,默认5,最多10"}}, []),
     _oa_tool("list_conversion_events", "查询账户下的转化事件列表(建新广告第3步让用户挑)", {"ad_account_id": _ID}, ["ad_account_id"]),
     _oa_tool("propose_schedule", "登记一个定时开启/暂停广告的待办(需用户确认后生效)",
              {"kind": {"type": "string", "enum": ["once", "daily"], "description": "once=只执行一次,daily=每天重复"},
@@ -1564,6 +1653,7 @@ OPENAI_TOOL_SCHEMAS = [
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
+    recommend_creatives,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
     get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,

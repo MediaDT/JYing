@@ -299,6 +299,32 @@ def test_newsbreak_readonly():
     check("账户列表已拍平(拿到真账户 id)", t_accounts_flat)
     check("能查广告计划列表", t_campaigns)
     check("能查转化事件列表", t_events)
+
+    # 推荐素材:必须来自这个账户自己投过的广告(有数据背书、版权干净),
+    # 而且要能直接拿去建广告 —— 所以 asset_url 得是平台域名下的真实地址
+    def t_recommend_creatives():
+        r = srv.recommend_creatives()
+        if "error" in r:
+            return f"推荐失败:{r['error']}"
+        items = r.get("creatives", [])
+        if not items:
+            return True      # 账户没投过广告也算正常,如实返回空即可
+        bad = []
+        for c in items[:5]:
+            u = c.get("asset_url", "")
+            if not u.startswith("http"):
+                bad.append(f"素材地址不像真的:{u[:40]}")
+            if "particlenews.com" not in u and "newsbreak" not in u:
+                bad.append(f"素材不是平台域名下的(可能是编的):{u[:60]}")
+            if c.get("type") not in ("IMAGE", "VIDEO", "GIF"):
+                bad.append(f"素材类型怪:{c.get('type')}")
+            if u and srv._ASSET_TYPES.get(u) != c.get("type"):
+                bad.append("类型没登记进 _ASSET_TYPES,复用时会判错图片/视频")
+        if "不要编" not in r.get("note", ""):
+            bad.append("note 没提醒 AI 别编造效果数据")
+        return bad or True
+
+    check("推荐素材来自本账户历史广告(地址真实、类型已登记)", t_recommend_creatives)
     def t_report_span_guard():
         try:
             nb.get_report("campaign", start_date="2025-01-01", end_date="2026-07-31")

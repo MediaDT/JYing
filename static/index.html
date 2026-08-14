@@ -170,6 +170,14 @@
   .bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 
   /* "正在思考"动画 */
+  /* 推荐素材会以 Markdown 图片的形式插进回复里 —— 不限宽的话
+     4096px 的原图会把整个聊天布局撑爆 */
+  .bubble img {
+    max-width: 260px; width: 100%; height: auto; display: block;
+    margin: 6px 0; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .bubble td img { max-width: 160px; margin: 0; }
   .typing-note {
     margin-left: 8px; font-size: 12.5px; color: var(--muted);
     align-self: center; white-space: nowrap;
