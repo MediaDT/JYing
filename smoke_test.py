@@ -493,6 +493,31 @@ def test_http():
     check("未登录访问接口被拦",
           lambda: True if client.get("/api/dashboard", follow_redirects=False).status_code in (302, 401)
           else "接口没拦住")
+    # 登录后直接敲根域名,要先去选平台 —— 不然用户根本没机会选,
+    # 拿到的是写死默认平台的聊天页。用真账号的会话验,不污染数据。
+    def t_root_goes_to_platforms():
+        import accounts as acc
+        users = acc.list_users()
+        if not users:
+            return True                      # 一个账号都没有,跳过
+        uid = list(users.values())[0]["id"]
+        tok = acc.create_session({"id": uid, "username": list(users)[0]})
+        cli = TestClient(srv.app)
+        cli.cookies.set(srv.SESSION_COOKIE, tok)
+        try:
+            r1 = cli.get("/", follow_redirects=False)
+            r2 = cli.get("/?platform=newsbreak", follow_redirects=False)
+            bad = []
+            if r1.status_code != 302 or "/platforms" not in r1.headers.get("location", ""):
+                bad.append(f"直接访问 / 应跳 /platforms,实际 {r1.status_code} {r1.headers.get('location')}")
+            if r2.status_code != 200:
+                bad.append(f"带了 ?platform= 应直接进聊天,实际 {r2.status_code}")
+            return bad or True
+        finally:
+            acc.destroy_session(tok)
+
+    check("登录后直接访问 / 会先去选平台", t_root_goes_to_platforms)
+
     check("未登录访问平台选择页会跳登录",
           lambda: True if client.get("/platforms", follow_redirects=False).status_code == 302
           else "平台页没设防")

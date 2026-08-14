@@ -1058,8 +1058,18 @@ class ChatRequest(BaseModel):
 
 
 @app.get("/")
-def index():
-    """把聊天页面端给浏览器。"""
+def index(request: Request):
+    """聊天页。**但直接访问根路径要先去选平台。**
+
+    平台选择页跳过来时带的是 `/?platform=xxx`,所以按有没有这个参数区分:
+    带了 = 用户已经选过了,直接进聊天;没带 = 他是直接敲域名进来的,
+    先送去 `/platforms` 挑一个。
+
+    不这么做的话,直接访问 `/` 会拿到写死默认平台的聊天页 ——
+    以后接了 Nextdoor、Meta,用户根本没机会选。
+    """
+    if not (request.query_params.get("platform") or "").strip():
+        return RedirectResponse("/platforms", status_code=302)
     return FileResponse(Path(__file__).with_name("static") / "index.html")
 
 
