@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(42)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(43)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -45,7 +45,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(42)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(43)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -298,6 +298,8 @@ curl 测出来是通的,实际一句话都回不了。
 | **VS Code 的 git 凭据会突然失效** | 报 `ECONNREFUSED /tmp/vscode-git-*.sock` + `No anonymous write access` = VS Code 重启后凭据 socket 失效,`GIT_ASKPASS` 指向死进程,git 又因为有 askpass 就不肯退回让你手动输,于是当匿名推。**解法:`Cmd+Shift+P → Reload Window`**,别去折腾 token |
 | **`.gitignore` 不支持行尾注释** | 写成 `scheduled_tasks.json   # 说明文字` → `#` 只有在**行首**才算注释,这行整体被当成一个字面 pattern,匹配不到任何文件 → 下次 `git add -A` 又把它加回版本库了。注释必须**单独占一行**。改完用 `git check-ignore -v <文件>` 验一下真的生效 |
 | **SSE 要加 `X-Accel-Buffering: no`** | 不加的话 nginx 会缓冲整条流,用户看到的还是"转圈很久然后一次蹦出来",流式白做。加在响应头里比改 nginx 配置省事(而且换机器不会忘) |
+| **Gemini 工具参数不能标裸 `list`/`dict`** | Gemini 从函数签名自动生成 schema,数组必须带 `items`。写成 `extra_targets: list \| None` 生成不出来 → **每次请求都 400,整条 Gemini 路径全废**。改成 `list[dict] \| None`。冒烟测试里加了一条纯查签名的检查守着 |
+| **400 和 401/403 不能混报** | 原来把 `400/401/403` 一起翻译成"钥匙无效",结果上面那个 schema bug 报出来是「Gemini 钥匙无效」,人会跑去反复检查钥匙,而真 bug 在代码里。**401/403 才是钥匙问题;400 INVALID_ARGUMENT 是我们自己发的请求不合法**,要照实说并附上平台原话 |
 | **Gemini 手动挡要原样带回 part** | 自己跑工具循环时,把函数调用贴回对话**不能自己重新造 `Part`** —— 原始 part 里带着 `thought_signature`,Gemini 要拿它校验,少了直接报 400「Function call is missing a thought_signature」。解法:收下模型吐的 part 对象**原样存着**,别只取 `function_call` 再重建 |
 | **Gemini 流式 + 自动工具调用 = 不工作** | `generate_content_stream` 配 `tools=` 时实测只回一个 `text=''` 的空块就 `finish_reason=STOP`,工具循环没跑。表现是用户收到一句"(Gemini 没有返回文字)"。**解法:关掉自动工具调用改手动挡**(已实施),顺带还能播报每一步在查什么 |
 | **测"一闪而过"的东西别按时序抓** | 进度文字这类中途状态,用 `await tick()` 轮询去抓极不稳定(事件全在微任务里瞬间跑完,而且 helper 把 `setTimeout` 桩成了空函数)。改成**记账**:helper 记录每一次 `textContent` 写入,测试查记录 |
@@ -371,7 +373,7 @@ curl 测出来是通的,实际一句话都回不了。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 42 + 前端 22 + 大屏 9 + 平台 22 + 流式 13)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 43 + 前端 22 + 大屏 9 + 平台 22 + 流式 13)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -409,9 +411,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 42 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 43 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 42 / 前端 22 / 大屏 9 / 平台 22 / 流式 13)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 43 / 前端 22 / 大屏 9 / 平台 22 / 流式 13)
 → 更新本文件相关章节 → 提交 git。

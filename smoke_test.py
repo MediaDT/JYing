@@ -66,6 +66,32 @@ def test_pure_logic():
 
     check("平台注册表自洽(未对接的不会假装能用)", t_platform_registry)
 
+    # 递给 Gemini 的工具定义必须是合法 schema。Gemini 从函数签名自动生成,
+    # 数组参数只写 `list` 会生成不出 items → 每次请求都 400,整条 Gemini 路径全废。
+    # 这条不联网,纯查签名,但能挡住那类低级错误。
+    def t_tool_schema_sane():
+        import agent_server as srv
+        import inspect
+        import typing
+        bad = []
+        for fn in srv.NEWSBREAK_TOOLS:
+            for pname, param in inspect.signature(fn).parameters.items():
+                ann = param.annotation
+                if ann is inspect.Parameter.empty:
+                    bad.append(f"{fn.__name__}.{pname} 没写类型标注")
+                    continue
+                # 把 X | None 拆开,只看真正的类型
+                args = [a for a in typing.get_args(ann) if a is not type(None)]
+                real = args[0] if args else ann
+                if real is list:
+                    bad.append(f"{fn.__name__}.{pname} 标成了裸 list —— "
+                               f"Gemini 生成不出 items,会 400。改成 list[dict] 之类")
+                if real is dict:
+                    bad.append(f"{fn.__name__}.{pname} 标成了裸 dict,同理会缺 properties")
+        return bad or True
+
+    check("递给 Gemini 的工具签名不会生成非法 schema", t_tool_schema_sane)
+
     # 每人绑自己的 token:A 绑过之后 B 绝不能蹭到。这是安全边界,不能退化。
     def t_per_user_isolation():
         import accounts as acc

@@ -556,7 +556,7 @@ python3 -m venv venv
 **改了代码要提交前,四套测试必须全绿**:
 
 ```bash
-./venv/bin/python smoke_test.py    # 后端 42 项
+./venv/bin/python smoke_test.py    # 后端 43 项
 node frontend_test.js              # 多会话 22 项
 node dashboard_test.js             # 大屏 9 项
 node platform_test.js              # 多平台 22 项

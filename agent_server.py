@@ -174,7 +174,7 @@ app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), 
 
 
 def _scheduled_execute(level: str, object_id: str, status: str, user_id: str = "",
-                       targets: list | None = None):
+                       targets: list[dict] | None = None):
     """定时任务到点时真正干活的函数(交给 scheduler 的看表线程调用)。
 
     看表线程不在任何请求里,没有"当前用户",所以要**用当初登记这条任务的人**
@@ -639,7 +639,7 @@ def list_pending_actions() -> dict:
 
 
 def propose_status_change(level: str, object_id: str, status: str, name: str = "",
-                         extra_targets: list | None = None) -> dict:
+                         extra_targets: list[dict] | None = None) -> dict:
     """登记一个「开启/暂停」待办(不会立即执行!)。可以一次带上多个对象。
 
     level: "campaign"/"ad_set"/"ad";status: "ON"(开启)/"OFF"(暂停);
@@ -950,7 +950,7 @@ def confirm_action(action_id: str) -> dict:
 
 
 def propose_schedule(kind: str, when: str, level: str, object_id: str,
-                     status: str, name: str = "", extra_targets: list | None = None) -> dict:
+                     status: str, name: str = "", extra_targets: list[dict] | None = None) -> dict:
     """登记一个「定时开启/暂停广告」待办(不会立即生效!需用户确认)。
 
     kind: "once"(只执行一次)或 "daily"(每天重复);
@@ -2047,8 +2047,15 @@ def _brain_error(e: Exception) -> tuple[int, str]:
 
     # ===== Gemini =====
     if isinstance(e, genai_errors.APIError):
-        if e.code in (400, 401, 403):
-            return 500, "Gemini 钥匙无效(检查 .env 里的 GEMINI_API_KEY 是否粘贴完整)"
+        # 400 和 401/403 是两回事,**不能混为一谈**:
+        # 401/403 才是钥匙问题;400 INVALID_ARGUMENT 是**我们自己发的请求不合法**
+        # (最常见的是工具 schema 写错,比如数组参数没标 items)。
+        # 混着报成"钥匙无效",会让人跑去反复检查钥匙,而真正的 bug 在代码里。
+        if e.code in (401, 403):
+            return 500, "Gemini 钥匙无效或没权限(检查 .env 里的 GEMINI_API_KEY 是否粘贴完整)"
+        if e.code == 400:
+            return 500, (f"发给 Gemini 的请求不合法(400),这多半是代码里的工具定义有问题,不是你的钥匙问题。"
+                         f"平台原话:{str(e)[:200]}")
         if e.code == 429:
             return 429, "Gemini 免费额度暂时用完/太频繁,稍等一分钟再试(或在 .env 里把 BRAIN 改成 openai 走 ofox 通道)"
         if e.code in _RETRYABLE_CODES:
