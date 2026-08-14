@@ -85,5 +85,66 @@ console.log("\n【4】删除会话");
   t("自动切到剩下那个", app.curId() === "c2", app.curId());
 }
 
+// 下面两条要等 fetch 的回调跑完,所以放在 async 块里
+const tick = () => new Promise((r) => setImmediate(r));
+const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
+
+(async () => {
+
+console.log("\n【5】同一个人重新登录:自己的记录不能被误删");
+{
+  const MINE = JSON.stringify([
+    { id: "m1", title: "我自己的对话", messages: [{ role: "user", content: "我的内容" }], updatedAt: 9 },
+  ]);
+  const store = { "adbot-conversations": MINE, "adbot-current-conv": "m1",
+                  "adbot-cache-uid": "uid-demo" };
+  let pushed = null;
+  const app = boot(store, {
+    me: { username: "demo", id: "uid-demo" },       // 同一个人
+    chats: { conversations: [] },                   // 服务器上还没同步过
+    fetchBody: (u, init) => {
+      if (u.indexOf("/api/chats") === 0 && init && init.method === "PUT") {
+        pushed = JSON.parse(init.body); return { ok: true };
+      }
+      return undefined;
+    },
+  });
+  await settle();
+  t("自己的记录还在(没被当成别人的删掉)", app.convs().length === 1, `剩 ${app.convs().length} 个`);
+  t("本地记录被补传到服务器", !!pushed && JSON.stringify(pushed).indexOf("我的内容") >= 0,
+    pushed ? "已上传" : "(没上传)");
+}
+
+console.log("\n【6】同一台电脑换账号登录:绝不能看到/上传别人的记录");
+{
+  const OTHERS = JSON.stringify([
+    { id: "x1", title: "别人的对话", messages: [{ role: "user", content: "别人的秘密" }], updatedAt: 9 },
+  ]);
+  const store = { "adbot-conversations": OTHERS, "adbot-current-conv": "x1",
+                  "adbot-cache-uid": "uid-demo" };   // 缓存是 demo 的
+  let pushed = null;
+  const app = boot(store, {
+    me: { username: "demon", id: "uid-demon" },      // 现在换成 demon 登录
+    chats: { conversations: [] },                    // 他自己的服务器记录是空的
+    fetchBody: (u, init) => {
+      if (u.indexOf("/api/chats") === 0 && init && init.method === "PUT") {
+        pushed = JSON.parse(init.body); return { ok: true };
+      }
+      return undefined;
+    },
+  });
+  await settle();
+  const shown = app.registry["messages"].children
+    .map((c) => (c.textContent || "") + (c.innerHTML || "")).join("");
+  t("没把别人的记录上传到新账号",
+    !pushed || JSON.stringify(pushed).indexOf("别人的秘密") < 0,
+    pushed ? JSON.stringify(pushed).slice(0, 50) : "(没上传)");
+  t("屏幕上看不到别人的对话", shown.indexOf("别人的秘密") < 0);
+  t("本地缓存已清掉别人的记录", !store["adbot-conversations"], store["adbot-conversations"] || "(已清)");
+  t("缓存归属改成了当前账号", store["adbot-cache-uid"] === "uid-demon", store["adbot-cache-uid"]);
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
+
+})();

@@ -74,6 +74,22 @@ module.exports = function boot(store, opts) {
     createElement: makeEl, querySelectorAll: () => [], addEventListener(){},
   };
   global.confirm = () => true;
+  // 用 Node 原生 setTimeout 的话,1 秒防抖的代码在测试跑完之前根本来不及执行,
+  // 测出来永远是"没上传"(假阴性)。这里忽略延时、下一拍就跑,
+  // 让防抖逻辑也能被测到。clearTimeout 仍然要能真取消。
+  const _timers = new Map();
+  let _tid = 0;
+  global.setTimeout = (fn, _ms) => {
+    const id = ++_tid;
+    _timers.set(id, true);
+    setImmediate(() => {
+      if (!_timers.get(id)) return;
+      _timers.delete(id);
+      try { fn(); } catch (e) { /* 定时回调抛错不该弄挂整个测试 */ }
+    });
+    return id;
+  };
+  global.clearTimeout = (id) => { _timers.delete(id); };
   global.TextDecoder = function () { this.decode = (v) => (v === undefined ? "" : String(v)); };
   // 网址栏(带 ?platform= / ?bind=1 时用得上)
   global.location = { search: opts.search || "", href: "/", pathname: "/", assign(){}, replace(){} };
@@ -105,6 +121,7 @@ module.exports = function boot(store, opts) {
     if (body === undefined || body === null) {
       if (u.indexOf("/api/platforms") === 0) body = opts.platforms || { platforms: [], default: "newsbreak" };
       else if (u.indexOf("/api/me") === 0) body = opts.me || {};
+      else if (u.indexOf("/api/chats") === 0) body = opts.chats || { conversations: [] };
       else body = { reply: "ok" };
     }
     return Promise.resolve({ ok: true, status: 200,
@@ -116,7 +133,7 @@ module.exports = function boot(store, opts) {
   // 把页面脚本里的函数捞出来,好让测试能直接调(模拟"用户点了某个按钮之后")
   const exposed = {};
   new Function("__expose", js + "\n;try{__expose.refreshPlatformBinding=refreshPlatformBinding;"
-               + "__expose.clearNotBound=clearNotBound;__expose.send=send;}catch(e){}")(exposed);
+               + "__expose.clearNotBound=clearNotBound;__expose.send=send;__expose.convs=()=>conversations;__expose.cached=()=>cachedConvs;__expose.push=pushToServer;}catch(e){}")(exposed);
   return { registry, win: exposed, textLog: () => textLog, convs: () => JSON.parse(store["adbot-conversations"] || "[]"),
            curId: () => store["adbot-current-conv"] };
 };

@@ -572,6 +572,8 @@
   const STORE_KEY = "adbot-chat-history";        // 老版本的单条历史(用于一次性迁移)
   const CONVS_KEY = "adbot-conversations";       // 新版:所有会话
   const CUR_KEY = "adbot-current-conv";          // 当前打开的是哪个会话
+  // 这份本地缓存属于哪个账号。同一台电脑换人登录时靠它认出"缓存不是我的"。
+  const UID_KEY = "adbot-cache-uid";
   const MAX_KEEP = 200;    // 单个会话最多留 200 条
   const MAX_CONVS = 30;    // 左栏最多留 30 个会话,超了丢最旧的
 
@@ -678,8 +680,13 @@
     renderConvList();
   }
 
-  const conversations = loadConversations();
-  let currentId = localStorage.getItem(CUR_KEY) || "";
+  // 缓存里存过 uid,说明这台电脑登录过账号 —— 但现在还不知道**这次**是谁登录的
+  // (要等 /api/me 回来)。在确认之前先不把旧记录摆出来,否则换个人登录会
+  // 一闪而过地看到上一个人的会话标题。
+  const cacheOwned = !!localStorage.getItem(UID_KEY);
+  const conversations = cacheOwned ? [] : loadConversations();
+  const cachedConvs = cacheOwned ? loadConversations() : null;   // 确认是本人后再用
+  let currentId = cacheOwned ? "" : (localStorage.getItem(CUR_KEY) || "");
   if (!conversations.some((c) => c.id === currentId)) {
     currentId = conversations[0] ? conversations[0].id : newId();
   }
@@ -1412,6 +1419,30 @@
         if (!d.username) return;                     // 没启用登录 → 保持纯本地模式
         serverUser = d.username;
         renderUserChip();
+
+        // 本地缓存是不是这个人的?同一台电脑换账号登录时,
+        // 缓存里躺着的是**上一个人**的记录 —— 既不能显示给他看,
+        // 更不能当成"他的未同步记录"上传到他账号里(那是跨账号泄露)。
+        var uid = d.id || d.username;
+        var cachedUid = localStorage.getItem(UID_KEY) || "";
+        if (cachedUid && cachedUid !== uid) {
+          conversations.length = 0;
+          currentId = "";
+          history.length = 0;
+          try {
+            localStorage.removeItem(CONVS_KEY);
+            localStorage.removeItem(CUR_KEY);
+          } catch (e) { /* 清不掉也不影响:下面以服务器为准 */ }
+          messagesEl.innerHTML = "";
+          showWelcome();
+          renderConvList();
+        }
+        else if (cachedConvs && cachedConvs.length && !conversations.length) {
+          // 确认就是本人 → 把刚才按住没显示的缓存放回去(服务器要是挂了还能看历史)
+          Array.prototype.push.apply(conversations, cachedConvs);
+          currentId = localStorage.getItem(CUR_KEY) || (conversations[0] || {}).id || "";
+        }
+        try { localStorage.setItem(UID_KEY, uid); } catch (e) {}
         return fetch("/api/chats").then(function (r) { return r.json(); }).then(function (data) {
           var remote = (data && data.conversations) || [];
           if (remote.length > 0) {

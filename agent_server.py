@@ -110,6 +110,7 @@ _TOOL_LABELS = {
     "list_ads": "正在查广告…",
     "list_conversion_events": "正在查转化事件…",
     "recommend_creatives": "正在从你的历史广告里挑好素材…",
+    "get_delivery_tree": "正在看这条计划底下的广告组和广告…",
     "get_report": "正在拉报表数据…",
     "propose_status_change": "正在登记开关待办…",
     "propose_create_campaign": "正在登记建广告待办…",
@@ -246,6 +247,18 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
 **返回里的 defaults_used 列出了哪些值是系统默认的,复述时要把这几项单独点出来说明。**
 创建结果出来后:告知三层 id、强调目前是暂停(OFF)状态、说「开启 计划名」即可开始投放。
 
+「开启广告」的特别规矩(**最容易出错的地方,必须照做**):
+广告要真的跑起来,**campaign / ad set / ad 三层必须都是 ON**,是"与"的关系。
+只把 campaign 打开、底下的广告组和广告还关着 = 一条广告都出不去,
+用户会以为在投、实际白等几天。所以用户说「开启 XXX」时:
+1) 先调 get_delivery_tree(campaign_id) 看清底下有哪些广告组和广告、各自开没开;
+2) **底下只有一个广告组、一个广告** → 直接连同它们一起登记(不用多问);
+3) **有多个广告组或多个广告** → 先把清单列成表格给用户看(名字 + 当前是开是关),
+   问他「**全部打开,还是只打开某几个?**」—— 别替他决定,多开一条就是多花一份钱;
+4) 用户选定后,调 propose_status_change,把选中的对象放进 extra_targets 一起登记,
+   复述时**把每一条都列出来**让他确认。
+反过来,「暂停」不用这么麻烦:关掉 campaign,底下的自然都不投了,单独登记一条即可。
+
 「写操作」(开启/暂停、新建广告)必须走这套流程,一步不能少:
 1) 先用查询工具核实对象,拿到准确的 id 和名字(绝不凭记忆猜 id);
 2) 调 propose_status_change / propose_create_campaign 登记待办 → 向用户复述将要做的事,
@@ -336,6 +349,18 @@ and wait for confirmation in their NEXT message before calling confirm_action.
 After creation: report the three ids, stress that everything is PAUSED (OFF), and tell them to say
 "turn on <campaign name>" when they're ready to start delivery.
 
+"TURNING ADS ON" (the easiest thing to get wrong — follow this exactly):
+For an ad to actually run, **the campaign, the ad set AND the ad must all be ON** — it's an AND.
+Turning on only the campaign while the ad set/ad stay off means nothing is delivered at all;
+the user thinks they're live and waits days for nothing. So when they say "turn on XXX":
+1) Call get_delivery_tree(campaign_id) first to see the ad sets and ads and their current status;
+2) **Exactly one ad set and one ad** → include them automatically, no need to ask;
+3) **More than one ad set or ad** → show the list as a table (name + currently on/off) and ask
+   "**turn on all of them, or only some?**" — don't decide for them; each extra one costs more money;
+4) Once they choose, call propose_status_change with the selected objects in extra_targets, and
+   restate **every single one** for confirmation.
+Pausing is simpler: turning the campaign OFF stops everything under it, so one entry is enough.
+
 "WRITE ACTIONS" (pause/resume, create ad) must follow this flow exactly, no shortcuts:
 1) First verify the object with a query tool to get the exact id and name (never guess an id from memory);
 2) Call propose_status_change / propose_create_campaign to register the pending action, restate what you're about to do,
@@ -403,6 +428,62 @@ def list_conversion_events(ad_account_id: str) -> dict:
     """查询账户下的转化事件(conversion events)列表,建新广告第3步用它让用户挑一个。"""
     try:
         return {"events": nb.list_events(ad_account_id)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_delivery_tree(campaign_id: str, ad_account_id: str = "") -> dict:
+    """看一条广告计划底下的完整结构:它有哪些广告组、每个组下有哪些广告,各自是开还是关。
+
+    **开启广告前必须先调它。** 因为三层是"与"的关系:
+    campaign / ad set / ad **全都是 ON,广告才会真的跑**。
+    只把 campaign 打开、底下的组和广告还关着,等于没开 —— 用户会以为在投,其实一条都没出去。
+
+    返回里 `all_on` 说明是不是三层都开着;`need_turn_on` 列出为了让它跑起来
+    还差哪些对象没开(直接拿去 propose_status_change 的 extra_targets)。
+    """
+    try:
+        acct = ad_account_id or _default_ad_account_id()
+        cid = str(campaign_id)
+        camp = next((c for c in nb.list_campaigns(acct, limit=100).get("items", [])
+                     if str(c.get("id")) == cid), None)
+        if not camp:
+            return {"error": f"这个账户下找不到 id 为 {cid} 的广告计划"}
+
+        # 接口不支持按父级过滤,只能拉回来自己筛(返回里带 campaignId / adSetId)
+        sets = [s for s in nb.list_ad_sets(acct, limit=100).get("items", [])
+                if str(s.get("campaignId")) == cid]
+        ads = [a for a in nb.list_ads(acct, limit=200).get("items", [])
+               if str(a.get("campaignId")) == cid]
+
+        need = []
+        if camp.get("status") != "ON":
+            need.append({"level": "campaign", "id": cid, "name": camp.get("name")})
+        tree = []
+        for s in sets:
+            if s.get("status") != "ON":
+                need.append({"level": "ad_set", "id": str(s["id"]), "name": s.get("name")})
+            kids = []
+            for a in ads:
+                if str(a.get("adSetId")) != str(s["id"]):
+                    continue
+                if a.get("status") != "ON":
+                    need.append({"level": "ad", "id": str(a["id"]), "name": a.get("name")})
+                kids.append({"id": str(a["id"]), "name": a.get("name"),
+                             "status": a.get("status"), "在投状态": a.get("onlineStatus")})
+            tree.append({"id": str(s["id"]), "name": s.get("name"),
+                         "status": s.get("status"), "ads": kids})
+
+        return {
+            "campaign": {"id": cid, "name": camp.get("name"), "status": camp.get("status")},
+            "ad_sets": tree,
+            "all_on": not need,
+            "need_turn_on": need,
+            "note": ("三层全 ON 才会真的投放。若 need_turn_on 非空,说明现在开不起来。"
+                     "**广告组或广告多于一个时,先把清单列给用户,问他要全开还是只开某几个**,"
+                     "别替他决定 —— 多开一条就是多花一份钱。"
+                     "确定要开哪些之后,调 propose_status_change 并把其余对象放进 extra_targets 一起登记。"),
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -535,12 +616,21 @@ def list_pending_actions() -> dict:
     ] or "保险箱是空的,没有待执行的待办"}
 
 
-def propose_status_change(level: str, object_id: str, status: str, name: str = "") -> dict:
-    """登记一个「开启/暂停」待办(不会立即执行!)。
+def propose_status_change(level: str, object_id: str, status: str, name: str = "",
+                         extra_targets: list | None = None) -> dict:
+    """登记一个「开启/暂停」待办(不会立即执行!)。可以一次带上多个对象。
 
     level: "campaign"/"ad_set"/"ad";status: "ON"(开启)/"OFF"(暂停);
     name: 对象名字,用于向用户复述。
-    登记后必须把将要做的事讲给用户听,等用户在下一条消息里明确同意,
+    extra_targets: 一起改的其它对象,格式 [{"level":"ad_set","id":"123","name":"xxx"}, ...]。
+
+    **开启(ON)时通常必须带 extra_targets**:三层是"与"的关系,
+    campaign / ad set / ad 全 ON 才会真的投放。只开 campaign 等于没开。
+    先用 get_delivery_tree 看清结构,广告组或广告多于一个时**问用户要开哪些**,
+    再把选中的放进 extra_targets 一起登记。
+    (暂停 OFF 则不需要:关掉 campaign,底下的自然都不投了。)
+
+    登记后必须把**将要改动的完整清单**讲给用户听,等用户在下一条消息里明确同意,
     再用返回的 action_id 调 confirm_action 执行。
     """
     status = status.upper()
@@ -548,10 +638,19 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
         return {"error": "status 只能是 ON 或 OFF"}
     if level not in ("campaign", "ad_set", "ad"):
         return {"error": "level 只能是 campaign / ad_set / ad"}
+
+    targets = [{"level": level, "id": str(object_id), "name": name}]
+    for t in (extra_targets or []):
+        lv, oid = (t.get("level") or "").strip(), str(t.get("id") or "").strip()
+        if lv not in ("campaign", "ad_set", "ad") or not oid:
+            return {"error": f"extra_targets 里有不合法的对象:{t}"}
+        if not any(x["id"] == oid for x in targets):      # 同一个对象别改两遍
+            targets.append({"level": lv, "id": oid, "name": t.get("name") or ""})
+
     candidate = {
         "type": "update_status",
-        "level": level, "object_id": object_id, "status": status,
-        "name": name, "seq": _REQUEST_SEQ,
+        "level": level, "object_id": str(object_id), "status": status,
+        "name": name, "targets": targets, "seq": _REQUEST_SEQ,
     }
     dup = _find_duplicate(candidate)
     if dup:
@@ -560,13 +659,19 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
     action_id = uuid.uuid4().hex[:8]
     PENDING_ACTIONS[action_id] = candidate
     _save_actions()
-    print(f"[write-op] 登记待办 {action_id}: {status} {level} {object_id}", flush=True)
+    print(f"[write-op] 登记待办 {action_id}: {status} × {len(targets)} 个对象", flush=True)
     verb = "开启" if status == "ON" else "暂停"
-    return {
+    listed = [f"{verb} {t['level']}「{t['name'] or t['id']}」(id={t['id']})" for t in targets]
+    out = {
         "action_id": action_id,
-        "pending": f"{verb} {level}「{name or object_id}」(id={object_id})",
-        "note": "已登记待办,尚未执行。请向用户复述并等确认。",
+        "pending": listed if len(listed) > 1 else listed[0],
+        "note": "已登记待办,尚未执行。请把**上面每一条**都复述给用户并等确认。",
     }
+    if status == "ON" and len(targets) == 1 and level == "campaign":
+        out["warning"] = ("只开了 campaign 一层!三层全 ON 才会真的投放,"
+                          "现在这样广告跑不起来。请先用 get_delivery_tree 看看底下的"
+                          "广告组和广告,问用户要开哪些,再重新登记。")
+    return out
 
 
 # 建广告的默认值。**改这里就等于改向导的推荐值**,别把数字散写进提示词。
@@ -788,7 +893,23 @@ def confirm_action(action_id: str) -> dict:
         elif action.get("type") == "create_campaign":
             result = _execute_create_campaign(action)
         else:
-            result = {"done": True, "detail": nb.update_status(action["level"], action["object_id"], action["status"])}
+            # 一次可能要改好几个对象(开启广告要三层一起开)。逐个改、逐个记账,
+            # 有失败的也要如实说明是哪一个 —— 别让用户以为全成了。
+            tgts = action.get("targets") or [{"level": action["level"],
+                                              "id": action["object_id"], "name": action.get("name", "")}]
+            done, failed = [], []
+            for t in tgts:
+                try:
+                    nb.update_status(t["level"], t["id"], action["status"])
+                    done.append(f"{t['level']}「{t.get('name') or t['id']}」")
+                except Exception as e:
+                    failed.append(f"{t['level']}「{t.get('name') or t['id']}」:{e}")
+            if failed:
+                result = {"error": "部分没改成 —— 成功:" + ("、".join(done) or "无")
+                                   + ";失败:" + "、".join(failed)}
+            else:
+                result = {"done": True, "detail": "已" + ("开启" if action["status"] == "ON" else "暂停")
+                                                  + "、".join(done)}
         print(f"[write-op] 待办 {action_id} 结果: {json.dumps(result, ensure_ascii=False)[:300]}", flush=True)
 
         # 把"真实发生了什么"记入代码层台账(聊天回复会盖'系统核验'钢印)
@@ -879,7 +1000,7 @@ def cancel_action(action_id: str) -> dict:
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
-    recommend_creatives,
+    recommend_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
     propose_schedule, list_schedules, cancel_schedule,
@@ -1299,8 +1420,14 @@ def logout(request: Request):
 
 @app.get("/api/me")
 def me(request: Request):
+    """当前登录的是谁。
+
+    带上 `id`:前端要靠它判断"本地缓存的聊天记录是不是这个人的"。
+    只回用户名不够 —— 换个人登录时前端认不出来,会把上一个人的记录
+    当成自己的显示出来,甚至上传到新账号里。
+    """
     user = _current_user(request)
-    return {"username": user["username"]} if user else {"username": ""}
+    return {"username": user["username"], "id": user["id"]} if user else {"username": "", "id": ""}
 
 
 class ChatsIn(BaseModel):
@@ -1610,10 +1737,20 @@ OPENAI_TOOL_SCHEMAS = [
               "start_date": {"type": "string", "description": "开始日期 YYYY-MM-DD,可不填(默认最近7天)"},
               "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD,可不填"},
               "ad_account_id": {"type": "string", "description": "只看某个广告账户(单账户可不填)"}}, []),
-    _oa_tool("propose_status_change", "登记一个开启/暂停待办(不会立即执行,须用户确认)",
+    _oa_tool("propose_status_change",
+             "登记一个开启/暂停待办(不会立即执行,须用户确认)。**开启时必须把底下的广告组和广告"
+             "一起放进 extra_targets**,三层全 ON 才会真的投放,只开 campaign 等于没开",
              {"level": _LEVEL, "object_id": _ID,
               "status": {"type": "string", "enum": ["ON", "OFF"], "description": "ON=开启 OFF=暂停"},
-              "name": {"type": "string", "description": "对象名字,用于向用户复述"}},
+              "name": {"type": "string", "description": "对象名字,用于向用户复述"},
+              "extra_targets": {
+                  "type": "array",
+                  "description": "一起改的其它对象。开启广告时把要开的 ad_set / ad 都放进来"
+                                 "(先用 get_delivery_tree 看结构,多于一个时问用户开哪些)",
+                  "items": {"type": "object", "properties": {
+                      "level": {"type": "string", "description": "campaign/ad_set/ad"},
+                      "id": {"type": "string", "description": "对象 id"},
+                      "name": {"type": "string", "description": "对象名字"}}}}},
              ["level", "object_id", "status"]),
     _oa_tool("propose_create_campaign", "登记一个新建广告待办(一次建好campaign+ad set+ad三层;不会立即执行,须用户确认)",
              {"ad_account_id": _ID,
@@ -1633,6 +1770,11 @@ OPENAI_TOOL_SCHEMAS = [
     _oa_tool("confirm_action", "执行之前登记的待办(仅在用户新消息中明确同意后)", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("cancel_action", "取消之前登记的待办", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("list_pending_actions", "查看保险箱里所有已登记待确认的待办(含编号);忘了编号用它查,严禁重复登记", {}, []),
+    _oa_tool("get_delivery_tree",
+             "看一条广告计划底下有哪些广告组和广告、各自开还是关。**开启广告前必须先调它**:"
+             "三层全 ON 才会真的投放,只开 campaign 等于没开",
+             {"campaign_id": {"type": "string", "description": "广告计划 id"},
+              "ad_account_id": _ID}, ["campaign_id"]),
     _oa_tool("recommend_creatives",
              "推荐素材:从这个账户投过的广告里挑效果最好的几个素材给用户复用(带真实数据,版权干净)。"
              "建新广告第3步用户说没素材/要推荐时调它",
@@ -1653,7 +1795,7 @@ OPENAI_TOOL_SCHEMAS = [
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
-    recommend_creatives,
+    recommend_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
     get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,

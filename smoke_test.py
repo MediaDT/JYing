@@ -257,6 +257,63 @@ def test_guardrail():
     check("真执行会盖钢印(🔒 标记)", t_stamp_real)
     check("能取消待办", t_cancel)
 
+    # 开启广告必须三层一起开 —— 只开 campaign 等于没开,用户会白等几天。
+    # 这条是领域知识,代码层要守住,不能只靠提示词。
+    def t_turn_on_needs_children():
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_status_change("campaign", "999", "ON", name="只开一层")
+        try:
+            if "warning" not in r:
+                return "只开 campaign 一层居然没警告"
+            if "跑不起来" not in r["warning"]:
+                return f"警告说得不清楚:{r['warning']}"
+        finally:
+            srv.cancel_action(r.get("action_id", ""))
+        return True
+
+    def t_batch_targets():
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_status_change(
+            "campaign", "c1", "ON", name="计划",
+            extra_targets=[{"level": "ad_set", "id": "s1", "name": "组"},
+                           {"level": "ad", "id": "a1", "name": "广告"},
+                           {"level": "ad_set", "id": "s1", "name": "组"}])   # 重复的
+        bad = []
+        try:
+            act = srv.PENDING_ACTIONS.get(r.get("action_id"), {})
+            tg = act.get("targets", [])
+            if len(tg) != 3:
+                bad.append(f"应登记 3 个对象(重复的要去掉),实际 {len(tg)}")
+            if not isinstance(r.get("pending"), list) or len(r["pending"]) != 3:
+                bad.append("复述清单没把三条都列出来")
+            if "warning" in r:
+                bad.append("带了子对象却还在警告只开一层")
+        finally:
+            srv.cancel_action(r.get("action_id", ""))
+        return bad or True
+
+    def t_bad_target_rejected():
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_status_change("campaign", "c9", "ON", name="x",
+                                      extra_targets=[{"level": "怪层级", "id": "1"}])
+        if "error" not in r:
+            srv.cancel_action(r.get("action_id", ""))
+            return "非法 level 居然被放行"
+        return True
+
+    def t_pause_no_warning():
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_status_change("campaign", "888", "OFF", name="暂停一层")
+        try:
+            return True if "warning" not in r else "暂停单独一层不该警告(关计划底下自然都停)"
+        finally:
+            srv.cancel_action(r.get("action_id", ""))
+
+    check("只开 campaign 一层会明确警告跑不起来", t_turn_on_needs_children)
+    check("能一次登记多个对象(自动去重)", t_batch_targets)
+    check("extra_targets 里的非法对象被拦", t_bad_target_rejected)
+    check("暂停只关 campaign 不报警告", t_pause_no_warning)
+
 
 # ============ 4. 真连 NewsBreak(只读) ============
 
