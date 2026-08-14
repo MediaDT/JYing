@@ -173,16 +173,31 @@ app.add_middleware(AuthMiddleware)
 app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
 
 
-def _scheduled_execute(level: str, object_id: str, status: str, user_id: str = ""):
+def _scheduled_execute(level: str, object_id: str, status: str, user_id: str = "",
+                       targets: list | None = None):
     """定时任务到点时真正干活的函数(交给 scheduler 的看表线程调用)。
 
     看表线程不在任何请求里,没有"当前用户",所以要**用当初登记这条任务的人**
     的凭据来执行 —— 否则按人隔离之后,定时任务就不知道该用谁的账户了。
+
+    targets:当初用户选定要一起改的对象(开启广告要三层一起开)。
+    没有 targets 的是老任务,按单个对象处理,保持兼容。
     """
     try:
         if user_id:
             nb.CURRENT_CREDS.set(acc.get_creds(user_id, "newsbreak"))
-        return nb.update_status(level, object_id, status)
+        tgts = targets or [{"level": level, "id": str(object_id), "name": ""}]
+        done, failed = [], []
+        for t in tgts:
+            try:
+                nb.update_status(t["level"], t["id"], status)
+                done.append(f"{t['level']}「{t.get('name') or t['id']}」")
+            except Exception as e:
+                failed.append(f"{t['level']}「{t.get('name') or t['id']}」:{e}")
+        if failed:
+            # 部分失败要如实说是哪一个 —— 到点时没人盯着,记账含糊等于查不出问题
+            return {"error": "成功:" + ("、".join(done) or "无") + ";失败:" + "、".join(failed)}
+        return {"ok": True, "detail": "、".join(done)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -257,6 +272,9 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
    问他「**全部打开,还是只打开某几个?**」—— 别替他决定,多开一条就是多花一份钱;
 4) 用户选定后,调 propose_status_change,把选中的对象放进 extra_targets 一起登记,
    复述时**把每一条都列出来**让他确认。
+**定时开启(propose_schedule)完全同理,而且更要紧** —— 到点时没人盯着,
+只定了 campaign 一层的话,第二天才会发现一条广告都没跑。
+所以定时开启也要先 get_delivery_tree、也要问用户开哪些、也要把它们放进 extra_targets。
 反过来,「暂停」不用这么麻烦:关掉 campaign,底下的自然都不投了,单独登记一条即可。
 
 「写操作」(开启/暂停、新建广告)必须走这套流程,一步不能少:
@@ -359,6 +377,10 @@ the user thinks they're live and waits days for nothing. So when they say "turn 
    "**turn on all of them, or only some?**" — don't decide for them; each extra one costs more money;
 4) Once they choose, call propose_status_change with the selected objects in extra_targets, and
    restate **every single one** for confirmation.
+**Scheduling a turn-on (propose_schedule) works exactly the same way, and matters even more** —
+nobody is watching when it fires, so if only the campaign was scheduled, they won't find out until
+the next day that nothing ran. So scheduled turn-ons also need get_delivery_tree, also need to ask
+which ones, and also need them in extra_targets.
 Pausing is simpler: turning the campaign OFF stops everything under it, so one entry is enough.
 
 "WRITE ACTIONS" (pause/resume, create ad) must follow this flow exactly, no shortcuts:
@@ -928,7 +950,7 @@ def confirm_action(action_id: str) -> dict:
 
 
 def propose_schedule(kind: str, when: str, level: str, object_id: str,
-                     status: str, name: str = "") -> dict:
+                     status: str, name: str = "", extra_targets: list | None = None) -> dict:
     """登记一个「定时开启/暂停广告」待办(不会立即生效!需用户确认)。
 
     kind: "once"(只执行一次)或 "daily"(每天重复);
@@ -941,6 +963,16 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
     status = status.upper()
     if status not in ("ON", "OFF"):
         return {"error": "status 只能是 ON(开启)或 OFF(暂停)"}
+
+    # 和「立刻开启」同一条规矩:三层全 ON 才会真的投放。
+    # 定时任务更要紧 —— 到点没人盯着,只开了一层的话第二天才发现一条都没跑。
+    targets = [{"level": level, "id": str(object_id), "name": name}]
+    for t in (extra_targets or []):
+        lv, oid = (t.get("level") or "").strip(), str(t.get("id") or "").strip()
+        if lv not in ("campaign", "ad_set", "ad") or not oid:
+            return {"error": f"extra_targets 里有不合法的对象:{t}"}
+        if not any(x["id"] == oid for x in targets):
+            targets.append({"level": lv, "id": oid, "name": t.get("name") or ""})
     if level not in ("campaign", "ad_set", "ad"):
         return {"error": "level 只能是 campaign / ad_set / ad"}
     if kind not in ("once", "daily"):
@@ -954,6 +986,7 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
         "type": "schedule",
         "kind": kind, "when": when, "level": level,
         "object_id": object_id, "status": status, "name": name,
+        "targets": targets,
         # 记下是谁定的:到点时看表线程要用他自己的凭据去执行
         "user_id": CURRENT_USER_ID.get(),
         "seq": _REQUEST_SEQ,
@@ -968,13 +1001,20 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
     verb = "开启" if status == "ON" else "暂停"
     when_desc = f"每天 {when}(北京时间)" if kind == "daily" else sched.both_times(parsed)
     print(f"[write-op] 登记定时任务待办 {action_id}: {when_desc} {verb} {name or object_id}", flush=True)
-    return {
+    listed = [f"{t['level']}「{t['name'] or t['id']}」" for t in targets]
+    out = {
         "action_id": action_id,
-        "pending": f"定时{verb}:{when_desc} → {level}「{name or object_id}」",
+        "pending": f"定时{verb}:{when_desc} → " + "、".join(listed),
         "first_run": sched.both_times(parsed),
-        "note": "已登记待办,尚未生效。请向用户复述时间和动作(带上编号)并等确认。"
+        "note": "已登记待办,尚未生效。请向用户复述时间和**要改的每一个对象**(带上编号)并等确认。"
                 "另外要提醒用户:定时任务依赖本服务持续运行,服务停了就不会触发。",
     }
+    if status == "ON" and len(targets) == 1 and level == "campaign":
+        out["warning"] = ("只定了 campaign 一层!三层全 ON 才会真的投放,到点了广告照样跑不起来 —— "
+                          "而且定时任务执行时没人盯着,可能第二天才发现一条都没投。"
+                          "请先用 get_delivery_tree 看清底下的广告组和广告,问用户要开哪些,"
+                          "再把它们放进 extra_targets 重新登记。")
+    return out
 
 
 def list_schedules() -> dict:
@@ -1787,7 +1827,16 @@ OPENAI_TOOL_SCHEMAS = [
               "when": {"type": "string", "description": 'once 用 "YYYY-MM-DD HH:MM",daily 用 "HH:MM",均为北京时间'},
               "level": _LEVEL, "object_id": _ID,
               "status": {"type": "string", "enum": ["ON", "OFF"], "description": "ON=到点开启 OFF=到点暂停"},
-              "name": {"type": "string", "description": "对象名字,用于复述"}},
+              "name": {"type": "string", "description": "对象名字,用于复述"},
+              "extra_targets": {
+                  "type": "array",
+                  "description": "到点时一起改的其它对象。**定时开启广告时必须带上底下的广告组和广告**,"
+                                 "否则到点只翻了 campaign 一层,广告照样不投,而且没人盯着,"
+                                 "可能第二天才发现",
+                  "items": {"type": "object", "properties": {
+                      "level": {"type": "string", "description": "campaign/ad_set/ad"},
+                      "id": {"type": "string", "description": "对象 id"},
+                      "name": {"type": "string", "description": "对象名字"}}}}},
              ["kind", "when", "level", "object_id", "status"]),
     _oa_tool("list_schedules", "查看所有定时任务(下次执行时间、上次结果)", {}, []),
     _oa_tool("cancel_schedule", "取消一个定时任务", {"task_id": {"type": "string"}}, ["task_id"]),

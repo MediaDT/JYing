@@ -314,6 +314,64 @@ def test_guardrail():
     check("extra_targets 里的非法对象被拦", t_bad_target_rejected)
     check("暂停只关 campaign 不报警告", t_pause_no_warning)
 
+    # 定时开启同样要三层一起开 —— 而且更要紧:到点没人盯着,
+    # 只翻了一层的话第二天才发现一条都没跑
+    def t_schedule_needs_children():
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_schedule("daily", "09:00", "campaign", "777", "ON", name="只定一层")
+        try:
+            if "warning" not in r:
+                return "定时只开 campaign 一层居然没警告"
+            if "没人盯着" not in r["warning"]:
+                return f"警告没说清风险:{r['warning']}"
+        finally:
+            srv.cancel_action(r.get("action_id", ""))
+        return True
+
+    def t_schedule_batch():
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_schedule("daily", "09:30", "campaign", "c2", "ON", name="计划",
+                                 extra_targets=[{"level": "ad_set", "id": "s2", "name": "组"},
+                                                {"level": "ad", "id": "a2", "name": "广告"}])
+        bad = []
+        try:
+            act = srv.PENDING_ACTIONS.get(r.get("action_id"), {})
+            if len(act.get("targets", [])) != 3:
+                bad.append(f"应登记 3 个对象,实际 {len(act.get('targets', []))}")
+            if "warning" in r:
+                bad.append("带了子对象却还在警告")
+            if "组" not in r.get("pending", ""):
+                bad.append("复述里没列出要一起改的对象")
+        finally:
+            srv.cancel_action(r.get("action_id", ""))
+        return bad or True
+
+    def t_old_task_still_runs():
+        """老任务存档里没有 targets 字段 —— 不能因此就跑不了(兼容性)。"""
+        calls = []
+        real = srv.nb.update_status
+        srv.nb.update_status = lambda lv, oid, st: calls.append((lv, oid, st)) or {"ok": True}
+        try:
+            r = srv._scheduled_execute("campaign", "old-1", "ON")          # 老格式:没有 targets
+            if not r.get("ok"):
+                return f"老任务执行失败:{r}"
+            if calls != [("campaign", "old-1", "ON")]:
+                return f"老任务改的对象不对:{calls}"
+            calls.clear()
+            srv._scheduled_execute("campaign", "c3", "ON", "", [           # 新格式:三层
+                {"level": "campaign", "id": "c3", "name": "计划"},
+                {"level": "ad_set", "id": "s3", "name": "组"},
+                {"level": "ad", "id": "a3", "name": "广告"}])
+            if len(calls) != 3:
+                return f"新任务应改 3 个对象,实际 {len(calls)}:{calls}"
+        finally:
+            srv.nb.update_status = real
+        return True
+
+    check("定时只开 campaign 一层会警告", t_schedule_needs_children)
+    check("定时任务能一次开三层", t_schedule_batch)
+    check("老定时任务(没 targets)仍能执行", t_old_task_still_runs)
+
 
 # ============ 4. 真连 NewsBreak(只读) ============
 

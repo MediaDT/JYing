@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(39)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(42)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -45,7 +45,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(39)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(42)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -262,6 +262,9 @@ curl 测出来是通的,实际一句话都回不了。
 - **只开 campaign 一层时,返回里会带 `warning`** —— 这条守在代码层,不能只靠提示词。
 - 提示词规定:**广告组或广告多于一个时,必须把清单列给用户问"全开还是只开某几个"**,
   不许替他决定 —— 多开一条就是多花一份钱。只有一组一条时才自动带上。
+- **定时开启(`propose_schedule`)完全同理,而且更要紧**:到点时没人盯着,
+  只定了一层的话第二天才发现一条都没跑。任务存档里带 `targets`,
+  看表线程执行时逐个改。**没有 `targets` 的老任务按单对象处理**(兼容),冒烟测试守着这条。
 
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
@@ -360,6 +363,7 @@ curl 测出来是通的,实际一句话都回不了。
 - 大脑:三级火箭 + `BRAIN` 开关;工具共 17 个;
 - **数据大屏**:KPI(带环比)/ 每日趋势 / 各计划对比 / 三层明细表 / **AI 投放诊断**,双语;
 - 定时任务:一次性 + 每天重复,看表线程每 30 秒检查,错过 >15 分钟不补跑;
+  **定时开启同样三层一起开**(任务里存 `targets`);
 - **登录 + 多平台**:账号密码登录(加盐哈希)、聊天记录按账号存服务器(换电脑也能看到);
   登录后先进 `/platforms` 选平台,聊天页标题/副标题跟着选的平台变,没绑账号会明确挡一道并引导;
 - **每人绑自己的平台账号**:token 按 user_id 存 `data/creds.json`,A 绑过 B 也蹭不到(第六之四节);
@@ -367,7 +371,7 @@ curl 测出来是通的,实际一句话都回不了。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 39 + 前端 22 + 大屏 9 + 平台 22 + 流式 13)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 42 + 前端 22 + 大屏 9 + 平台 22 + 流式 13)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -405,9 +409,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 39 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 42 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 39 / 前端 22 / 大屏 9 / 平台 22 / 流式 13)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 42 / 前端 22 / 大屏 9 / 平台 22 / 流式 13)
 → 更新本文件相关章节 → 提交 git。

@@ -200,9 +200,11 @@ def _run_due_tasks(execute_fn) -> None:
 
             # 到点了,执行
             try:
-                # 带上「当初是谁登记的」—— 按人隔离之后,要用他自己的凭据去执行
+                # 带上「当初是谁登记的」—— 按人隔离之后,要用他自己的凭据去执行;
+                # 以及「当初选了要一起改哪些对象」—— 开启广告要三层一起开,
+                # 只翻 campaign 一层的话到点了广告照样不投。
                 result = execute_fn(t["level"], t["object_id"], t["status"],
-                                    t.get("user_id", ""))
+                                    t.get("user_id", ""), t.get("targets"))
                 ok = not (isinstance(result, dict) and result.get("error"))
                 detail = str(result.get("error"))[:150] if not ok else "成功"
             except Exception as e:
