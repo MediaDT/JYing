@@ -231,6 +231,60 @@ def test_validation():
     check("不传预算 → 用默认值,并如实标注是系统定的", t_default_budget)
     check("用户指定预算 → 照用,且不算默认值", t_user_budget_wins)
 
+    # 命名规范:计划 NB-类型-月日-NN,组和广告 月日-类型-NNN。
+    # 序号要从平台已有的名字往下排,不能每次都从 01 开始撞名。
+    def t_naming_convention():
+        bad = []
+        if srv._type_word("roof") != "Roof":
+            bad.append(f"类型词没规范化:{srv._type_word('roof')}")
+        if srv._type_word("ROOF") != "Roof":
+            bad.append("全大写没转成首字母大写")
+        if srv._type_word("gutter修缮") != "Gutter":
+            bad.append("非英文字符没剔掉")
+        if srv._type_word("") != "Ad":
+            bad.append("类型为空时没有兜底")
+
+        got = srv._campaign_name("Roof", "0817", [])
+        if got != "NB-Roof-0817-01":
+            bad.append(f"首支计划名不对:{got}")
+        got = srv._campaign_name("Roof", "0817",
+                                 ["NB-Roof-0817-01", "NB-Roof-0817-02", "NB-Gutter-0817-05", "杂名"])
+        if got != "NB-Roof-0817-03":
+            bad.append(f"序号没接着已有的往下排:{got}(应为 03)")
+        got = srv._campaign_name("Roof", "0817", ["nb-roof-0817-07"])   # 大小写不敏感
+        if got != "NB-Roof-0817-08":
+            bad.append(f"大小写不同的同名没算进去:{got}")
+
+        sn, an = srv._child_names("Roof", "0817")
+        if sn != "0817-Roof-001" or an != "0817-Roof-001":
+            bad.append(f"组/广告命名不对:{sn} / {an}")
+        return bad or True
+
+    def t_naming_end_to_end():
+        """真走一遍登记,确认三个名字都按规范生成(不执行,只登记后撤掉)。"""
+        srv._REQUEST_SEQ += 1
+        r = srv.propose_create_campaign(
+            ad_account_id=srv._default_ad_account_id(), keyword="smoketype",
+            landing_url="https://example.com/x", headline="Smoke Headline",
+            description="Smoke description here.", asset_url="https://cdn.example.com/a.png")
+        if "error" in r:
+            return f"登记失败:{r['error']}"
+        bad = []
+        try:
+            p = r.get("pending") or {}
+            if not p.get("计划名", "").startswith("NB-Smoketype-"):
+                bad.append(f"计划名不合规范:{p.get('计划名')}")
+            if "-Smoketype-" not in p.get("广告组名", ""):
+                bad.append(f"广告组名不合规范:{p.get('广告组名')}")
+            if not p.get("广告名", "").endswith("-001"):
+                bad.append(f"广告名不合规范:{p.get('广告名')}")
+        finally:
+            srv.cancel_action(r.get("action_id", ""))
+        return bad or True
+
+    check("命名规范(类型词/序号往下排/三层格式)", t_naming_convention)
+    check("真走一遍登记,三个名字都按规范生成", t_naming_end_to_end)
+
 
 # ============ 3. 写操作护栏(用假 id,不会真改) ============
 

@@ -248,7 +248,13 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      他选了之后,直接用那个 asset_url 继续(不用再上传)。
    · **绝对不要**从网上找图、编造素材链接、或声称能生成图片 —— 版权会出事,平台也会拒审。
      账户里没有历史素材时如实说没有,并告诉他上传自己的图就行(建议 1200×628 以上、清晰、别放大段文字);
-第4步 命名:请用户给一个英文关键词(如 gutter),名字自动生成为「关键词-月日」;用户想手动指定也行。
+第4步 落地页类型(决定命名):看落地页是做什么的,给出**一个英文类型词**(如 roof / gutter / window / solar),
+   **先告诉用户你判断的类型,请他确认或改**(例:「你这个落地页是屋顶维修,我按 roof 来命名,可以吗?」)。
+   名字会按团队规范自动生成,复述时要把三个名字都列出来:
+   · 计划   `NB-Roof-0817-01` —— NB-类型-月日-今天这个类型的第几支(两位)
+   · 广告组 `0817-Roof-001`   —— 月日-类型-这支计划里的第几个组(三位)
+   · 广告   `0817-Roof-001`   —— 月日-类型-这个组里的第几条广告(三位)
+   序号是查过平台上已有的名字自动往下排的,不用你算。用户想完全自己指定计划名也行(传 campaign_name)。
 第5步 **预算和文案:不要问,直接配好给他看,并讲清为什么**。一次性列出这几项:
    · 日预算 $20 —— 理由:平台最低 $10,但太低跑不出量、几天都攒不够数据看不出效果;
      $20 一两天就能看出苗头,又不至于烧太多。**而且建好是暂停的,你确认前一分钱不花。**
@@ -348,8 +354,15 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
    · **NEVER** pull images from the web, invent asset URLs, or claim you can generate images — that creates
      copyright exposure and the platform will reject them. If the account has no past creatives, say so plainly
      and ask them to upload their own (suggest 1200×628 or larger, sharp, not covered in text);
-Step 4 Naming: ask for an English keyword (e.g. gutter); the name is generated as "keyword-MMDD".
-   They can also specify a name manually.
+Step 4 Landing-page type (drives naming): work out what the landing page sells and pick **one English type word**
+   (roof / gutter / window / solar ...). **Tell the user the type you inferred and let them confirm or change it**
+   (e.g. "This page is about roof repair, so I'll name things with `roof` — OK?").
+   Names follow the team convention automatically; list all three when you restate the order:
+   · Campaign `NB-Roof-0817-01` — NB-Type-MMDD-Nth campaign of this type today (2 digits)
+   · Ad set   `0817-Roof-001`   — MMDD-Type-Nth ad set in this campaign (3 digits)
+   · Ad       `0817-Roof-001`   — MMDD-Type-Nth ad in this ad set (3 digits)
+   The sequence number is derived from what already exists on the platform, so you don't compute it.
+   They can still override the campaign name entirely (campaign_name).
 Step 5 **Budget and copy: do NOT ask — set them, show them, and explain why.** List all of these at once:
    · Daily budget $20 — why: the platform minimum is $10, but that's too low to gather data in a few days;
      $20 shows a signal within a day or two without burning much. **And it's created PAUSED — nothing is
@@ -696,6 +709,47 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
     return out
 
 
+# ===== 命名规范(按落地页类型)=====
+# 例:落地页是屋顶维修 → 类型 roof
+#   计划   NB-Roof-0814-01   序号 = 今天这个类型的第几支计划(两位)
+#   广告组 0814-Roof-001     序号 = 这支计划里的第几个组(三位)
+#   广告   0814-Roof-001     序号 = 这个组里的第几条广告(三位)
+# 组和广告是同一个格式,这是团队定的规范 —— 它们分属不同层级,不会真的混淆。
+
+def _type_word(raw: str) -> str:
+    """把落地页类型规范成命名用的词:`roof` / `ROOF` / `roof 修缮` → `Roof`。"""
+    import re as _re
+    w = _re.sub(r"[^A-Za-z0-9]", "", (raw or "").strip())
+    return (w[:1].upper() + w[1:].lower()) if w else "Ad"
+
+
+def _campaign_name(type_word: str, mmdd: str, existing_names: list) -> str:
+    """算出今天这个类型的下一支计划名。
+
+    扫已有的 `NB-Roof-0814-NN`,取最大序号 +1 —— 这样中途删过、
+    或者别人也在建,都不会撞名。
+    """
+    import re as _re
+    pat = _re.compile(rf"^NB-{_re.escape(type_word)}-{mmdd}-(\d+)$", _re.I)
+    mx = 0
+    for n in existing_names:
+        m = pat.match((n or "").strip())
+        if m:
+            try:
+                mx = max(mx, int(m.group(1)))
+            except ValueError:
+                pass
+    return f"NB-{type_word}-{mmdd}-{mx + 1:02d}"
+
+
+def _child_names(type_word: str, mmdd: str) -> tuple[str, str]:
+    """新建计划底下的第一个广告组和第一条广告的名字。
+
+    我们一次只建一组一条,所以序号固定是 001 —— 计划是全新的,底下不可能已有别的。
+    """
+    return f"{mmdd}-{type_word}-001", f"{mmdd}-{type_word}-001"
+
+
 # 建广告的默认值。**改这里就等于改向导的推荐值**,别把数字散写进提示词。
 # 每个默认值都要有个说得出口的理由 —— 向导要把理由讲给用户听(见 SYSTEM_PROMPT)。
 DEFAULT_BUDGET_DOLLARS = 20.0     # 日预算。平台最低 $10,但太低跑不出量、数据少看不准
@@ -720,7 +774,7 @@ def propose_create_campaign(
 ) -> dict:
     """登记一个「新建广告」待办(不会立即执行!),会一次建好 campaign+ad set+ad 三层。
 
-    必填:ad_account_id(广告账户id)、keyword(英文命名关键词,如 gutter)、
+    必填:ad_account_id(广告账户id)、keyword(**落地页类型**,英文一个词,如 roof / gutter / window;用于按规范命名)、
     landing_url(落地页链接)、headline(标题)、description(描述)、
     asset_url(素材地址,来自用户上传后的系统消息)。
     budget_dollars(预算,美元,最低10)**可以不传**:不传就用默认日预算,
@@ -756,17 +810,24 @@ def propose_create_campaign(
     if problems:
         return {"error": ";".join(problems)}
 
-    # ---- 自动命名:关键词-月日(用户手动指定则优先) ----
+    # ---- 自动命名:按落地页类型走团队的命名规范(用户手动指定则优先) ----
     from datetime import datetime, timezone
     mmdd = datetime.now(timezone.utc).strftime("%m%d")
-    c_name = campaign_name.strip() or f"{keyword.strip()}-{mmdd}"
+    tw = _type_word(keyword)
+    try:
+        existing = [c.get("name") or "" for c in
+                    nb.list_campaigns(ad_account_id, limit=100).get("items", [])]
+    except Exception:
+        existing = []            # 查不到就从 01 起,总比建不出来强
+    c_name = campaign_name.strip() or _campaign_name(tw, mmdd, existing)
+    set_name, ad_name = _child_names(tw, mmdd)
 
     candidate = {
         "type": "create_campaign",
         "ad_account_id": ad_account_id,
         "campaign_name": c_name,
-        "ad_set_name": f"{c_name}-set1",
-        "ad_name": f"1-{c_name}",
+        "ad_set_name": set_name,
+        "ad_name": ad_name,
         "landing_url": landing_url,
         "budget_type": budget_type,
         "budget_cents": int(round(budget_dollars * 100)),
@@ -1804,7 +1865,7 @@ OPENAI_TOOL_SCHEMAS = [
              ["level", "object_id", "status"]),
     _oa_tool("propose_create_campaign", "登记一个新建广告待办(一次建好campaign+ad set+ad三层;不会立即执行,须用户确认)",
              {"ad_account_id": _ID,
-              "keyword": {"type": "string", "description": "英文命名关键词,如 gutter"},
+              "keyword": {"type": "string", "description": "落地页类型(英文一个词,如 roof/gutter/window),用于按规范命名 NB-Roof-月日-序号"},
               "landing_url": {"type": "string", "description": "落地页链接,http(s)开头"},
               "budget_dollars": {"type": "number", "description": "预算(美元),最低10。**可以不传**:不传就用默认日预算 $20,但要在复述时告诉用户这是默认值、为什么、以及可以改"},
               "tracking_id": {"type": "string", "description": "转化事件id(可选,不填自动选)"},
