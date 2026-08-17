@@ -248,8 +248,12 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      他选了之后,直接用那个 asset_url 继续(不用再上传)。
    · **绝对不要**从网上找图、编造素材链接、或声称能生成图片 —— 版权会出事,平台也会拒审。
      账户里没有历史素材时如实说没有,并告诉他上传自己的图就行(建议 1200×628 以上、清晰、别放大段文字);
-第4步 落地页类型(决定命名):看落地页是做什么的,给出**一个英文类型词**(如 roof / gutter / window / solar),
-   **先告诉用户你判断的类型,请他确认或改**(例:「你这个落地页是屋顶维修,我按 roof 来命名,可以吗?」)。
+第4步 落地页类型(决定命名):
+   · **落地页能对上「现有的落地页类型」里的某一个** → 直接用它,并告诉用户一声
+     (例:「你这个落地页是屋顶维修,我按 roof 来命名」),不用反复确认;
+   · **一个都对不上** → **必须问用户「这次用什么关键词命名?」**,
+     并把现有的几个列出来供参考。**绝对不许自己编一个类型词** ——
+     命名是团队约定,编出来的词会让以后按名字筛数据时对不上号。
    名字会按团队规范自动生成,复述时要把三个名字都列出来:
    · 计划   `NB-Roof-0817-01` —— NB-类型-月日-今天这个类型的第几支(两位)
    · 广告组 `0817-Roof-001`   —— 月日-类型-这支计划里的第几个组(三位)
@@ -354,9 +358,11 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
    · **NEVER** pull images from the web, invent asset URLs, or claim you can generate images — that creates
      copyright exposure and the platform will reject them. If the account has no past creatives, say so plainly
      and ask them to upload their own (suggest 1200×628 or larger, sharp, not covered in text);
-Step 4 Landing-page type (drives naming): work out what the landing page sells and pick **one English type word**
-   (roof / gutter / window / solar ...). **Tell the user the type you inferred and let them confirm or change it**
-   (e.g. "This page is about roof repair, so I'll name things with `roof` — OK?").
+Step 4 Landing-page type (drives naming):
+   · **If the landing page matches one of the KNOWN LANDING-PAGE TYPES** → just use it and mention it
+     (e.g. "This page is about roof repair, so I'll name things with `roof`"); no need to keep asking;
+   · **If none match** → **you MUST ask the user which keyword to use**, listing the known ones for reference.
+     **Never invent a type word** — naming is a team convention, and an invented one breaks filtering by name later.
    Names follow the team convention automatically; list all three when you restate the order:
    · Campaign `NB-Roof-0817-01` — NB-Type-MMDD-Nth campaign of this type today (2 digits)
    · Ad set   `0817-Roof-001`   — MMDD-Type-Nth ad set in this campaign (3 digits)
@@ -715,6 +721,21 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
 #   广告组 0814-Roof-001     序号 = 这支计划里的第几个组(三位)
 #   广告   0814-Roof-001     序号 = 这个组里的第几条广告(三位)
 # 组和广告是同一个格式,这是团队定的规范 —— 它们分属不同层级,不会真的混淆。
+
+# 团队现有的落地页类型。落地页里能对上其中一个就直接用,对不上**必须问用户**,
+# 不许自己编一个 —— 命名是团队约定,编出来的类型会让报表对不上号。
+# 加新类型只改这个列表,提示词会自动跟着变(见 _system_prompt_now)。
+KNOWN_AD_TYPES = ["roof", "gutter", "window", "bathroom"]
+
+
+def match_known_type(text: str) -> str:
+    """在落地页地址/描述里找已知类型,找到返回规范化后的词(如 `Roof`),没有返回空。"""
+    low = (text or "").lower()
+    for t in KNOWN_AD_TYPES:
+        if t in low:
+            return _type_word(t)
+    return ""
+
 
 def _type_word(raw: str) -> str:
     """把落地页类型规范成命名用的词:`roof` / `ROOF` / `roof 修缮` → `Roof`。"""
@@ -1686,8 +1707,14 @@ def _system_prompt_now(lang: str = "zh") -> str:
 
     if english:
         prompt = SYSTEM_PROMPT_EN + f"\n\nToday's date (UTC) is {today}; use it when working out ranges like \"the last N days\"."
+        prompt += ("\n\nKNOWN LANDING-PAGE TYPES: " + " / ".join(KNOWN_AD_TYPES)
+                   + ". If the landing page matches one of these, use it for naming (and say so). "
+                     "**If it matches none, you MUST ask the user which keyword to use — never invent one.**")
     else:
         prompt = SYSTEM_PROMPT + f"\n\n今天的日期(UTC)是 {today},计算\"最近N天\"等日期范围时以此为准。"
+        prompt += ("\n\n【现有的落地页类型】" + " / ".join(KNOWN_AD_TYPES)
+                   + "。落地页里能对上其中一个就直接用它命名(告诉用户一声);"
+                     "**对不上就必须问用户「这次用什么关键词命名?」,不许自己编一个。**")
 
     if sched.recent_runs:
         prompt += ("\n\n【定时任务最近的执行结果】(代码层记录,若用户还不知道,主动告知一句):\n"

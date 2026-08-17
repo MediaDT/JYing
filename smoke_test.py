@@ -282,7 +282,31 @@ def test_validation():
             srv.cancel_action(r.get("action_id", ""))
         return bad or True
 
+    def t_known_types():
+        """已知类型要能从落地页认出来;认不出的必须留给用户定,不能瞎编。
+        清单只在代码里存一份,提示词是注入的 —— 这条同时守住"两边不同步"。"""
+        bad = []
+        cases = {
+            "https://x.com/roofing-repair": "Roof",
+            "https://x.com/gutter-guards": "Gutter",
+            "https://x.com/window-replacement": "Window",
+            "https://x.com/bathroom-remodel": "Bathroom",
+            "https://x.com/solar-panels": "",          # 对不上 → 空,交给用户定
+        }
+        for url, want in cases.items():
+            got = srv.match_known_type(url)
+            if got != want:
+                bad.append(f"{url} → {got!r}(应为 {want!r})")
+        # 清单必须真的注入进了提示词,否则改了代码 AI 还按老的来
+        for lang in ("zh", "en"):
+            p = srv._system_prompt_now(lang)
+            for t in srv.KNOWN_AD_TYPES:
+                if t not in p:
+                    bad.append(f"{lang} 提示词里没有类型 {t}")
+        return bad or True
+
     check("命名规范(类型词/序号往下排/三层格式)", t_naming_convention)
+    check("已知类型能认出来,认不出的留给用户定", t_known_types)
     check("真走一遍登记,三个名字都按规范生成", t_naming_end_to_end)
 
 
