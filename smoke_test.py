@@ -282,8 +282,8 @@ def test_validation():
         bad = []
         try:
             import re as _re
-            from datetime import datetime, timezone
-            ymd = datetime.now(timezone.utc).strftime("%y%m%d")
+            import scheduler as _sched
+            ymd = _sched.now_beijing().strftime("%y%m%d")    # 命名按北京时间,不是 UTC
             p = r.get("pending") or {}
             if not _re.fullmatch(rf"NB-Smoketype-{ymd}-\d{{2}}", p.get("计划名", "")):
                 bad.append(f"计划名不合规范:{p.get('计划名')}")
@@ -294,6 +294,36 @@ def test_validation():
         finally:
             srv.cancel_action(r.get("action_id", ""))
         return bad or True
+
+    def t_naming_uses_beijing_time():
+        """命名的日期必须走北京时间,不能是 UTC。
+
+        直接比"名字里的日期 == 今天"是守不住的:北京和 UTC 一天里有 16 小时是同一天,
+        测试多半在那 16 小时里跑,用 UTC 也能过。所以这里把时钟换掉——
+        换成一个北京和 UTC **必然不同天**的时刻(北京 03:00 = UTC 前一天 19:00),
+        名字跟着北京走才算对。
+        """
+        from datetime import datetime
+        real = srv.sched.now_beijing
+        srv.sched.now_beijing = lambda: datetime(2030, 1, 2, 3, 0, tzinfo=srv.sched.BEIJING)
+        srv._REQUEST_SEQ += 1
+        r = None
+        try:
+            r = srv.propose_create_campaign(
+                ad_account_id=srv._default_ad_account_id(), keyword="tzcheck",
+                landing_url="https://example.com/x", headline="TZ Headline",
+                description="TZ description here.", asset_url="https://cdn.example.com/a.png")
+            if "error" in r:
+                return f"登记失败:{r['error']}"
+            got = (r.get("pending") or {}).get("计划名", "")
+            if "300102" not in got:
+                return (f"计划名用的不是北京时间:{got}"
+                        f"(北京已是 2030-01-02,应含 300102;含 300101 说明还在用 UTC)")
+            return True
+        finally:
+            srv.sched.now_beijing = real
+            if r:
+                srv.cancel_action(r.get("action_id", ""))
 
     def t_known_types():
         """已知类型要能从落地页认出来;认不出的必须留给用户定,不能瞎编。
@@ -321,6 +351,7 @@ def test_validation():
     check("命名规范(类型词/序号往下排/三层格式)", t_naming_convention)
     check("已知类型能认出来,认不出的留给用户定", t_known_types)
     check("真走一遍登记,三个名字都按规范生成", t_naming_end_to_end)
+    check("命名的日期走北京时间,不是 UTC", t_naming_uses_beijing_time)
 
 
 # ============ 3. 写操作护栏(用假 id,不会真改) ============

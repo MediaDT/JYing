@@ -837,7 +837,9 @@ def propose_create_campaign(
 
     # ---- 自动命名:按落地页类型走团队的命名规范(用户手动指定则优先) ----
     from datetime import datetime, timezone
-    ymd = datetime.now(timezone.utc).strftime("%y%m%d")     # 260817,带年份
+    # 日期按**北京时间**取(用户说几号就是他那边的几号)。
+    # 别用 UTC:北京时间凌晨 0~8 点建的广告会被写成前一天,用户按日期筛就漏掉了。
+    ymd = sched.now_beijing().strftime("%y%m%d")            # 260817,带年份
     tw = _type_word(keyword)
     try:
         existing = [c.get("name") or "" for c in
