@@ -255,9 +255,9 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      并把现有的几个列出来供参考。**绝对不许自己编一个类型词** ——
      命名是团队约定,编出来的词会让以后按名字筛数据时对不上号。
    名字会按团队规范自动生成,复述时要把三个名字都列出来:
-   · 计划   `NB-Roof-0817-01` —— NB-类型-月日-今天这个类型的第几支(两位)
-   · 广告组 `0817-Roof-001`   —— 月日-类型-这支计划里的第几个组(三位)
-   · 广告   `0817-Roof-001`   —— 月日-类型-这个组里的第几条广告(三位)
+   · 计划   `NB-Roof-260817-01`  —— NB-类型-年月日-今天这个类型的第几支(两位)
+   · 广告组 `260817-Roof-001`    —— 年月日-类型-这支计划里的第几个组(三位)
+   · 广告   `AD-260817-Roof-001` —— AD-年月日-类型-这个组里的第几条广告(三位)
    序号是查过平台上已有的名字自动往下排的,不用你算。用户想完全自己指定计划名也行(传 campaign_name)。
 第5步 **预算和文案:不要问,直接配好给他看,并讲清为什么**。一次性列出这几项:
    · 日预算 $20 —— 理由:平台最低 $10,但太低跑不出量、几天都攒不够数据看不出效果;
@@ -364,9 +364,9 @@ Step 4 Landing-page type (drives naming):
    · **If none match** → **you MUST ask the user which keyword to use**, listing the known ones for reference.
      **Never invent a type word** — naming is a team convention, and an invented one breaks filtering by name later.
    Names follow the team convention automatically; list all three when you restate the order:
-   · Campaign `NB-Roof-0817-01` — NB-Type-MMDD-Nth campaign of this type today (2 digits)
-   · Ad set   `0817-Roof-001`   — MMDD-Type-Nth ad set in this campaign (3 digits)
-   · Ad       `0817-Roof-001`   — MMDD-Type-Nth ad in this ad set (3 digits)
+   · Campaign `NB-Roof-260817-01`  — NB-Type-YYMMDD-Nth campaign of this type today (2 digits)
+   · Ad set   `260817-Roof-001`    — YYMMDD-Type-Nth ad set in this campaign (3 digits)
+   · Ad       `AD-260817-Roof-001` — AD-YYMMDD-Type-Nth ad in this ad set (3 digits)
    The sequence number is derived from what already exists on the platform, so you don't compute it.
    They can still override the campaign name entirely (campaign_name).
 Step 5 **Budget and copy: do NOT ask — set them, show them, and explain why.** List all of these at once:
@@ -717,10 +717,13 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
 
 # ===== 命名规范(按落地页类型)=====
 # 例:落地页是屋顶维修 → 类型 roof
-#   计划   NB-Roof-0814-01   序号 = 今天这个类型的第几支计划(两位)
-#   广告组 0814-Roof-001     序号 = 这支计划里的第几个组(三位)
-#   广告   0814-Roof-001     序号 = 这个组里的第几条广告(三位)
-# 组和广告是同一个格式,这是团队定的规范 —— 它们分属不同层级,不会真的混淆。
+#   计划   NB-Roof-260817-01     序号 = 今天这个类型的第几支计划(两位)
+#   广告组 260817-Roof-001       序号 = 这支计划里的第几个组(三位)
+#   广告   AD-260817-Roof-001    序号 = 这个组里的第几条广告(三位)
+# 日期是 **年月日 6 位**(YYMMDD),不是月日 4 位 —— 少了年份的话,
+# 明年同月同日的序号会接着今年往下排(查已有名字取最大值 +1),而不是重新从 01 开始。
+# 广告比广告组多一个 `AD-` 前缀:两层要是同名,按名字搜就分不出你指的是哪一层
+#(平台的列表接口是按名字搜的,报表导出后也只有一列 name)。
 
 # 团队现有的落地页类型。落地页里能对上其中一个就直接用,对不上**必须问用户**,
 # 不许自己编一个 —— 命名是团队约定,编出来的类型会让报表对不上号。
@@ -744,14 +747,14 @@ def _type_word(raw: str) -> str:
     return (w[:1].upper() + w[1:].lower()) if w else "Ad"
 
 
-def _campaign_name(type_word: str, mmdd: str, existing_names: list) -> str:
-    """算出今天这个类型的下一支计划名。
+def _campaign_name(type_word: str, ymd: str, existing_names: list) -> str:
+    """算出今天这个类型的下一支计划名。ymd 是 6 位年月日,如 `260817`。
 
-    扫已有的 `NB-Roof-0814-NN`,取最大序号 +1 —— 这样中途删过、
+    扫已有的 `NB-Roof-260817-NN`,取最大序号 +1 —— 这样中途删过、
     或者别人也在建,都不会撞名。
     """
     import re as _re
-    pat = _re.compile(rf"^NB-{_re.escape(type_word)}-{mmdd}-(\d+)$", _re.I)
+    pat = _re.compile(rf"^NB-{_re.escape(type_word)}-{ymd}-(\d+)$", _re.I)
     mx = 0
     for n in existing_names:
         m = pat.match((n or "").strip())
@@ -760,15 +763,16 @@ def _campaign_name(type_word: str, mmdd: str, existing_names: list) -> str:
                 mx = max(mx, int(m.group(1)))
             except ValueError:
                 pass
-    return f"NB-{type_word}-{mmdd}-{mx + 1:02d}"
+    return f"NB-{type_word}-{ymd}-{mx + 1:02d}"
 
 
-def _child_names(type_word: str, mmdd: str) -> tuple[str, str]:
+def _child_names(type_word: str, ymd: str) -> tuple[str, str]:
     """新建计划底下的第一个广告组和第一条广告的名字。
 
     我们一次只建一组一条,所以序号固定是 001 —— 计划是全新的,底下不可能已有别的。
+    广告多带一个 `AD-` 前缀,好和同序号的广告组区分开。
     """
-    return f"{mmdd}-{type_word}-001", f"{mmdd}-{type_word}-001"
+    return f"{ymd}-{type_word}-001", f"AD-{ymd}-{type_word}-001"
 
 
 # 建广告的默认值。**改这里就等于改向导的推荐值**,别把数字散写进提示词。
@@ -833,15 +837,15 @@ def propose_create_campaign(
 
     # ---- 自动命名:按落地页类型走团队的命名规范(用户手动指定则优先) ----
     from datetime import datetime, timezone
-    mmdd = datetime.now(timezone.utc).strftime("%m%d")
+    ymd = datetime.now(timezone.utc).strftime("%y%m%d")     # 260817,带年份
     tw = _type_word(keyword)
     try:
         existing = [c.get("name") or "" for c in
                     nb.list_campaigns(ad_account_id, limit=100).get("items", [])]
     except Exception:
         existing = []            # 查不到就从 01 起,总比建不出来强
-    c_name = campaign_name.strip() or _campaign_name(tw, mmdd, existing)
-    set_name, ad_name = _child_names(tw, mmdd)
+    c_name = campaign_name.strip() or _campaign_name(tw, ymd, existing)
+    set_name, ad_name = _child_names(tw, ymd)
 
     candidate = {
         "type": "create_campaign",
@@ -1892,7 +1896,7 @@ OPENAI_TOOL_SCHEMAS = [
              ["level", "object_id", "status"]),
     _oa_tool("propose_create_campaign", "登记一个新建广告待办(一次建好campaign+ad set+ad三层;不会立即执行,须用户确认)",
              {"ad_account_id": _ID,
-              "keyword": {"type": "string", "description": "落地页类型(英文一个词,如 roof/gutter/window),用于按规范命名 NB-Roof-月日-序号"},
+              "keyword": {"type": "string", "description": "落地页类型(英文一个词,如 roof/gutter/window),用于按规范命名 NB-Roof-年月日-序号"},
               "landing_url": {"type": "string", "description": "落地页链接,http(s)开头"},
               "budget_dollars": {"type": "number", "description": "预算(美元),最低10。**可以不传**:不传就用默认日预算 $20,但要在复述时告诉用户这是默认值、为什么、以及可以改"},
               "tracking_id": {"type": "string", "description": "转化事件id(可选,不填自动选)"},

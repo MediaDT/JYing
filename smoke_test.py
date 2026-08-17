@@ -231,8 +231,9 @@ def test_validation():
     check("不传预算 → 用默认值,并如实标注是系统定的", t_default_budget)
     check("用户指定预算 → 照用,且不算默认值", t_user_budget_wins)
 
-    # 命名规范:计划 NB-类型-月日-NN,组和广告 月日-类型-NNN。
+    # 命名规范:计划 NB-类型-年月日-NN,组 年月日-类型-NNN,广告 AD-年月日-类型-NNN。
     # 序号要从平台已有的名字往下排,不能每次都从 01 开始撞名。
+    # 日期必须带年份(6 位),否则明年同月同日的序号会接着今年往下排。
     def t_naming_convention():
         bad = []
         if srv._type_word("roof") != "Roof":
@@ -244,20 +245,29 @@ def test_validation():
         if srv._type_word("") != "Ad":
             bad.append("类型为空时没有兜底")
 
-        got = srv._campaign_name("Roof", "0817", [])
-        if got != "NB-Roof-0817-01":
+        got = srv._campaign_name("Roof", "260817", [])
+        if got != "NB-Roof-260817-01":
             bad.append(f"首支计划名不对:{got}")
-        got = srv._campaign_name("Roof", "0817",
-                                 ["NB-Roof-0817-01", "NB-Roof-0817-02", "NB-Gutter-0817-05", "杂名"])
-        if got != "NB-Roof-0817-03":
+        got = srv._campaign_name("Roof", "260817",
+                                 ["NB-Roof-260817-01", "NB-Roof-260817-02",
+                                  "NB-Gutter-260817-05", "杂名"])
+        if got != "NB-Roof-260817-03":
             bad.append(f"序号没接着已有的往下排:{got}(应为 03)")
-        got = srv._campaign_name("Roof", "0817", ["nb-roof-0817-07"])   # 大小写不敏感
-        if got != "NB-Roof-0817-08":
+        got = srv._campaign_name("Roof", "260817", ["nb-roof-260817-07"])   # 大小写不敏感
+        if got != "NB-Roof-260817-08":
             bad.append(f"大小写不同的同名没算进去:{got}")
+        # 年份要真的隔开:去年同月同日的计划不能算进今年的序号
+        got = srv._campaign_name("Roof", "260817", ["NB-Roof-250817-09"])
+        if got != "NB-Roof-260817-01":
+            bad.append(f"去年的同月同日被算进来了:{got}(应为 01)")
 
-        sn, an = srv._child_names("Roof", "0817")
-        if sn != "0817-Roof-001" or an != "0817-Roof-001":
-            bad.append(f"组/广告命名不对:{sn} / {an}")
+        sn, an = srv._child_names("Roof", "260817")
+        if sn != "260817-Roof-001":
+            bad.append(f"广告组命名不对:{sn}")
+        if an != "AD-260817-Roof-001":
+            bad.append(f"广告命名不对:{an}(广告要带 AD- 前缀)")
+        if sn == an:
+            bad.append("广告组和广告同名 —— 按名字搜就分不出是哪一层")
         return bad or True
 
     def t_naming_end_to_end():
@@ -271,12 +281,15 @@ def test_validation():
             return f"登记失败:{r['error']}"
         bad = []
         try:
+            import re as _re
+            from datetime import datetime, timezone
+            ymd = datetime.now(timezone.utc).strftime("%y%m%d")
             p = r.get("pending") or {}
-            if not p.get("计划名", "").startswith("NB-Smoketype-"):
+            if not _re.fullmatch(rf"NB-Smoketype-{ymd}-\d{{2}}", p.get("计划名", "")):
                 bad.append(f"计划名不合规范:{p.get('计划名')}")
-            if "-Smoketype-" not in p.get("广告组名", ""):
+            if p.get("广告组名") != f"{ymd}-Smoketype-001":
                 bad.append(f"广告组名不合规范:{p.get('广告组名')}")
-            if not p.get("广告名", "").endswith("-001"):
+            if p.get("广告名") != f"AD-{ymd}-Smoketype-001":
                 bad.append(f"广告名不合规范:{p.get('广告名')}")
         finally:
             srv.cancel_action(r.get("action_id", ""))
