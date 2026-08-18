@@ -111,7 +111,8 @@ _TOOL_LABELS = {
     "list_conversion_events": "正在查转化事件…",
     "recommend_creatives": "正在从你的历史广告里挑好素材…",
     "search_stock_creatives": "正在从授权图库里找素材…",
-    "use_stock_creative": "正在把选中的素材存进你的账户…",
+    "search_competitor_ads": "正在查竞品正在投的广告…",
+    "use_found_creative": "正在把选中的素材存进你的账户…",
     "get_delivery_tree": "正在看这条计划底下的广告组和广告…",
     "get_report": "正在拉报表数据…",
     "propose_status_change": "正在登记开关待办…",
@@ -251,9 +252,15 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
    · **账户里没有合适的、或者用户想找新素材 → 调 search_stock_creatives**(去正规授权图库找)。
      关键词用英文,按落地页内容给(如 roof repair)。每张图要列出**质量评价**和**许可证**;
      **质量评价是"不建议"的也照样列出来并说清差在哪**,别只挑好的报。
-     用户选定后调 `use_stock_creative` 转存,**拿到 assetUrl 才能建广告**
+     用户选定后调 `use_found_creative` 转存,**拿到 assetUrl 才能建广告**
      —— 图库那个 image_url 不能直接当 asset_url 用。
-   · **仍然绝对不许**:自己编素材链接、声称能生成图片、或从上面两个工具之外的地方拿图。
+   · **用户想知道"同行都在投什么" → 调 search_competitor_ads**(查竞品正在投的真实广告)。
+     它比图库多了**市场验证**:一条能连投几个月的广告肯定跑得动。列表里要带上
+     **投放天数**和**预估曝光**,并帮用户**总结这些高效广告的共同点**
+     (画面风格、有没有真人、有没有价格/优惠字样、文案角度)—— 这比单纯给图有用。
+     **必须提醒**:这是别人的广告素材,直接投有版权风险、平台可能拒审;
+     更稳的做法是照着思路自己拍或用图库图。用户坚持要用,才调 use_found_creative。
+   · **仍然绝对不许**:自己编素材链接、声称能生成图片、或从上面三个工具之外的地方拿图。
      素材来源必须可查证 —— 要么是他自己账户投过的,要么是工具从授权图库搜来的(带许可证)。
      两个工具都找不到时如实说没有,并告诉他上传自己的图就行(建议 1200×628 以上、清晰、别放大段文字);
 第4步 落地页类型(决定命名):
@@ -368,10 +375,18 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
      searches properly licensed stock libraries. Use an English keyword based on the landing page (e.g. "roof
      repair"). For every image you MUST show its **quality verdict** and its **license**; **include the ones rated
      "not recommended" too, explaining what is wrong with them** — do not quietly show only the good ones.
-     Once they pick one, call `use_stock_creative` to transfer it in; **you need the returned assetUrl to create
+     Once they pick one, call `use_found_creative` to transfer it in; **you need the returned assetUrl to create
      the ad** — the library's image_url is NOT an asset_url.
+   · **If they want to know what competitors are running → call search_competitor_ads**, which pulls real ads
+     other advertisers are currently running. Its advantage over stock is **market validation**: an ad that has
+     run for months demonstrably works. Include **days running** and **estimated impressions**, and **summarise
+     what the high-performing ones have in common** (visual style, real people or not, price/offer callouts,
+     copy angle) — that is far more useful than the images alone.
+     **You must warn them**: these are other advertisers' creatives; using one directly carries copyright risk
+     and the platform may reject it. The safer play is to shoot your own or use a stock image following the same
+     idea. Only if they still want it, call use_found_creative.
    · **Still absolutely forbidden**: inventing asset URLs, claiming you can generate images, or sourcing images
-     from anywhere other than those two tools. Every creative must be traceable — either from their own account
+     from anywhere other than those three tools. Every creative must be traceable — either from their own account
      or fetched by the tool from a licensed library (with its license shown). If neither tool finds anything, say
      so plainly and ask them to upload their own (suggest 1200×628 or larger, sharp, not covered in text);
 Step 4 Landing-page type (drives naming):
@@ -439,6 +454,7 @@ Pausing is simpler: turning the campaign OFF stops everything under it, so one e
 import newsbreak_client as nb  # noqa: E402
 import scheduler as sched  # noqa: E402
 import creative_search as cs  # noqa: E402
+import insightrackr_client as ir  # noqa: E402
 
 
 def list_organizations() -> dict:
@@ -658,17 +674,65 @@ def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -
                      "每张都必须写明:①**质量评价**(quality.verdict 和 reasons 里的原话);"
                      "②**许可证**(license 字段)——告诉他这些都是允许商用的,可以放心投。"
                      "**质量是'不建议'的也要列出来并说明差在哪**,别偷偷藏起来。"
-                     "用户选了哪个,就用那张图的 image_url 调 use_stock_creative 转存,"
+                     "用户选了哪个,就用那张图的 image_url 调 use_found_creative 转存,"
                      "拿到 assetUrl 之后才能建广告。**不要把 image_url 直接当 asset_url 用。**"),
         }
     except Exception as e:
         return {"error": f"搜素材失败:{str(e)[:200]}"}
 
 
-def use_stock_creative(image_url: str, ad_account_id: str = "") -> dict:
-    """把用户选中的图库素材转存进 NewsBreak,换回建广告要用的 assetUrl。
+def search_competitor_ads(keyword: str, days: int = 180, count: int = 8,
+                          sort: str = "impressions") -> dict:
+    """查**竞品正在投的真实广告**(Insightrackr),看别人的广告长什么样、投了多久。
 
-    用户在 search_stock_creatives 的结果里选定某一张之后调它。
+    什么时候用:用户想知道同行在投什么、想找有市场验证的素材和创意思路时。
+    比图库强的地方:这些是**真金白银在投的广告**,一条能连续投几个月的广告
+    肯定是跑得动的 —— 图库的图只是"好看",没有这个背书。
+
+    keyword:英文关键词,按品类给,如 "roof repair" / "gutter guard";
+    days:往前看多少天(默认180,最多365);count:要几条(默认8,最多40);
+    sort:impressions(按曝光,默认)/ first_seen(按首次投放)/ last_seen(按最近投放)。
+
+    返回每条带:素材、投放天数、首次/最近投放时间、预估曝光、尺寸和质量评价。
+    """
+    try:
+        r = ir.search(keyword, days=days, count=count, sort=sort)
+    except ir.InsightrackrError as e:
+        # 凭据没配或过期 —— 必须把话原样带给用户,他才知道要去重新贴 Cookie。
+        # 含糊地说"查不到"的话,他会以为是没有素材。
+        return {"error": str(e), "note": "把这段话原样告诉用户,包括拿凭据的步骤。"}
+    except Exception as e:
+        return {"error": f"查竞品广告失败:{str(e)[:200]}"}
+
+    for item in r["results"]:
+        _SEARCHED_ASSETS[item["image_url"]] = item
+    while len(_SEARCHED_ASSETS) > 200:
+        _SEARCHED_ASSETS.pop(next(iter(_SEARCHED_ASSETS)))
+
+    if not r["results"]:
+        return {"results": [], "note": (
+            f"没查到「{keyword}」的竞品广告。如实告诉用户,并建议换个更通用的英文词试试。"
+            "**不要编造广告数据或素材链接。**")}
+
+    return {
+        **r,
+        "note": ("用**表格**列给用户看,每条用 `![广告N](thumbnail)` 插图。"
+                 "**必须带上「投放天数」和「预估曝光」** —— 这是这个功能的价值所在:"
+                 "投得越久说明越跑得动,比图库的图多了市场验证。"
+                 "顺便帮用户**总结这些高效广告的共同点**(画面风格、有没有真人、"
+                 "有没有价格/优惠字样、文案角度),这比单纯给图有用得多。"
+                 "\n\n**必须提醒用户一句**:这些是其它广告主正在投的广告素材,"
+                 "**直接拿来投有版权风险,平台也可能拒审**;更稳妥的用法是照着它的"
+                 "思路自己拍一张或找张图库的图。用户坚持要用的话,调 use_found_creative 转存。"),
+    }
+
+
+def use_found_creative(image_url: str, ad_account_id: str = "") -> dict:
+    """把用户选中的素材转存进 NewsBreak,换回建广告要用的 assetUrl。
+
+    **两个搜索工具共用这一个转存**:search_stock_creatives(授权图库)和
+    search_competitor_ads(竞品广告)的结果都用它,用户选定哪一张就把那张的
+    image_url 原样传进来。
     只接受**搜索结果里出现过的**地址(防止编造链接)。
     """
     info = _SEARCHED_ASSETS.get((image_url or "").strip())
@@ -1233,7 +1297,8 @@ def cancel_action(action_id: str) -> dict:
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
-    recommend_creatives, search_stock_creatives, use_stock_creative, get_delivery_tree,
+    recommend_creatives, search_stock_creatives, search_competitor_ads,
+    use_found_creative, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
     propose_schedule, list_schedules, cancel_schedule,
@@ -2038,7 +2103,17 @@ OPENAI_TOOL_SCHEMAS = [
               "count": {"type": "integer", "description": "要几张,1~12,默认6"},
               "source": {"type": "string", "enum": ["auto", "pexels", "pixabay", "openverse"],
                          "description": "图库,默认 auto(有钥匙的商业图库优先)"}}, ["keyword"]),
-    _oa_tool("use_stock_creative",
+    _oa_tool("search_competitor_ads",
+             "查竞品正在投的真实广告(Insightrackr):素材长什么样、投了多久、预估曝光多少。"
+             "用户想知道同行在投什么、或想找有市场验证的创意思路时用。"
+             "比图库强在这些是真金白银在投的广告,投得久=跑得动",
+             {"keyword": {"type": "string", "description": "英文关键词,按品类给,如 roof repair"},
+              "days": {"type": "integer", "description": "往前看多少天,默认180,最多365"},
+              "count": {"type": "integer", "description": "要几条,默认8,最多40"},
+              "sort": {"type": "string", "enum": ["impressions", "first_seen", "last_seen"],
+                       "description": "排序:impressions=按预估曝光(默认),first_seen=按首次投放,last_seen=按最近投放"}},
+             ["keyword"]),
+    _oa_tool("use_found_creative",
              "把用户在 search_stock_creatives 结果里选中的那张图转存进 NewsBreak,"
              "换回建广告要用的 assetUrl。只接受搜索结果里出现过的地址",
              {"image_url": {"type": "string", "description": "搜索结果里那张图的 image_url,原样传"},
@@ -2066,7 +2141,8 @@ OPENAI_TOOL_SCHEMAS = [
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
-    recommend_creatives, search_stock_creatives, use_stock_creative, get_delivery_tree,
+    recommend_creatives, search_stock_creatives, search_competitor_ads,
+    use_found_creative, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
     get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,

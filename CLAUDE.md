@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(53)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(55)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(22)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -35,8 +35,10 @@
           static/dashboard.html  数据大屏(KPI卡/趋势图/柱状图/AI诊断/明细表,同样双语)
 ② 大脑层  agent_server.py     三级火箭:Gemini flash → flash-lite → OpenAI通道
                              `.env` 里 BRAIN 可指定主力:auto(默认)/openai/claude
-③ 工具层  agent_server.py     19个工具:10查询(含转化事件、素材推荐、图库素材查找、投放树) + 1报表 + 5写操作护栏 + 3定时
+③ 工具层  agent_server.py     20个工具:11查询(含转化事件、素材推荐、图库查找、竞品广告、投放树) + 1报表 + 5写操作护栏 + 3定时
 ④ 客户端  newsbreak_client.py NewsBreak API 封装(读+写)
+          creative_search.py   授权图库素材搜索(第六之十一节)
+          insightrackr_client.py 竞品广告查询(第六之十二节)
 ⑤ 安全层  agent_server.py     写操作"保险箱+保险丝"(第七节)+ AuthMiddleware 登录门
           accounts.py         账号/加盐哈希密码/会话/每人的聊天记录(第六之三节)
 ⑥ 平台层  platforms.py        投放平台注册表(NewsBreak 已通;Nextdoor/Meta 标 coming)
@@ -45,7 +47,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(53)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(55)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(22)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -312,7 +314,7 @@ curl 测出来是通的,实际一句话都回不了。
 两个工具分工别搞混:
 - `recommend_creatives` —— 查**自己账户投过的**素材,有真实投放数据背书;
 - `search_stock_creatives` —— 查**外部授权图库的新素材**,账户里没合适的时候用。
-  用户选定后必须调 `use_stock_creative` 转存进 NewsBreak 换回 `assetUrl`,
+  用户选定后必须调 `use_found_creative` 转存进 NewsBreak 换回 `assetUrl`,
   **图库的 image_url 不能直接当 asset_url 用**(平台只认自己域名下的素材)。
 
 - **只返回可商用的,这条守在代码里不是提示词里**。投广告是商业用途,
@@ -330,11 +332,46 @@ curl 测出来是通的,实际一句话都回不了。
   所以差图也要列出来并说清差在哪,不许只挑好的报(提示词里明写了)。
   **分辨率不够和竖图是一票否决**,不能被另一项的高分抵消 ——
   原来用纯加分制,400×210 因为"宽高比正好"被判成"可用",是错的(冒烟测试抓出来的)。
-- **防幻觉:`_SEARCHED_ASSETS` 登记表**。`use_stock_creative` 只接受
+- **防幻觉:`_SEARCHED_ASSETS` 登记表**。`use_found_creative` 只接受
   **搜索结果里真出现过的**地址,AI 自己拼一个地址会被代码层直接拒绝。
   这和第七节写操作护栏是同一个思路 —— 别指望提示词能管住幻觉。
 - 转存走的还是 `nb.upload_asset()`,所以 409 查重降级、`_ASSET_TYPES` 类型登记
   这两条老规矩都照旧(见第六之八节)。
+
+## 六之十二、竞品广告查询(insightrackr_client.py)
+
+**这是第三个素材来源,和前两个的分工别搞混**:
+
+| 工具 | 来源 | 有什么背书 | 能直接投吗 |
+|---|---|---|---|
+| `recommend_creatives` | 你自己账户投过的 | 真实投放数据 | ✅ |
+| `search_stock_creatives` | 授权图库 | 无(只是"好看") | ✅ 许可证允许 |
+| `search_competitor_ads` | **竞品正在投的广告** | **市场验证**(投得久=跑得动) | ⚠️ 是别人的素材 |
+
+三个搜索共用**一个**转存工具 `use_found_creative`(别再加第二个)。
+
+- **它不是标准 API,是拿浏览器登录态在请求**(实现参考 qx-ad-bot,只读没改它)。
+  认证要 `Authorization` + `Cookie` **两个头**,都是从 F12 → Network 里拷的,
+  **会过期**。过期时平台返回 **`code == -3106`**。
+  **这个错必须单独翻译成"登录已过期,去重新贴 Cookie"并附上拿凭据的步骤** ——
+  含糊地说"查不到素材"的话,用户会以为是真没有,根本查不到原因。冒烟测试守着这条。
+- **请求体照抄 qx-ad-bot 那份,别自己精简**:字段极多(22 个顶层 + 24 个 baseOption),
+  大部分即使是空数组也必须存在。冒烟测试查了几个关键字段还在不在。
+- **平台参数**(实测自 qx-ad-bot 生产调用):
+  `sortField` **3=预估曝光 / 1=首次投放 / 2=最近投放**;`sortRule` desc/asc;
+  `startTime`/`endTime` 是 `YYYY-MM-DD`。
+- **`投放天数` 是这个功能最有价值的一个数**(由 last_seen - first_seen 算出)。
+  一条广告能连投几个月 = 它真的跑得动,这是图库素材给不了的。
+  提示词里要求 AI 不只列图,还要**总结高效广告的共同点**(画面风格、有没有真人、
+  有没有价格字样、文案角度)—— 那才是竞品数据的价值,单纯复制图反而最没用。
+- **风险标记守在代码里**:`_normalize()` 给每条的 `license` 字段写死
+  「⚠️ 这是其它广告主正在投的广告素材」。**不能只靠提示词让 AI 记得说** ——
+  Cole 明确要求允许直接拿来投,那就更得让风险在每次返回里都看得见。
+- **下载要备两种 UA**(`creative_search.download()`):图库那边(Wikimedia)只认
+  带联系方式的政策格式 UA,竞品平台的 CDN 往往只认浏览器 UA。先用政策格式,
+  被 403 了自动换浏览器 UA 重试。
+- 抓取频率悠着点:qx-ad-bot 自己的界面上写着「建议间隔 3 秒以上,**降低账号被限制风险**」。
+  我们是用户点一次查一次,不做自动批量抓取,所以暂时不涉及,但别改成轮询。
 
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
@@ -396,6 +433,7 @@ curl 测出来是通的,实际一句话都回不了。
 | **DATE 维度另有 31 天上限** | 报表按天取数(`dimensions=["DATE"]`)跨度**约 31 天**就报 400,和 CAMPAIGN 那层的 180 天是两条不同的限制。大屏选"近90/180天"时趋势图自动缩到 31 天并在页面上说明,KPI 和明细仍是全周期 |
 | 报表跨度上限 | 平台硬限制 **180 天**,超了报英文错;已在 get_report 里提前拦截并说人话 |
 | 报表字段其实很全 | 平台**不管 metrics 申请几个都返回全部 32 字段**(含 name/roas/conversionValue),别只取三个就以为其他没有 |
+| **Insightrackr 是登录态不是 API** | 认证要 `Authorization` + `Cookie` 两个头,都是从浏览器 F12 里拷的,**会过期**;过期时平台回 `code == -3106`。必须**单独把这个码翻译成「登录已过期,去重新贴 Cookie」并附拿凭据步骤** —— 含糊地报「查不到素材」的话,用户会以为是真没有,根本想不到是凭据问题。同理它的请求体有 22+24 个字段且缺一不可,照抄 qx-ad-bot 的,别精简 |
 | **Wikimedia 下载要"政策格式"的 UA** | Openverse 的图大量托管在 upload.wikimedia.org,它按机器人政策挡人:**UA 里必须带括号联系方式**,格式形如 `名字/版本 (联系地址) 库/版本`。实测**浏览器 UA、curl 的 UA、不带联系方式的自定义 UA 全是 403**,只有政策格式能拿 200。403 正文里会写 "Please respect our robot policy" —— 看到这句就是它 |
 | **质量评分不能用纯加分制** | 素材打分时"分辨率太小"和"竖图"是**硬伤,必须一票否决**。原来加分制下 400×210 因为宽高比正好(1.90:1)被判成"可用",等于把一张糊图推荐给用户。凡是"某一项不合格就整体不能用"的场景,别用总分,要先判否决条件 |
 | **图库默认搜出来的可能禁止商用** | Openverse 不加 `license=cc0,pdm` 时,搜 roof 的**第一条就是 by-nc-sa**(NC = 禁止商用)。投广告是商业用途,拿 NC 的图就是侵权。这类过滤**必须写死在请求参数里**并有测试守着,不能只在提示词里叮嘱 |
@@ -437,8 +475,10 @@ curl 测出来是通的,实际一句话都回不了。
   **中英文切换**(顶栏 🌐,界面 + AI 回复语言一起切,选择会记住)、
   并发发送保护(`busy` 标志)、失败消息打"未送达"标记、请求 3 分钟超时;
 - **素材查找**:`search_stock_creatives` 从正规授权图库(Pexels/Pixabay/Openverse)找新素材,
-  带质量评分和许可证;选中后 `use_stock_creative` 转存进 NewsBreak 换 assetUrl(第六之十一节);
-- 大脑:三级火箭 + `BRAIN` 开关;工具共 19 个;
+  带质量评分和许可证;选中后 `use_found_creative` 转存进 NewsBreak 换 assetUrl(第六之十一节);
+- **竞品广告查询**:`search_competitor_ads` 查同行正在投什么(Insightrackr),
+  带投放天数和预估曝光,并让 AI 总结高效广告的共同点(第六之十二节);
+- 大脑:三级火箭 + `BRAIN` 开关;工具共 20 个;
 - **数据大屏**:KPI(带环比)/ 每日趋势 / 各计划对比 / 三层明细表 / **AI 投放诊断**,双语;
 - 定时任务:一次性 + 每天重复,看表线程每 30 秒检查,错过 >15 分钟不补跑;
   **定时开启同样三层一起开**(任务里存 `targets`);
@@ -449,7 +489,7 @@ curl 测出来是通的,实际一句话都回不了。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 53 + 前端 22 + 大屏 9 + 平台 22 + 流式 13)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 55 + 前端 22 + 大屏 9 + 平台 22 + 流式 13)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -487,9 +527,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 53 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 55 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 53 / 前端 22 / 大屏 9 / 平台 22 / 流式 13)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 55 / 前端 22 / 大屏 9 / 平台 22 / 流式 13)
 → 更新本文件相关章节 → 提交 git。

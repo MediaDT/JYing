@@ -30,6 +30,10 @@ TIMEOUT = 20.0
 UA = ("my-agent-adbot/1.0 (https://github.com/MediaDT/JYing; NewsBreak ad assistant) "
       "httpx/0.27")
 
+# 竞品平台的 CDN 常按浏览器请求来对待,给下载留一个备用 UA
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
 # NewsBreak 信息流广告的图片规格。1200×628 是平台建议值(≈1.91:1),
 # 比这个小的图在手机上会糊。这些数字只在这里存一份,改规格改这里。
 REC_W, REC_H = 1200, 628          # 建议尺寸
@@ -233,8 +237,20 @@ def download(image_url: str) -> tuple[bytes, str, str]:
     """把选中的素材下载回来,返回 (内容, 文件名, MIME)。用于转存到 NewsBreak。"""
     # ⚠️ User-Agent 不能省:Wikimedia(Openverse 的主要来源)明文规定必须带一个
     # 能说明来源的 UA,不带直接 **403 Forbidden**。实测踩到过。
+    # 两种 UA 都要备着:图库那边(Wikimedia)只认上面那个政策格式,
+    # 而竞品平台的 CDN 往往只认浏览器 UA。先用政策格式,被 403 了再换浏览器的。
+    for ua in (UA, BROWSER_UA):
+        try:
+            return _fetch(image_url, ua)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 403 or ua is BROWSER_UA:
+                raise
+    raise RuntimeError("unreachable")
+
+
+def _fetch(image_url: str, ua: str) -> tuple[bytes, str, str]:
     with httpx.Client(timeout=60.0, trust_env=False, follow_redirects=True,
-                      headers={"User-Agent": UA}) as c:
+                      headers={"User-Agent": ua}) as c:
         with c.stream("GET", image_url) as r:
             r.raise_for_status()
             ctype = (r.headers.get("content-type") or "").split(";")[0].strip()

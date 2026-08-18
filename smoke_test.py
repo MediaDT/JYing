@@ -129,7 +129,7 @@ def test_pure_logic():
             bad.append(f"OpenAI schema 有但 Gemini 清单里没有:{sorted(oai_schema - gem)}")
         if gem != oai_fn:
             bad.append(f"Gemini 清单和 OpenAI 函数表对不上:{sorted(gem ^ oai_fn)}")
-        for name in ("search_stock_creatives", "use_stock_creative"):
+        for name in ("search_stock_creatives", "search_competitor_ads", "use_found_creative"):
             if name not in gem:
                 bad.append(f"{name} 没登记")
             if name not in srv._TOOL_LABELS:
@@ -140,7 +140,7 @@ def test_pure_logic():
     # 这是本项目反复防的行为(见 CLAUDE.md「AI 幻觉执行」),必须守在代码层而不是提示词里。
     def t_stock_url_must_come_from_search():
         import agent_server as srv
-        r = srv.use_stock_creative("https://evil.example.com/anything.jpg")
+        r = srv.use_found_creative("https://evil.example.com/anything.jpg")
         if "error" not in r:
             return "编造的素材地址居然被接受了 —— 防幻觉这道闸没关上"
         return True if "搜索结果" in r["error"] else f"拦是拦了,但话说得不清楚:{r['error'][:60]}"
@@ -150,10 +150,10 @@ def test_pure_logic():
     def t_creative_rules_in_prompt():
         import agent_server as srv
         bad = []
-        for lang, must in (("zh", ["search_stock_creatives", "use_stock_creative",
+        for lang, must in (("zh", ["search_stock_creatives", "search_competitor_ads", "use_found_creative",
                                    "编素材链接", "许可证"]),
-                           ("en", ["search_stock_creatives", "use_stock_creative",
-                                   "inventing asset URLs", "license"])):
+                           ("en", ["search_stock_creatives", "search_competitor_ads",
+                                   "use_found_creative", "inventing asset URLs", "license"])):
             p = srv._system_prompt_now(lang)
             for m in must:
                 if m not in p:
@@ -164,6 +164,59 @@ def test_pure_logic():
     check("工具在 Gemini/OpenAI 三处都登记了", t_tools_registered_everywhere)
     check("编造的素材地址会被挡下(防幻觉)", t_stock_url_must_come_from_search)
     check("素材来源新规矩中英提示词都同步了", t_creative_rules_in_prompt)
+
+    # 竞品广告查询(Insightrackr)。凭据是从浏览器拷的、会过期,
+    # 所以"没配"和"过期"这两条路径必须给出**能照着做的**提示,
+    # 而不是含糊地说"查不到" —— 用户会以为是没有素材,查不到真正原因。
+    def t_competitor_creds_message():
+        import insightrackr_client as ir
+        import agent_server as srv
+        bad = []
+        if not ir.is_configured():
+            r = srv.search_competitor_ads("roof repair")
+            if "error" not in r:
+                return "没配凭据居然没报错"
+            msg = r["error"]
+            for kw in ("Cookie", "F12", ".env"):
+                if kw not in msg:
+                    bad.append(f"没配凭据的提示里缺「{kw}」,用户照着做不了")
+        # 平台的请求体字段极多且缺一不可,照抄 qx-ad-bot 的那份。
+        # 这条守着"别哪天顺手精简了"
+        body = ir._payload("roof", "2026-01-01", "2026-08-18", 8, "3", "desc")
+        for k in ("keyWord", "baseOption", "materialRemovalRepeat", "productOption"):
+            if k not in body:
+                bad.append(f"请求体缺字段 {k}")
+        for k in ("startTime", "endTime", "pageSize", "sortField", "sortRule", "dayMode"):
+            if k not in body["baseOption"]:
+                bad.append(f"baseOption 缺字段 {k}")
+        if ir.SORT_FIELDS != {"impressions": "3", "first_seen": "1", "last_seen": "2"}:
+            bad.append(f"排序代码对不上平台的定义:{ir.SORT_FIELDS}")
+        return bad or True
+
+    # 竞品素材和图库素材是两回事:图库的可以放心投,竞品的是别人的广告。
+    # 这个区别必须在**代码返回的数据里**就体现出来,不能只靠 AI 记得说。
+    def t_competitor_marked_as_risky():
+        import insightrackr_client as ir
+        fake = {"id": "x1", "title": "Roof Ad", "imageUrl": "https://cdn.example.com/a.jpg",
+                "width": 1200, "height": 628, "firstSeenTime": "2026-01-01",
+                "lastSeenTime": "2026-06-30", "impressions": "1,234,567", "brandName": "SomeCo"}
+        n = ir._normalize(fake)
+        bad = []
+        if "⚠️" not in n["license"]:
+            bad.append("竞品素材没有被标出风险,会被当成和图库图一样安全")
+        if n["投放天数"] != 180:
+            bad.append(f"投放天数算错:{n['投放天数']}(2026-01-01 到 06-30 应为 180)")
+        if n["预估曝光"] != 1234567:
+            bad.append(f"带逗号的曝光数没解析对:{n['预估曝光']}")
+        if n["quality"]["verdict"] != "推荐":
+            bad.append(f"1200×628 应判「推荐」,实际「{n['quality']['verdict']}」")
+        if n["media_type"] != "IMAGE":
+            bad.append(f"类型判错:{n['media_type']}")
+        return bad or True
+
+    check("竞品查询没配凭据时给的是能照做的提示", t_competitor_creds_message)
+    check("竞品素材带风险标记,投放天数/曝光解析正确", t_competitor_marked_as_risky)
+
 
 
     # 每人绑自己的 token:A 绑过之后 B 绝不能蹭到。这是安全边界,不能退化。
