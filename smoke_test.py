@@ -92,6 +92,80 @@ def test_pure_logic():
 
     check("递给 Gemini 的工具签名不会生成非法 schema", t_tool_schema_sane)
 
+    # 素材查找:质量评分是纯算术,不联网,先把它测死。
+    # 用户要的是"没有好素材时也能看出质量如何",所以差图必须被判成"不建议"而不是藏起来。
+    def t_creative_quality():
+        import creative_search as cs
+        bad = []
+        cases = [
+            ((1200, 628), "推荐", "正好是平台建议尺寸"),
+            ((1920, 1005), "推荐", "大图且比例接近 1.91:1"),
+            ((400, 210), "不建议", "分辨率低于底线"),
+            ((1200, 1600), "不建议", "竖图,信息流里会被裁掉大半"),
+            ((1000, 1000), "可用", "正方形,能用但不是最优"),
+            ((0, 0), "未知", "图库没给尺寸"),
+        ]
+        for (w, h), want, why in cases:
+            got = cs._quality(w, h)["verdict"]
+            if got != want:
+                bad.append(f"{w}×{h}({why})判成「{got}」,应为「{want}」")
+        # 必须说得出理由,不能只给个结论 —— 用户是小白,要看懂差在哪
+        if not cs._quality(400, 210)["reasons"]:
+            bad.append("判成不建议却说不出理由")
+        return bad or True
+
+    # 工具要在三个地方同时登记:Gemini 清单、OpenAI 的 JSON schema、OpenAI 的名字→函数表。
+    # 少登记一处的表现是"某条大脑路径用不了这个工具",而且只在切到那条路径时才发作,
+    # 平时测不出来。这条把三处对齐守死。
+    def t_tools_registered_everywhere():
+        import agent_server as srv
+        gem = {fn.__name__ for fn in srv.NEWSBREAK_TOOLS}
+        oai_fn = set(srv.OPENAI_TOOL_FUNCS)
+        oai_schema = {t["function"]["name"] for t in srv.OPENAI_TOOL_SCHEMAS}
+        bad = []
+        if gem - oai_schema:
+            bad.append(f"Gemini 有但 OpenAI schema 里没有:{sorted(gem - oai_schema)}")
+        if oai_schema - gem:
+            bad.append(f"OpenAI schema 有但 Gemini 清单里没有:{sorted(oai_schema - gem)}")
+        if gem != oai_fn:
+            bad.append(f"Gemini 清单和 OpenAI 函数表对不上:{sorted(gem ^ oai_fn)}")
+        for name in ("search_stock_creatives", "use_stock_creative"):
+            if name not in gem:
+                bad.append(f"{name} 没登记")
+            if name not in srv._TOOL_LABELS:
+                bad.append(f"{name} 没有进度播报文案,用户会看到默认的「正在查数据…」")
+        return bad or True
+
+    # 防幻觉:AI 不能自己拼一个图片地址让系统去下载。
+    # 这是本项目反复防的行为(见 CLAUDE.md「AI 幻觉执行」),必须守在代码层而不是提示词里。
+    def t_stock_url_must_come_from_search():
+        import agent_server as srv
+        r = srv.use_stock_creative("https://evil.example.com/anything.jpg")
+        if "error" not in r:
+            return "编造的素材地址居然被接受了 —— 防幻觉这道闸没关上"
+        return True if "搜索结果" in r["error"] else f"拦是拦了,但话说得不清楚:{r['error'][:60]}"
+
+    # 素材来源的规矩改了(从"绝不许上网找"改成"只许从授权图库找"),
+    # 中英两版提示词必须同步 —— 英文那版漏改过不止一次(见坑表)。
+    def t_creative_rules_in_prompt():
+        import agent_server as srv
+        bad = []
+        for lang, must in (("zh", ["search_stock_creatives", "use_stock_creative",
+                                   "编素材链接", "许可证"]),
+                           ("en", ["search_stock_creatives", "use_stock_creative",
+                                   "inventing asset URLs", "license"])):
+            p = srv._system_prompt_now(lang)
+            for m in must:
+                if m not in p:
+                    bad.append(f"{lang} 提示词里缺「{m}」")
+        return bad or True
+
+    check("素材质量评分(差图要判成不建议,不能藏)", t_creative_quality)
+    check("工具在 Gemini/OpenAI 三处都登记了", t_tools_registered_everywhere)
+    check("编造的素材地址会被挡下(防幻觉)", t_stock_url_must_come_from_search)
+    check("素材来源新规矩中英提示词都同步了", t_creative_rules_in_prompt)
+
+
     # 每人绑自己的 token:A 绑过之后 B 绝不能蹭到。这是安全边界,不能退化。
     def t_per_user_isolation():
         import accounts as acc
@@ -588,6 +662,41 @@ def test_newsbreak_readonly():
         return bad or True
 
     check("推荐素材来自本账户历史广告(地址真实、类型已登记)", t_recommend_creatives)
+
+    # 素材查找的底线:**搜回来的每一张都必须允许商用**。
+    # 这条不是形式主义 —— 实测过 Openverse 不加 license 过滤时,搜 roof 的
+    # 第一条就是 by-nc-sa(NC = 禁止商用),拿去投广告就是侵权。
+    # 所以过滤必须写死在请求里,这条测试守着它别哪天被人改掉。
+    def t_stock_search_commercial_only():
+        import creative_search as cs
+        r = cs.search("roof repair", count=6)
+        if r.get("error"):
+            return f"搜索失败:{r['error']}"
+        items = r.get("results", [])
+        if not items:
+            return True      # 图库当时没货也算正常,如实返回空即可
+        bad = []
+        SAFE = ("CC0", "PDM", "Pexels", "Pixabay")     # 这几种可商用且不要求署名
+        for c in items:
+            lic = c.get("license", "")
+            if not lic.startswith(SAFE):
+                bad.append(f"许可证不在可商用白名单里:{lic[:50]}")
+            # NC = NonCommercial,ND = NoDerivatives,两种都不能用来投广告
+            head = lic.split("(")[0].upper()
+            if "NC" in head or "ND" in head:
+                bad.append(f"混进了禁止商用/禁止改编的素材:{lic[:50]}")
+            if not c.get("source_page"):
+                bad.append("素材没有出处链接,没法查证")
+            if not c.get("image_url", "").startswith("http"):
+                bad.append(f"素材地址不像真的:{c.get('image_url', '')[:40]}")
+            if c.get("quality", {}).get("verdict") not in ("推荐", "可用", "不建议", "未知"):
+                bad.append(f"质量评价怪:{c.get('quality')}")
+        if "许可证" not in r.get("note", "") if isinstance(r.get("note"), str) else False:
+            bad.append("note 没要求 AI 把许可证讲给用户听")
+        return bad or True
+
+    check("图库素材全部可商用(带许可证和出处)", t_stock_search_commercial_only)
+
     def t_report_span_guard():
         try:
             nb.get_report("campaign", start_date="2025-01-01", end_date="2026-07-31")
