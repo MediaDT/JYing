@@ -129,7 +129,8 @@ def test_pure_logic():
             bad.append(f"OpenAI schema 有但 Gemini 清单里没有:{sorted(oai_schema - gem)}")
         if gem != oai_fn:
             bad.append(f"Gemini 清单和 OpenAI 函数表对不上:{sorted(gem ^ oai_fn)}")
-        for name in ("search_stock_creatives", "search_competitor_ads", "use_found_creative"):
+        for name in ("search_stock_creatives", "search_competitor_ads", "use_found_creative",
+                     "decompose_creative", "summarize_creative_patterns"):
             if name not in gem:
                 bad.append(f"{name} 没登记")
             if name not in srv._TOOL_LABELS:
@@ -151,8 +152,10 @@ def test_pure_logic():
         import agent_server as srv
         bad = []
         for lang, must in (("zh", ["search_stock_creatives", "search_competitor_ads", "use_found_creative",
+                                   "decompose_creative", "summarize_creative_patterns",
                                    "编素材链接", "许可证"]),
                            ("en", ["search_stock_creatives", "search_competitor_ads",
+                                   "decompose_creative", "summarize_creative_patterns",
                                    "use_found_creative", "inventing asset URLs", "license"])):
             p = srv._system_prompt_now(lang)
             for m in must:
@@ -221,6 +224,118 @@ def test_pure_logic():
 
     check("竞品查询没配凭据时给的是能照做的提示", t_competitor_creds_message)
     check("竞品素材带风险标记,投放天数/曝光解析正确", t_competitor_marked_as_risky)
+
+    # 创意拆解(P0)。以下几条都不联网,纯逻辑,但守的都是真出过问题的地方。
+
+    # 文案查重:实测发现模型会把竞品主标题原样吐回来(提示词里已经写了"不许照抄"也拦不住)。
+    # 文案抄袭不像品牌名那样一眼能看出来,用户很可能直接拿去投,所以必须代码层查。
+    def t_copy_detection():
+        import creative_lab as lab
+        src = [{"文字层": [{"内容": "Call an Expert Contractor Now"},
+                           {"内容": "Flat Roof Specialists - Waterproofing & Durability"}]}]
+        cases = [
+            ("Call an Expert Contractor Now",          True,  "原样照抄"),
+            ("Call an Expert Roofing Contractor Now",  True,  "只加一个词"),
+            ("Your Roof Deserves a Real Professional", False, "同角度但自己写的"),
+            ("Flat Roof Waterproofing That Lasts",     False, "学细分品类,换了用词"),
+        ]
+        bad = []
+        for text, want, why in cases:
+            out = {"方案": [{"主标题": text}]}
+            lab._flag_copied(out, src)
+            if bool(out.get("有照抄嫌疑")) != want:
+                bad.append(f"「{text[:36]}」({why})判成"
+                           f"{'抄袭' if out.get('有照抄嫌疑') else '原创'},判错了")
+        return bad or True
+
+    # 模型爱把 JSON 包在 ```json 围栏里,也可能前后带客套话。剥不干净就整个功能失效。
+    def t_json_extraction():
+        import creative_lab as lab
+        bad = []
+        cases = {
+            '```json\n{"a": 1}\n```': 1,
+            '好的,结果如下:\n{"a": 1}\n希望有帮助': 1,
+            '{"a": 1}': 1,
+            '```\n{"a": 1}\n```': 1,
+        }
+        for raw, want in cases.items():
+            got = lab._json_from(raw)
+            if got.get("a") != want:
+                bad.append(f"{raw[:26]!r} 没剥干净:{got}")
+        # 真解析不了时要如实报错,不能悄悄返回空 dict 让上游以为成功了
+        r = lab._json_from("完全不是 JSON")
+        if "error" not in r:
+            bad.append("解析失败时没有报错")
+        return bad or True
+
+    # 原图能到 6000×4000(10MB),直接喂模型又慢又贵。缩图这步不能坏。
+    def t_image_shrink():
+        import io
+        import creative_lab as lab
+        try:
+            from PIL import Image
+        except ImportError:
+            return "Pillow 没装,creative_lab 缩图会失效(requirements.txt 里要有)"
+        buf = io.BytesIO()
+        Image.new("RGB", (4000, 3000), (120, 90, 60)).save(buf, "JPEG")
+        big = buf.getvalue()
+        small, mime = lab.shrink(big, "image/jpeg")
+        if len(small) >= len(big):
+            return f"没缩小:{len(big)} → {len(small)}"
+        w, h = Image.open(io.BytesIO(small)).size
+        if max(w, h) > lab.MAX_EDGE:
+            return f"缩完还是超过 {lab.MAX_EDGE}:{w}×{h}"
+        if mime != "image/jpeg":
+            return f"类型不对:{mime}"
+        # 坏数据不能把整条链炸掉,原样返回即可
+        if lab.shrink(b"not an image", "image/png")[0] != b"not an image":
+            return "遇到坏图没有原样返回"
+        return True
+
+    # 拆解只能拆搜索结果里出现过的素材 —— 和 use_found_creative 一个道理,防 AI 编地址
+    def t_decompose_guards():
+        import agent_server as srv
+        bad = []
+        r = srv.decompose_creative("https://evil.example.com/x.jpg")
+        if "error" not in r or "搜索结果" not in r["error"]:
+            bad.append(f"编造的素材地址没被挡:{r}")
+        # 归纳至少要 2 条,1 条归纳不出"共同点"
+        old = dict(srv._CREATIVE_MODELS)
+        try:
+            srv._CREATIVE_MODELS.clear()
+            srv._CREATIVE_MODELS["only-one"] = {"版式": "x"}
+            r = srv.summarize_creative_patterns()
+            if "error" not in r or "2 条" not in r["error"]:
+                bad.append(f"只有 1 条时没拒绝归纳:{r}")
+        finally:
+            srv._CREATIVE_MODELS.clear()
+            srv._CREATIVE_MODELS.update(old)
+        return bad or True
+
+    # 合规是这个模块的立身之本:产出里不许有竞品品牌、不许照抄具体承诺和原句。
+    # 这三条必须在提示词里,而且要在**最前面**(放末尾会被前面一大段内容带跑,
+    # 和 SYSTEM_PROMPT_EN 那条教训一样)。
+    def t_compliance_rules_present():
+        import creative_lab as lab
+        p = lab._summary_prompt([{"竞品标识": ["X"]}], "我方品牌", "https://x.com", 3)
+        bad = []
+        for must in ("绝对要求", "竞品的品牌名", "具体承诺", "自己重新写的", "不许编造"):
+            if must not in p:
+                bad.append(f"归纳提示词里缺「{must}」")
+        if p.index("绝对要求") > 40:
+            bad.append("合规要求没有放在提示词最前面")
+        d = lab._DECOMPOSE_PROMPT
+        for must in ("绝对不要编", "竞品标识", "原样照抄"):
+            if must not in d:
+                bad.append(f"拆解提示词里缺「{must}」")
+        return bad or True
+
+    check("文案查重能认出照抄的主标题", t_copy_detection)
+    check("模型返回的 JSON 围栏能剥干净", t_json_extraction)
+    check("大图会先缩小再喂给模型", t_image_shrink)
+    check("拆解/归纳的两道门槛守住了", t_decompose_guards)
+    check("创意方案的合规约束在提示词最前面", t_compliance_rules_present)
+
 
 
 

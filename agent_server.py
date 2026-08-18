@@ -112,6 +112,8 @@ _TOOL_LABELS = {
     "recommend_creatives": "正在从你的历史广告里挑好素材…",
     "search_stock_creatives": "正在从授权图库里找素材…",
     "search_competitor_ads": "正在查竞品正在投的广告…",
+    "decompose_creative": "正在拆解这条广告的创意结构…",
+    "summarize_creative_patterns": "正在归纳套路、拟我们自己的方案…",
     "use_found_creative": "正在把选中的素材存进你的账户…",
     "get_delivery_tree": "正在看这条计划底下的广告组和广告…",
     "get_report": "正在拉报表数据…",
@@ -260,6 +262,11 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      (画面风格、有没有真人、有没有价格/优惠字样、文案角度)—— 这比单纯给图有用。
      **必须提醒**:这是别人的广告素材,直接投有版权风险、平台可能拒审;
      更稳的做法是照着思路自己拍或用图库图。用户坚持要用,才调 use_found_creative。
+   · **用户想"照着同行的套路做一版" → 先 decompose_creative 拆几条(至少2条),
+     再 summarize_creative_patterns 出方案**。产出的是**文案 + 画面方案,不是图**,
+     这一点要跟用户说清楚,别让他以为图已经有了。
+     方案里带「⚠️查重」标记的,说明那句文案和竞品原句太像,要提醒用户换个说法。
+     拿到方案后,用户可以按「画面怎么拍」自己拍,或用 search_stock_creatives 去图库找对上的图。
    · **仍然绝对不许**:自己编素材链接、声称能生成图片、或从上面三个工具之外的地方拿图。
      素材来源必须可查证 —— 要么是他自己账户投过的,要么是工具从授权图库搜来的(带许可证)。
      两个工具都找不到时如实说没有,并告诉他上传自己的图就行(建议 1200×628 以上、清晰、别放大段文字);
@@ -385,6 +392,11 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
      **You must warn them**: these are other advertisers' creatives; using one directly carries copyright risk
      and the platform may reject it. The safer play is to shoot your own or use a stock image following the same
      idea. Only if they still want it, call use_found_creative.
+   · **If they want to "build one following what competitors do" → call decompose_creative on a few
+     (at least 2), then summarize_creative_patterns**. What comes back is **copy plus an art-direction
+     brief — not an image**; say so plainly so they do not think the image already exists.
+     Any variant carrying a `⚠️查重` flag is too close to a competitor's own wording — tell them to reword it.
+     From there they can shoot to the brief themselves, or use search_stock_creatives to find a matching photo.
    · **Still absolutely forbidden**: inventing asset URLs, claiming you can generate images, or sourcing images
      from anywhere other than those three tools. Every creative must be traceable — either from their own account
      or fetched by the tool from a licensed library (with its license shown). If neither tool finds anything, say
@@ -454,6 +466,7 @@ Pausing is simpler: turning the campaign OFF stops everything under it, so one e
 import newsbreak_client as nb  # noqa: E402
 import scheduler as sched  # noqa: E402
 import creative_search as cs  # noqa: E402
+import creative_lab as lab  # noqa: E402
 import insightrackr_client as ir  # noqa: E402
 
 
@@ -729,6 +742,89 @@ def search_competitor_ads(keyword: str, days: int = 365, count: int = 8,
                  "\n\n**必须提醒用户一句**:这些是其它广告主正在投的广告素材,"
                  "**直接拿来投有版权风险,平台也可能拒审**;更稳妥的用法是照着它的"
                  "思路自己拍一张或找张图库的图。用户坚持要用的话,调 use_found_creative 转存。"),
+    }
+
+
+# ===== 创意拆解与方案(P0:只出文字,不出图)=====
+# 拆解过的素材模型,按 image_url 存着。summarize 那步要一次看多条,
+# 靠 AI 把几百行 JSON 在工具参数里传来传去不现实,也容易被截断 ——
+# 和 _SEARCHED_ASSETS 一个路数,存在这边,只传编号。
+_CREATIVE_MODELS: dict[str, dict] = {}
+
+
+def decompose_creative(image_url: str) -> dict:
+    """拆解一张广告素材:看懂它的版式、画面、文字层、配色、CTA 和文案角度。
+
+    用户想知道"这条广告为什么好""它是怎么设计的"时调它。
+    只接受 search_competitor_ads / search_stock_creatives 结果里出现过的地址。
+
+    拆出来的结果会记下来,之后可以用 summarize_creative_patterns 把多条一起归纳。
+    """
+    info = _SEARCHED_ASSETS.get((image_url or "").strip())
+    if not info:
+        return {"error": "这个素材地址不在搜索结果里。请先用 search_competitor_ads 或 "
+                         "search_stock_creatives 搜一次,再拆解结果里的素材。"}
+    if info.get("media_type") == "VIDEO":
+        return {"error": "这是一条视频广告,现在只能拆解图片。"
+                         "视频可以先看它的标题、投放天数和曝光量来判断,"
+                         "或者让用户自己看一遍再描述给你。"}
+    try:
+        data, _name, mime = cs.download(info["image_url"])
+        model = lab.decompose(data, mime)
+    except Exception as e:
+        return {"error": f"拆解失败:{str(e)[:200]}"}
+    if model.get("error"):
+        return model
+
+    # 把这条素材的战绩带上,归纳时"哪条更值得学"才有依据
+    model["_来源"] = {
+        "标题": info.get("title"), "投放天数": info.get("投放天数"),
+        "预估曝光": info.get("预估曝光"), "落地页域名": info.get("落地页域名"),
+        "尺寸": f"{info.get('width')}×{info.get('height')}",
+    }
+    _CREATIVE_MODELS[info["image_url"]] = model
+    while len(_CREATIVE_MODELS) > 60:
+        _CREATIVE_MODELS.pop(next(iter(_CREATIVE_MODELS)))
+
+    return {
+        "素材模型": model,
+        "已拆解总数": len(_CREATIVE_MODELS),
+        "note": ("把「版式/画面主体/文字层/文案角度」讲给用户听,重点说**它为什么有效**。"
+                 "「竞品标识」里如果有品牌名,提醒用户那是别人的品牌,我们的方案里不会用。"
+                 "拆完两三条之后,可以问用户要不要调 summarize_creative_patterns 出方案。"),
+    }
+
+
+def summarize_creative_patterns(brand: str = "", landing_url: str = "",
+                                n_variants: int = 3, lang: str = "zh") -> dict:
+    """把已拆解的多条竞品素材归纳成共同套路,并照着写出**我们自己的**文案和画面方案。
+
+    这是"看完同行之后我该怎么做"的那一步。要先用 decompose_creative
+    拆过至少 2 条(拆得越多归纳越准)。
+
+    brand:我们自己的品牌名;landing_url:我们的落地页;n_variants:出几版方案(默认3,最多5)。
+    产出的方案里不会出现竞品品牌,也不会照抄竞品的具体价格/时效承诺。
+    """
+    models = list(_CREATIVE_MODELS.values())
+    if len(models) < 2:
+        return {"error": f"目前只拆解了 {len(models)} 条,至少要 2 条才归纳得出规律。"
+                         "请先多用 decompose_creative 拆几条竞品素材。"}
+    try:
+        out = lab.summarize(models, brand, landing_url, n_variants, lang)
+    except Exception as e:
+        return {"error": f"归纳失败:{str(e)[:200]}"}
+    if out.get("error"):
+        return out
+    return {
+        **out,
+        "依据条数": len(models),
+        "note": ("完整讲给用户:先说**共同点**(带出现次数),再把**每一版方案**"
+                 "用表格列出来(主标题/描述/画面怎么拍/学的是哪一条)。"
+                 "说清三件事:①这些方案是照着同行的**套路**写的,不是抄他们的图或文案;"
+                 "②里面不含任何竞品品牌名和具体价格承诺;"
+                 "③**现在还没有图** —— 用户可以按「画面怎么拍」自己拍、"
+                 "或用 search_stock_creatives 去图库找一张对上的。"
+                 "用户选定某一版后,可以直接用那版的主标题和描述去建广告。"),
     }
 
 
@@ -1303,6 +1399,7 @@ def cancel_action(action_id: str) -> dict:
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
     recommend_creatives, search_stock_creatives, search_competitor_ads,
+    decompose_creative, summarize_creative_patterns,
     use_found_creative, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
@@ -2117,6 +2214,18 @@ OPENAI_TOOL_SCHEMAS = [
               "count": {"type": "integer", "description": "要几条,默认8,最多40"},
               "country": {"type": "string", "description": '两位大写国家码如 "US"。一般留空——硬筛美国会几乎没结果'}},
              ["keyword"]),
+    _oa_tool("decompose_creative",
+             "拆解一张广告素材:看懂它的版式、画面、文字层、配色、CTA 和文案角度。"
+             "用户想知道某条广告为什么好、怎么设计的时候调它。只接受搜索结果里出现过的地址",
+             {"image_url": {"type": "string", "description": "搜索结果里那张图的 image_url,原样传"}},
+             ["image_url"]),
+    _oa_tool("summarize_creative_patterns",
+             "把已拆解的多条竞品素材归纳成共同套路,并照着写出我们自己的文案和画面方案。"
+             "要先 decompose_creative 拆过至少 2 条。产出不含竞品品牌和具体价格承诺",
+             {"brand": {"type": "string", "description": "我们自己的品牌名"},
+              "landing_url": {"type": "string", "description": "我们的落地页链接"},
+              "n_variants": {"type": "integer", "description": "出几版方案,默认3,最多5"},
+              "lang": {"type": "string", "description": "zh 或 en,跟随界面语言"}}, []),
     _oa_tool("use_found_creative",
              "把用户在 search_stock_creatives 结果里选中的那张图转存进 NewsBreak,"
              "换回建广告要用的 assetUrl。只接受搜索结果里出现过的地址",
@@ -2146,6 +2255,7 @@ OPENAI_TOOL_SCHEMAS = [
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     recommend_creatives, search_stock_creatives, search_competitor_ads,
+    decompose_creative, summarize_creative_patterns,
     use_found_creative, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
     get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -2304,6 +2414,56 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
         return {"reply": f"{reply}\n\n---\n{note}"}
 
     return {"reply": reply}
+
+
+def _plain_completion(prompt: str, lang: str = "zh") -> str:
+    """纯文本推理:走和聊天同一套大脑接力,但**不带工具**。
+
+    为什么不复用 ask_gemini / ask_openai:那两个会把 20 个工具的 schema 一起发过去,
+    模型可能中途跑去查广告数据。像"归纳竞品创意"这种活是纯推理,不该碰接口 ——
+    带着工具既慢又贵,还可能答出一半跑偏。
+    """
+    brain = os.environ.get("BRAIN", "auto").strip().lower()
+
+    def _gemini() -> str:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        last = None
+        for model in ("gemini-flash-latest", "gemini-flash-lite-latest"):
+            try:
+                return client.models.generate_content(model=model, contents=prompt).text or ""
+            except genai_errors.APIError as e:
+                last = e
+                if e.code not in _RETRYABLE_CODES:
+                    raise
+        raise last
+
+    def _openai() -> str:
+        client = openai.OpenAI()
+        models = ["gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini"]
+        custom = os.environ.get("OPENAI_MODEL", "").strip()
+        if custom:
+            models = [custom] + [m for m in models if m != custom]
+        for model in models:
+            try:
+                r = client.chat.completions.create(
+                    model=model, messages=[{"role": "user", "content": prompt}])
+                return r.choices[0].message.content or ""
+            except openai.NotFoundError:
+                continue
+        raise RuntimeError("OpenAI 通道的型号都不可用")
+
+    if brain == "openai" and os.environ.get("OPENAI_API_KEY"):
+        return _openai()
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            return _gemini()
+        except genai_errors.APIError as e:
+            if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
+                return _openai()
+            raise
+    if os.environ.get("OPENAI_API_KEY"):
+        return _openai()
+    raise RuntimeError("还没配置 AI 大脑的钥匙")
 
 
 def _route_brain(req: ChatRequest) -> str:

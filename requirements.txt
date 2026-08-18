@@ -6,3 +6,4 @@ httpx==0.28.1             # 给 NewsBreak 发请求
 google-genai==2.14.0      # 大脑A:Gemini
 openai==2.49.0            # 大脑B:ChatGPT / ofox 中转
 anthropic==0.117.0        # 大脑C:Claude
+Pillow>=10.0    # 拆解素材前把大图缩小(creative_lab.shrink)
