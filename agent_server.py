@@ -681,8 +681,8 @@ def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -
         return {"error": f"搜素材失败:{str(e)[:200]}"}
 
 
-def search_competitor_ads(keyword: str, days: int = 180, count: int = 8,
-                          sort: str = "impressions") -> dict:
+def search_competitor_ads(keyword: str, days: int = 365, count: int = 8,
+                          country: str = "") -> dict:
     """查**竞品正在投的真实广告**(Insightrackr),看别人的广告长什么样、投了多久。
 
     什么时候用:用户想知道同行在投什么、想找有市场验证的素材和创意思路时。
@@ -690,13 +690,15 @@ def search_competitor_ads(keyword: str, days: int = 180, count: int = 8,
     肯定是跑得动的 —— 图库的图只是"好看",没有这个背书。
 
     keyword:英文关键词,按品类给,如 "roof repair" / "gutter guard";
-    days:往前看多少天(默认180,最多365);count:要几条(默认8,最多40);
-    sort:impressions(按曝光,默认)/ first_seen(按首次投放)/ last_seen(按最近投放)。
+    days:往前看多少天(默认365,最多365)。**想看最近的新广告就把 days 调小**;
+    count:要几条(默认8,最多40);country:两位大写国家码如 "US",**一般留空**
+    (平台在美国家装类目覆盖薄,硬筛 US 会几乎没结果;靠返回里的落地页域名判断更实用)。
+    结果按预估曝光从高到低排。
 
     返回每条带:素材、投放天数、首次/最近投放时间、预估曝光、尺寸和质量评价。
     """
     try:
-        r = ir.search(keyword, days=days, count=count, sort=sort)
+        r = ir.search(keyword, days=days, count=count, country=country)
     except ir.InsightrackrError as e:
         # 凭据没配或过期 —— 必须把话原样带给用户,他才知道要去重新贴 Cookie。
         # 含糊地说"查不到"的话,他会以为是没有素材。
@@ -721,6 +723,9 @@ def search_competitor_ads(keyword: str, days: int = 180, count: int = 8,
                  "投得越久说明越跑得动,比图库的图多了市场验证。"
                  "顺便帮用户**总结这些高效广告的共同点**(画面风格、有没有真人、"
                  "有没有价格/优惠字样、文案角度),这比单纯给图有用得多。"
+                 "**每一条都要显示「落地页域名」** —— 这个平台是全球的,"
+                 "排第一的可能是马来西亚(.com.my)或别的市场的广告。"
+                 "别人在别的市场跑得好,不代表在美国跑得好,用户要自己能看得出来。"
                  "\n\n**必须提醒用户一句**:这些是其它广告主正在投的广告素材,"
                  "**直接拿来投有版权风险,平台也可能拒审**;更稳妥的用法是照着它的"
                  "思路自己拍一张或找张图库的图。用户坚持要用的话,调 use_found_creative 转存。"),
@@ -2108,10 +2113,9 @@ OPENAI_TOOL_SCHEMAS = [
              "用户想知道同行在投什么、或想找有市场验证的创意思路时用。"
              "比图库强在这些是真金白银在投的广告,投得久=跑得动",
              {"keyword": {"type": "string", "description": "英文关键词,按品类给,如 roof repair"},
-              "days": {"type": "integer", "description": "往前看多少天,默认180,最多365"},
+              "days": {"type": "integer", "description": "往前看多少天,默认365,最多365;想看最近的新广告就调小"},
               "count": {"type": "integer", "description": "要几条,默认8,最多40"},
-              "sort": {"type": "string", "enum": ["impressions", "first_seen", "last_seen"],
-                       "description": "排序:impressions=按预估曝光(默认),first_seen=按首次投放,last_seen=按最近投放"}},
+              "country": {"type": "string", "description": '两位大写国家码如 "US"。一般留空——硬筛美国会几乎没结果'}},
              ["keyword"]),
     _oa_tool("use_found_creative",
              "把用户在 search_stock_creatives 结果里选中的那张图转存进 NewsBreak,"

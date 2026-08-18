@@ -189,8 +189,13 @@ def test_pure_logic():
         for k in ("startTime", "endTime", "pageSize", "sortField", "sortRule", "dayMode"):
             if k not in body["baseOption"]:
                 bad.append(f"baseOption 缺字段 {k}")
-        if ir.SORT_FIELDS != {"impressions": "3", "first_seen": "1", "last_seen": "2"}:
-            bad.append(f"排序代码对不上平台的定义:{ir.SORT_FIELDS}")
+        # 排序代码是实测出来的,不是照抄 qx-ad-bot 的(它前端标的是错的:
+        # 1/2 一条都返回不了,3 也不是曝光排序)。改回去会让"按曝光排"失效。
+        if ir.SORT_FIELD_IMPRESSIONS != "4":
+            bad.append(f"按曝光排序的代码被改了:{ir.SORT_FIELD_IMPRESSIONS}(实测只有 4 有效)")
+        # 关键词匹配字段同理:默认的全字段会被正文噪音淹掉
+        if ir.KEYWORD_FIELDS != "0,2":
+            bad.append(f"关键词匹配字段被改了:{ir.KEYWORD_FIELDS}(实测 0=广告主 2=标题 才准)")
         return bad or True
 
     # 竞品素材和图库素材是两回事:图库的可以放心投,竞品的是别人的广告。

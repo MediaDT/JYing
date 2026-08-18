@@ -13,7 +13,8 @@
 不然用户只会看到"没找到素材",根本不知道是凭据过期了。
 
 平台参数(实测自 qx-ad-bot 的生产调用):
-  sortField: "3"=预估曝光 / "1"=首次投放 / "2"=最近投放;sortRule: desc/asc
+  sortField: **只有 "4" 能用**(按预估曝光),别的要么返回空要么排序无意义 ——
+    详见 SORT_FIELD_IMPRESSIONS 上面的实测记录;sortRule: desc/asc
   startTime/endTime: "YYYY-MM-DD"
 """
 
@@ -25,8 +26,22 @@ import httpx
 TIMEOUT = 30.0
 DEFAULT_URL = "https://data.insightrackr.com/cas/api/v2/imagevideo/search"
 
-# 排序方式:说人话的名字 → 平台的数字代码
-SORT_FIELDS = {"impressions": "3", "first_seen": "1", "last_seen": "2"}
+# 排序代码。**qx-ad-bot 前端标的是错的,别照抄**:它写 3=曝光/1=首投/2=最近投,
+# 实测(2026-08-18,拿真凭据打的):
+#   · 1 和 2 → **一条都返回不了**;
+#   · 3 → 排出来全是曝光 1 的边角料,不是曝光排序;
+#   · 5/6/7 → 返回结果完全相同,像是回落到了某个默认排序;
+#   · **4 → 真的按曝光排**(desc 给 106万/77万/74万…,asc 给全 1),而且排在前面的
+#     都是 findCnt 300 左右、投了近两年的广告 —— 正是"跑得动"的那批。
+# 所以只留 4 这一个。想看新广告用 days 收窄时间窗,别指望这里的排序。
+SORT_FIELD_IMPRESSIONS = "4"
+
+# 关键词去匹配**哪些字段**。qx-ad-bot 用的是全字段 "0,1,2,3,4,6,8,9",
+# 但实测那样会被正文匹配(类型3)的噪音淹掉 —— 搜 "roof repair" 返回的
+# 全是小说 App GoodNovel(它正文里碰巧有 roof)。
+# 实测各值:0=广告主/产品 ✅、2=广告标题 ✅ 最准、3=正文 ❌噪音、9=其它 ❌、
+# 1/4/5/6/7/8 一条都搜不到。所以只留 0 和 2。
+KEYWORD_FIELDS = "0,2"
 
 # 凭据没配 / 过期时给用户的话。**必须说清楚去哪儿拿**,
 # 因为这两个值不是 API key,是从浏览器开发者工具里拷的,不会有人自己猜到。
@@ -63,7 +78,7 @@ def _payload(keyword: str, start: str, end: str, page_size: int,
     """平台要的请求体。字段极多且大部分必须存在(哪怕是空数组),
     照抄 qx-ad-bot 生产环境在用的那一份,别自己精简 —— 少一个字段就可能报错。"""
     return {
-        "keyWord": keyword, "keyWordType": "0,1,2,3,4,6,8,9", "keyWordList": [],
+        "keyWord": keyword, "keyWordType": KEYWORD_FIELDS, "keyWordList": [],
         "keyWordListType": True, "isNew": False, "creativeList": [],
         "appealTypeList": [], "interactionList": [], "languages": [], "productIds": [],
         "productOption": {"productType": [], "selling": [], "monetization": [],
@@ -126,6 +141,13 @@ def _when(v) -> datetime | None:
     return None
 
 
+def _clean(v) -> str:
+    """平台会把命中的关键词用 <font color='red'> 包起来做高亮,
+    直接显示给用户就是一串 HTML。这里剥掉标签。"""
+    import re as _re
+    return _re.sub(r"<[^>]+>", "", str(v or "")).strip()
+
+
 def _num(v) -> int | None:
     if v in (None, ""):
         return None
@@ -149,6 +171,34 @@ def _rows(payload: dict) -> list[dict]:
     return []
 
 
+def _app_name(item: dict) -> str:
+    """高曝光那批记录的广告主名字藏在 appList[0].name 里,不在 brandName。"""
+    apps = item.get("appList") or item.get("sourceAppList") or []
+    if isinstance(apps, list) and apps and isinstance(apps[0], dict):
+        return _clean(apps[0].get("name"))
+    return ""
+
+
+def _landing(item: dict) -> str:
+    """落地页同理:常规字段没有时,去 nonLocalDemoad 这个数组里拿第一个。"""
+    v = _first(item, ("landingPage", "landing_page", "webSite", "demoadWebSite"))
+    if v and str(v).startswith("http"):
+        return _clean(v)
+    for k in ("nonLocalDemoad", "originalUrl"):
+        u = item.get(k)
+        if isinstance(u, list):
+            u = next((x for x in u if x), None)
+        if u and str(u).startswith("http"):
+            return str(u)
+    return ""
+
+
+def _domain(url: str) -> str:
+    if not url:
+        return ""
+    return url.split("//")[-1].split("/")[0].split("?")[0][:40]
+
+
 def _normalize(item: dict) -> dict:
     import creative_search as cs
     first, last = _when(_first(item, ("firstSeenTime", "first_seen_at", "firstTime",
@@ -159,16 +209,25 @@ def _normalize(item: dict) -> dict:
     # 说明它真的跑得动 —— 这是图库素材给不了的市场验证。
     run_days = (last - first).days if (first and last) else None
     url = _media_url(item)
-    kind = str(_first(item, ("materialType", "mediaType", "type")) or "").lower()
-    is_video = "video" in kind or url.lower().endswith(".mp4")
+    # materialType 是**数字**:1=图片,2=视频。原来按 "video" 字样判断,
+    # 结果所有视频都被当成图片,建广告时 creative type 传错平台会拒收。
+    kind = str(_first(item, ("materialType", "mediaType", "type")) or "").strip()
+    is_video = kind == "2" or "video" in kind.lower() or url.lower().endswith(".mp4")
     w, h = _num(_first(item, ("width",))) or 0, _num(_first(item, ("height",))) or 0
     return {
         "image_url": url,
-        "thumbnail": str(_first(item, ("thumbnailUrl", "thumbnail_url", "coverUrl", "cover_url",
+        # 视频的封面在 converUrl / thumbnailConverUrl(平台把 cover 拼成了 conver)。
+        # 漏了这两个的话,视频那条的缩略图会退化成 mp4 地址,聊天里就是一张裂图。
+        "thumbnail": str(_first(item, ("thumbnailImageUrl", "thumbnailConverUrl", "converUrl",
+                                       "thumbnailUrl", "thumbnail_url", "coverUrl", "cover_url",
                                        "coverImage", "cover_image", "imageUrl", "image_url")) or url),
-        "title": str(_first(item, ("title", "name", "materialName", "creativeName",
-                                   "productName")) or "(无标题)")[:80],
-        "author": str(_first(item, ("brandName", "appName", "advertiser")) or "(未知广告主)")[:60],
+        "title": (_clean(_first(item, ("title", "name", "materialName", "creativeName",
+                                       "productName")))
+                  or _app_name(item) or _domain(_landing(item)) or "(无标题)")[:80],
+        "author": (_clean(_first(item, ("brandName", "appName", "advertiser", "opCompanyName")))
+                   or _app_name(item) or "(未知广告主)")[:60],
+        "文案": _clean(_first(item, ("describe", "description", "copywriting")))[:200] or None,
+        "视频时长": _num(_first(item, ("videoTimeSpan",))) or None,
         "media_type": "VIDEO" if is_video else "IMAGE",
         "width": w, "height": h,
         "first_seen": first.strftime("%Y-%m-%d") if first else None,
@@ -178,15 +237,27 @@ def _normalize(item: dict) -> dict:
                                        "estimateExposure", "estimatedExposure", "exposure",
                                        "showCount", "viewCount"))),
         "source": "Insightrackr(竞品广告)",
-        "source_page": str(_first(item, ("landingPage", "landing_page", "previewUrl")) or ""),
+        "source_page": _landing(item),
+        # **域名要单独列出来给用户看**:这个平台是全球的,搜 roof repair 排第一的
+        # 可能是马来西亚的广告(hsroofrepair.com.my)。NewsBreak 是美国平台,
+        # 别人在别的市场跑得好不代表在美国跑得好 —— 让用户自己一眼看出来。
+        "落地页域名": _domain(_landing(item)),
         "license": "⚠️ 这是其它广告主正在投的广告素材,不是授权图库的图",
-        "quality": cs._quality(w, h),
+        "quality": cs._quality(w, h, "VIDEO" if is_video else "IMAGE"),
     }
 
 
-def search(keyword: str, days: int = 180, count: int = 8,
-           sort: str = "impressions") -> dict:
-    """按关键词查竞品正在投的广告。days=往前看多少天;sort 见 SORT_FIELDS。"""
+def search(keyword: str, days: int = 365, count: int = 8, country: str = "") -> dict:
+    """按关键词查竞品正在投的广告,按预估曝光从高到低排。
+
+    days = 往前看多少天。**想看新广告就把 days 收窄**(平台的"按时间排序"是坏的,
+    见 SORT_FIELD_IMPRESSIONS 上面那段实测记录)。
+    country = 两位大写国家码(如 "US"),留空则不筛。
+
+    **默认不筛国家**:实测筛了 US 之后,这几个家装品类只剩个位数结果、曝光掉到 1
+    —— 平台在美国这类目的覆盖本来就薄。不筛能看到更多真正跑量的广告,
+    再靠返回里的「落地页域名」自己判断是不是美国的,比硬筛完没东西看强。
+    """
     if not is_configured():
         raise InsightrackrError("还没配置 Insightrackr 凭据。" + HOWTO)
 
@@ -194,7 +265,10 @@ def search(keyword: str, days: int = 180, count: int = 8,
     start = end - timedelta(days=max(1, min(int(days or 180), 365)))
     body = _payload((keyword or "").strip(), start.isoformat(), end.isoformat(),
                     max(1, min(int(count or 8), 40)),
-                    SORT_FIELDS.get(sort, "3"), "desc")
+                    SORT_FIELD_IMPRESSIONS, "desc")
+    if country.strip():
+        # 实测格式:两位大写字母(["US"] 有效;"USA"/"840"/"us" 一条都返回不了)
+        body["baseOption"]["countryLevel2"] = [country.strip().upper()]
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
@@ -217,7 +291,14 @@ def search(keyword: str, days: int = 180, count: int = 8,
             raise InsightrackrError("Insightrackr 登录已过期(凭据是从浏览器拷的,会失效)。" + HOWTO)
         raise InsightrackrError(str(data.get("msg") or data.get("message") or f"平台返回错误码 {code}"))
 
-    items = [_normalize(x) for x in _rows(data)]
-    items = [x for x in items if x["image_url"]]
+    # 同一条素材会被不同广告/不同投放重复返回(平台的 materialRemovalRepeat
+    # 并不能完全去掉),按媒体地址去重,别让用户看到 4 条一模一样的
+    items, seen = [], set()
+    for raw in _rows(data):
+        one = _normalize(raw)
+        if not one["image_url"] or one["image_url"] in seen:
+            continue
+        seen.add(one["image_url"])
+        items.append(one)
     return {"results": items[:count], "query": keyword,
-            "period": f"{start} ~ {end}", "sort": sort}
+            "period": f"{start} ~ {end}", "sort": "预估曝光从高到低"}

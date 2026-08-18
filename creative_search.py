@@ -75,15 +75,27 @@ def available_sources() -> list[dict]:
     ]
 
 
-def _quality(w: int, h: int) -> dict:
-    """按 NewsBreak 的图片规格给一张图打分,并说人话解释为什么。
+def _quality(w: int, h: int, media_type: str = "IMAGE") -> dict:
+    """按 NewsBreak 的素材规格打分,并说人话解释为什么。
 
     用户说了"没有好素材时也要能看素材质量",所以这里不只给个分,
     还要讲清差在哪、能不能凑合用。
+
+    **视频要单独判**:下面那套宽高比规矩是给信息流横图定的,
+    竖版视频在视频广告里完全正常,照图片标准判会把好素材全毙掉。
     """
     w, h = int(w or 0), int(h or 0)
     if w <= 0 or h <= 0:
-        return {"verdict": "未知", "score": 0, "reasons": ["图库没给出尺寸,建议下载后自己看一眼"]}
+        return {"verdict": "未知", "score": 0, "reasons": ["没给出尺寸,建议下载后自己看一眼"]}
+
+    if str(media_type).upper() == "VIDEO":
+        if w < MIN_W and h < MIN_H:
+            return {"verdict": "不建议", "score": 0,
+                    "reasons": [f"视频分辨率 {w}×{h} 太小,手机上会糊"]}
+        shape = "竖版" if h > w * 1.2 else ("横版" if w > h * 1.2 else "方形")
+        return {"verdict": "可用", "score": 3,
+                "reasons": [f"{shape}视频 {w}×{h};视频广告对宽高比没有图片那么挑,"
+                            f"但要确认前 3 秒就能抓住人"]}
 
     reasons, score, ratio = [], 0, w / h
 
