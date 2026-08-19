@@ -175,6 +175,39 @@ console.log("\n【8】一份凭据都没有时,要如实说没有");
     app.registry["spy-status"].textContent);
 }
 
+console.log("\n【9】点素材图能放大看(缩略图才 100px,看不清画面就白给了)");
+{
+  const app = boot({}, { platforms: FAKE(true) });
+  await tick(); await tick();
+  const box = app.registry["lightbox"];
+  t("默认是收起的", !box.classList.contains("show"));
+
+  // 图片是 AI 回复渲染出来的,每次新消息都产生新节点 —— 所以必须是事件委托,
+  // 给单张图绑监听的话,以后新渲染的图就点不动了
+  const msgs = app.registry["messages"];
+  t("消息区挂了委托监听", !!(msgs._h || {}).click);
+
+  const img = document.createElement("img");
+  img.tagName = "IMG"; img.src = "https://openadlibrary.com/api/public/assets/x.webp";
+  img.alt = "广告1";
+  msgs.fire("click", { target: img, stopPropagation() {} });
+  await tick();
+  t("点图后浮层打开了", box.classList.contains("show"));
+  t("加载的是被点的那张", app.registry["lightbox-img"].src === img.src,
+    app.registry["lightbox-img"].src);
+  t("给了新标签页打开原图的入口", app.registry["lightbox-open"].href === img.src);
+
+  app.registry["lightbox-close"].fire("click");
+  await tick();
+  t("点关闭会收起", !box.classList.contains("show"));
+  t("关掉后不占着大图内存", !app.registry["lightbox-img"].src);
+
+  // 点非图片元素不该弹出来,否则点表格文字也会炸出个浮层
+  msgs.fire("click", { target: { tagName: "TD" }, stopPropagation() {} });
+  await tick();
+  t("点非图片不会误弹", !box.classList.contains("show"));
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 

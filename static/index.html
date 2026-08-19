@@ -177,7 +177,39 @@
     margin: 6px 0; border-radius: 10px; border: 1px solid var(--border);
     background: var(--bg);
   }
-  .bubble td img { max-width: 160px; margin: 0; }
+  /* 聊天里的图一律可点放大(见文件末尾「图片放大」)。加 cursor 和 hover
+     是为了让人看出来"这能点" —— 表格里的缩略图只有 100px 上下,不给提示没人会去点 */
+  .bubble img { cursor: zoom-in; transition: filter .12s, transform .12s; }
+  .bubble img:hover { filter: brightness(1.06); transform: scale(1.02); }
+  /* 表格里的缩略图给固定宽度。不给的话会被 .bubble img 的 width:100% 加上
+     窄列挤成 40px 左右 —— 那么小根本看不出画面,而"看清竞品长什么样"正是重点。
+     气泡本身有 overflow-x:auto,表格宽一点可以横向滚,不会撑破布局。 */
+  .bubble td img { width: 120px; min-width: 120px; max-width: none; margin: 0; }
+
+  /* 图片放大浮层 */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 200; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(15, 18, 24, .88); padding: 24px;
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+  }
+  .lightbox.show { display: flex; }
+  .lightbox img {
+    max-width: min(1100px, 94vw); max-height: 86vh; width: auto; height: auto;
+    border-radius: 12px; box-shadow: 0 18px 60px rgba(0,0,0,.5); background: #fff;
+  }
+  .lightbox-bar {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; gap: 12px; align-items: center; justify-content: center;
+    flex-wrap: wrap; padding: 14px 20px 20px; color: #e8eaef; font-size: 13px;
+  }
+  .lightbox-bar a { color: #9ecbff; }
+  .lightbox-close {
+    position: absolute; top: 14px; right: 18px; width: 38px; height: 38px;
+    border: 0; border-radius: 50%; cursor: pointer; font-size: 20px; line-height: 1;
+    background: rgba(255,255,255,.14); color: #fff;
+  }
+  .lightbox-close:hover { background: rgba(255,255,255,.26); }
   .typing-note {
     margin-left: 8px; font-size: 12.5px; color: var(--muted);
     align-self: center; white-space: nowrap;
@@ -360,6 +392,17 @@
     </div>
   </div>
 
+  <!-- 图片放大浮层。聊天里的素材缩略图只有 100~160px,看不清画面细节,
+       而"看清竞品的画面长什么样"正是这个功能的意义所在 -->
+  <div class="lightbox" id="lightbox">
+    <button class="lightbox-close" id="lightbox-close" title="关闭">×</button>
+    <img id="lightbox-img" alt="">
+    <div class="lightbox-bar">
+      <span id="lightbox-size"></span>
+      <a id="lightbox-open" href="#" target="_blank" rel="noopener"></a>
+    </div>
+  </div>
+
   <div class="main">
     <aside id="sidebar">
       <div class="sidebar-head" id="sidebar-head">对话记录</div>
@@ -424,6 +467,9 @@
       storageFull: "⚠️ 浏览器存储空间已满,这段对话可能存不下了。请点「✚ 新对话」或删掉几段旧对话再继续。",
       dashBtn: "📊 大屏",
       dashBtnTitle: "打开数据大屏(KPI / 趋势 / AI 诊断)",
+      imgZoomHint: "点图片可以放大看",
+      imgOpenNew: "在新标签页打开原图 ↗",
+      imgLoading: "加载中…",
       spyBtnTitle: "更新竞品查询凭据",
       spyTitle: "🕵️ 竞品查询凭据",
       spyDesc: "查竞品广告用的是 OpenAdLibrary 的 API key,**不会过期**。换 key 或换人用时在这里贴一下即可,立刻生效,不用重启。",
@@ -513,6 +559,9 @@
       storageFull: "⚠️ Browser storage is full; this chat may not be saved. Start a new chat or delete some old ones to continue.",
       dashBtn: "📊 Dashboard",
       dashBtnTitle: "Open the data dashboard (KPIs / trends / AI review)",
+      imgZoomHint: "Click an image to enlarge",
+      imgOpenNew: "Open original in a new tab ↗",
+      imgLoading: "Loading…",
       spyBtnTitle: "Update competitor-research credentials",
       spyTitle: "🕵️ Competitor research credentials",
       spyDesc: "Competitor lookups use an OpenAdLibrary API key, which does **not** expire. Paste one here to switch keys or use your own — it takes effect immediately, no restart.",
@@ -1702,6 +1751,55 @@
     if (e.target === spyOverlay) spyOverlay.classList.remove("show");
   });
   spyReady = true;   // 到这里这个模块的变量和函数才真正可用
+
+  // ===== 图片放大 =====
+  // 聊天里的素材缩略图只有 100~160px(表格里更小),而"看清竞品的画面长什么样"
+  // 正是这个功能的意义所在。所以任何一张图都能点开看原图。
+  //
+  // **用事件委托挂在消息区上,不是给每张图单独绑**:图片是 AI 回复渲染出来的,
+  // 每次新消息都会产生新的 img 节点,逐个绑定就得在每次渲染后再跑一遍,漏一次就失灵。
+  // 委托到父节点上,以后不管怎么渲染都自动生效。
+  var lightboxReady = false;
+  const lbox = document.getElementById("lightbox");
+  const lboxImg = document.getElementById("lightbox-img");
+
+  function openLightbox(src, alt) {
+    const d = I18N[lang];
+    lboxImg.src = src;
+    lboxImg.alt = alt || "";
+    document.getElementById("lightbox-size").textContent = d.imgLoading;
+    const link = document.getElementById("lightbox-open");
+    link.href = src;
+    link.textContent = d.imgOpenNew;
+    lbox.classList.add("show");
+  }
+
+  function closeLightbox() {
+    lbox.classList.remove("show");
+    lboxImg.removeAttribute("src");   // 别让大图一直占着内存
+  }
+
+  // 原图加载完才知道真实尺寸,顺手告诉用户 —— 判断素材能不能用得看清晰度
+  lboxImg.addEventListener("load", function () {
+    const w = lboxImg.naturalWidth, h = lboxImg.naturalHeight;
+    document.getElementById("lightbox-size").textContent = w && h ? w + " × " + h : "";
+  });
+  lboxImg.addEventListener("error", function () {
+    document.getElementById("lightbox-size").textContent = "😕";
+  });
+
+  messagesEl.addEventListener("click", function (e) {
+    const t = e.target;
+    if (t && t.tagName === "IMG" && t.src) openLightbox(t.src, t.alt);
+  });
+  document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
+  lbox.addEventListener("click", function (e) {
+    if (e.target === lbox) closeLightbox();   // 点空白处关掉,点图本身不关
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && lbox.classList.contains("show")) closeLightbox();
+  });
+  lightboxReady = true;
 
   syncFromServer();
 

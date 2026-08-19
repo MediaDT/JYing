@@ -35,6 +35,11 @@ function makeEl(tag) {
     addEventListener(ev, fn){ (this._h ||= {})[ev] = fn; },
     fire(ev, arg){ this._h && this._h[ev] && this._h[ev](arg || {stopPropagation(){}}); },
     focus(){},
+    // 真实 DOM 有这两个,模拟里缺了的话页面代码一调就崩,
+    // 而崩在事件回调里往往只表现为"点了没反应",很难查
+    setAttribute(k, v){ this[k] = v; },
+    removeAttribute(k){ delete this[k]; },
+    getAttribute(k){ return this[k]; },
     remove(){
       const p = this._parent;
       if (!p) return;
