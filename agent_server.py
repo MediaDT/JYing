@@ -698,7 +698,8 @@ def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -
 
 
 def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
-                          active_only: bool = True) -> dict:
+                          active_only: bool = True, sort_by: str = "placements",
+                          min_days: int = 0) -> dict:
     """查**竞品正在投的真实原生广告**(OpenAdLibrary),看同行的广告长什么样、投了多久。
 
     什么时候用:用户想知道同行在投什么、想找有市场验证的素材和创意思路时。
@@ -708,12 +709,15 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
     keyword:英文关键词,按品类给,如 "roof repair" / "gutter guard";
     count:要几条(默认8,最多50);
     country:两位大写国家码,默认 US(NewsBreak 是美国平台);留空则不限;
-    active_only:只看**现在还在投**的,默认开(实测能把结果收窄到约七分之一)。
+    active_only:只看**现在还在投**的,默认开(实测能把结果收窄到约七分之一);
+    sort_by:placements(按版位数,默认,铺得越广越说明肯花钱)/ days(按投放天数)/
+      recent(最近才开始投的);min_days:只要投放天数 ≥ 这个数的。
 
     返回每条带:素材、投放天数、版位数、还在不在投、广告网络和投放媒体。
     """
     try:
-        r = oal.search(keyword, count=count, country=country, active_only=active_only)
+        r = oal.search(keyword, count=count, country=country, active_only=active_only,
+                       sort_by=sort_by, min_days=min_days, pages=2)
     except oal.OpenAdLibraryError as e:
         # key 无效 / 额度用尽 / 平台自己挂了 —— 这几种原因要原样带给用户,
         # 含糊说一句"查不到"的话,他根本不知道该换 key 还是该等一会儿。
@@ -738,6 +742,7 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
         **r,
         "note": ("用**表格**列给用户看,每条用 `![广告N](thumbnail)` 插图。"
                  "**必须带上「投放天数」和「版位数」** —— 这是这个功能的价值所在:"
+                 "版位数 = 这条广告铺在多少个位置上,平台不提供曝光量,这是最接近的指标。"
                  "投得久、铺得广 = 广告主愿意持续为它花钱,比图库的图多了市场验证。"
                  "顺便帮用户**总结这些高效广告的共同点**(画面风格、有没有真人、"
                  "有没有价格/优惠字样、文案角度),这比单纯给图有用得多。"
@@ -2256,7 +2261,10 @@ OPENAI_TOOL_SCHEMAS = [
              {"keyword": {"type": "string", "description": "英文关键词,按品类给,如 roof repair"},
               "count": {"type": "integer", "description": "要几条,默认8,最多50"},
               "country": {"type": "string", "description": '两位大写国家码,默认 "US";留空则不限国家'},
-              "active_only": {"type": "boolean", "description": "只看现在还在投的,默认 true"}},
+              "active_only": {"type": "boolean", "description": "只看现在还在投的,默认 true"},
+              "sort_by": {"type": "string", "enum": ["placements", "days", "recent"],
+                          "description": "placements=按版位数(默认,铺得广=肯花钱) days=按投放天数 recent=最近新上的"},
+              "min_days": {"type": "integer", "description": "只要投放天数≥这个数的,默认0不筛"}},
              ["keyword"]),
     _oa_tool("decompose_creative",
              "拆解一张广告素材:看懂它的版式、画面、文字层、配色、CTA 和文案角度。"

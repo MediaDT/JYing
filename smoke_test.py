@@ -180,10 +180,14 @@ def test_pure_logic():
             bad.append(f"排序选项被改了:{sorted(oal.SORTS)}(实测只有 placements/oldest 有效)")
         # 实测 minDaysRunning 稳定返回 503,是平台服务端的问题。
         # 哪天有人看文档觉得"这参数好用"又加回来,这条会提醒他。
+        # 查的是"有没有真的发给平台",不是"有没有提到" —— 注释和文档里提它是应该的
+        # (要写明为什么不用),所以先把 docstring 剥掉再查。
         import inspect
         src = inspect.getsource(oal.search)
-        if "minDaysRunning" in src:
-            bad.append("又用上 minDaysRunning 了 —— 实测它稳定 503,投放天数要自己算")
+        body = src.split('"""')[2] if src.count('"""') >= 2 else src
+        for banned in ("minDaysRunning", "lastSeenFrom", "lastSeenTo"):
+            if banned in body:
+                bad.append(f"又把 {banned} 发给平台了 —— 实测它稳定 503,要自己在本地算/筛")
         # 投放天数是自己算的,算错就整条功能没意义
         if oal._days_running("2026-01-01T00:00:00Z", "2026-06-30T00:00:00Z") != 180:
             bad.append("投放天数算错了")
@@ -241,7 +245,63 @@ def test_pure_logic():
             bad.append("先存了才验证 —— 填错一次就会把好 key 冲掉")
         return bad or True
 
+    def t_competitor_relevance_guard():
+        """翻页凑候选池是**拿相关性换排序**,不是白拿的。
+
+        实测:平台默认顺序就是按相关性排的 —— 搜 roof repair 时 page=1 有 97%
+        的标题真含 roof,**page=2 只剩 17%**。不先筛一道就按"投放天数"排,
+        浮上来的会是跑得久但完全无关的广告(实测撞上过养老金、社保那类)。
+        """
+        import openadlibrary_client as oal
+        bad = []
+        cases = [
+            ({"title": "Search for roof repair near me", "文案": ""}, True,  "标题命中"),
+            ({"title": "Cheap contractors", "文案": "roof leak fix"}, True,  "正文命中"),
+            ({"title": "Social Security Changes In 2026", "文案": ""}, False, "完全无关"),
+            ({"title": "Seniors Born Between 1941-1969", "文案": "claim benefits"}, False, "跑得久但无关"),
+        ]
+        for item, want, why in cases:
+            got = oal._relevant(item, "roof repair")
+            if got != want:
+                bad.append(f"「{item['title'][:30]}」({why})判成{'相关' if got else '不相关'},错了")
+        # 关键词为空时不能把所有东西都筛掉
+        if not oal._relevant({"title": "x", "文案": ""}, ""):
+            bad.append("关键词为空时不该筛掉东西")
+        # 排序必须在筛选之后做,顺序反了就白筛
+        import inspect
+        src = inspect.getsource(oal.search)
+        if src.index("_relevant") > src.index("kept.sort"):
+            bad.append("先排序后筛选了 —— 顺序反了,无关广告照样会浮上来")
+        return bad or True
+
+    def t_competitor_local_sort():
+        """排序是我们自己做的(平台的 sort 基本没用),口径要对得上名字。"""
+        import openadlibrary_client as oal
+        pool = [
+            {"版位数": 5,   "投放天数": 60, "first_seen": "2026-06-01"},
+            {"版位数": 800, "投放天数": 10, "first_seen": "2026-08-01"},
+            {"版位数": 50,  "投放天数": 30, "first_seen": "2026-07-01"},
+        ]
+        bad = []
+        for name, want_first in (("placements", 800), ("days", 5)):
+            label, keyfn = oal.LOCAL_SORTS[name]
+            top = sorted(pool, key=keyfn)[0]
+            got = top["版位数"] if name == "placements" else top["版位数"]
+            if name == "placements" and top["版位数"] != 800:
+                bad.append(f"按版位数排,第一名应是 800,实际 {top['版位数']}")
+            if name == "days" and top["投放天数"] != 60:
+                bad.append(f"按投放天数排,第一名应是 60 天,实际 {top['投放天数']}")
+        # 缺字段不能把排序炸掉(平台有些字段会是 None)
+        try:
+            sorted([{"版位数": None, "投放天数": None, "first_seen": None}],
+                   key=oal.LOCAL_SORTS["placements"][1])
+        except TypeError as e:
+            bad.append(f"字段为 None 时排序崩了:{e}")
+        return bad or True
+
     check("竞品查询用的参数是实测验证过的", t_competitor_params_verified)
+    check("翻页捞进来的无关广告会被筛掉", t_competitor_relevance_guard)
+    check("本地排序的口径对得上名字", t_competitor_local_sort)
     check("竞品素材字段映射正确、带风险标记", t_competitor_normalize)
     check("key 失效/额度/平台故障 三种报错分得清", t_competitor_key_messages)
 

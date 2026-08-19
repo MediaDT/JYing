@@ -206,41 +206,139 @@ def _normalize(item: dict) -> dict:
     }
 
 
+# 本地排序的可选口径。**平台的 sort 基本不能用(见上面的实测记录),
+# 所以这些是我们自己排的** —— 翻几页把候选拉回来,在本地按字段排。
+# 实测翻页是有效的(page=1/page=2 零重叠),所以这条路走得通。
+LOCAL_SORTS = {
+    "placements": ("版位数从多到少(铺得最广)", lambda x: -(x["版位数"] or 0)),
+    "days":       ("投放天数从长到短", lambda x: -(x["投放天数"] or 0)),
+    "recent":     ("最近才开始投的在前", lambda x: (x["first_seen"] or "", ), ),
+}
+
+# 一次最多翻几页去凑候选池。别调太大:每页都是一次 API 调用,
+# 平台每分钟只让打 120 次。
+#
+# ⚠️ **翻页是拿相关性换排序,不是白拿的**。实测平台的默认顺序就是按相关性排的:
+# 搜 "roof repair" 时 page=1 有 97% 的标题真含 roof,**page=2 只剩 17%**。
+# 所以翻页凑来的候选池必须先过 _relevant() 筛一道,否则按"投放天数"排出来的
+# 会是一堆跑得久但跟屋顶无关的广告(实测就撞上了:养老金、社保那类)。
+MAX_PAGES = 5
+
+
+def _relevant(item: dict, keyword: str) -> bool:
+    """这条广告和搜索词到底沾不沾边。
+
+    平台的搜索是松匹配的,翻到后面几页会混进大量无关广告(见 MAX_PAGES 上面那段)。
+    判据宽松但有效:关键词里的**任意一个实词**出现在标题或正文里就算数
+    (搜 "roof repair",标题里有 roof 或 repair 都行)。
+    """
+    words = [w for w in (keyword or "").lower().split() if len(w) > 2]
+    if not words:
+        return True
+    hay = (str(item.get("title") or "") + " " + str(item.get("文案") or "")).lower()
+    return any(w in hay for w in words)
+
+
 def search(keyword: str, count: int = 8, country: str = "US",
-           active_only: bool = True, sort: str = "placements") -> dict:
+           active_only: bool = True, sort_by: str = "placements",
+           min_days: int = 0, pages: int = 2) -> dict:
     """按关键词查竞品正在投的原生广告。
 
-    keyword:英文关键词,如 "roof repair";count:要几条(1~50);
-    country:两位大写国家码,留空则不筛(默认 US,NewsBreak 是美国平台);
-    active_only:只看**还在投**的(默认开,实测能把结果收窄到约 1/7);
-    sort:见 SORTS —— **只有 placements / oldest 真的有效**,别的会被静默忽略。
-    """
-    params = {
-        "search": (keyword or "").strip(),
-        "pageSize": max(1, min(int(count or 8), 50)),
-        "page": 1,
-    }
-    if country.strip():
-        params["geoCountry"] = country.strip().upper()
-    if active_only:
-        params["status"] = "active"
-    if sort in SORTS:
-        params["sort"] = sort
+    keyword:英文关键词,如 "roof repair";count:最后要几条(1~50);
+    country:两位大写国家码,默认 US(NewsBreak 是美国平台);留空则不限;
+    active_only:只看**还在投**的(默认开);
+    sort_by:见 LOCAL_SORTS —— **是我们自己排的,不是平台排的**(平台的 sort 基本没用);
+    min_days:只要投放天数 ≥ 这个数的(平台的 minDaysRunning 稳定 503,所以自己筛);
+    pages:翻几页凑候选池(1~5)。排序和筛选都在候选池里做,池子越大越准、也越费配额。
 
-    data = raw_search(**params)
-    rows = data.get("data") or []
-    seen, items = set(), []
-    for r in rows:
-        one = _normalize(r)
-        if not one["image_url"] or one["image_url"] in seen:
-            continue
-        seen.add(one["image_url"])
-        items.append(one)
+    **返回里会如实说明"从多少条候选里排出来的"** —— 不能让用户以为是全库最优。
+    """
+    pages = max(1, min(int(pages or 2), MAX_PAGES))
+    per = max(1, min(int(count or 8) * 6, 50))     # 候选池开大一点才排得准
+
+    pool, seen, total = [], set(), None
+    for page in range(1, pages + 1):
+        params = {"search": (keyword or "").strip(), "pageSize": per, "page": page}
+        if country.strip():
+            params["geoCountry"] = country.strip().upper()
+        if active_only:
+            params["status"] = "active"
+        data = raw_search(**params)
+        if total is None:
+            total = data.get("total")
+        rows = data.get("data") or []
+        if not rows:
+            break
+        for r in rows:
+            one = _normalize(r)
+            if not one["image_url"] or one["image_url"] in seen:
+                continue
+            seen.add(one["image_url"])
+            pool.append(one)
+        if len(rows) < per:      # 已经到底了,别白白多打一次
+            break
+
+    # 先剔掉松匹配捞进来的无关广告,再排序 —— 顺序不能反
+    on_topic = [x for x in pool if _relevant(x, keyword)]
+    dropped = len(pool) - len(on_topic)
+    kept = [x for x in on_topic if not min_days or (x["投放天数"] or 0) >= min_days]
+    label, keyfn = LOCAL_SORTS.get(sort_by, LOCAL_SORTS["placements"])
+    kept.sort(key=keyfn)
+
     return {
-        "results": items,
+        "results": kept[:count],
         "query": keyword,
-        "总匹配数": data.get("total"),
-        "筛选": f"{'只看在投中' if active_only else '含已停投'}"
+        "总匹配数": total,
+        "候选池": (f"翻了 {pages} 页、{len(pool)} 条候选"
+                   + (f",剔掉 {dropped} 条不相关的" if dropped else "")
+                   + (f",其中投放≥{min_days}天的 {len(kept)} 条" if min_days else "")),
+        "筛选": ("只看在投中" if active_only else "含已停投")
                 + (f" / {country.upper()}" if country.strip() else " / 不限国家"),
-        "sort": SORTS.get(sort, "平台默认"),
+        "sort": label + "(本地排序)",
     }
+
+
+def param_check(keyword: str = "roof repair") -> dict:
+    """**参数体检**:逐个试探哪些查询参数是真的生效的。
+
+    为什么要有这个:这个平台有一批参数传了**不报错、也不生效**
+    (`sortBy`、`sort` 的多数值、`mediaType`),返回和不传一模一样 ——
+    比"传错就报错"难发现得多。而且平台会改,今天不能用的明天可能修好。
+    与其把结论写死在注释里慢慢过期,不如留一个能随时重跑的体检。
+
+    **判据是 `total` 变没变,不是看头几条** —— 踩过这个坑:`dateFrom` 会改变
+    total(说明生效了),但前 5 条恰好没被筛掉,只看头几条会误判成"被忽略"。
+    """
+    from datetime import date, timedelta
+    t = date.today()
+    base = raw_search(search=keyword, geoCountry="US", pageSize=5)
+    base_total = base.get("total")
+    base_ids = tuple(x.get("id") for x in base.get("data") or [])
+
+    cases = {
+        "sort=placements": {"sort": "placements"},
+        "sort=oldest": {"sort": "oldest"},
+        "sortBy=placements": {"sortBy": "placements"},
+        "sortDir=asc": {"sort": "placements", "sortDir": "asc"},
+        "status=active": {"status": "active"},
+        "mediaType=image": {"mediaType": "image"},
+        "dateTo=-30d": {"dateTo": (t - timedelta(days=30)).isoformat()},
+        "minDaysRunning=30": {"minDaysRunning": 30},
+        "lastSeenFrom=-30d": {"lastSeenFrom": (t - timedelta(days=30)).isoformat()},
+    }
+    out = {}
+    for label, kw in cases.items():
+        try:
+            d = raw_search(search=keyword, geoCountry="US", pageSize=5, **kw)
+        except OpenAdLibraryError as e:
+            out[label] = f"❌ 报错:{str(e)[:60]}"
+            continue
+        ids = tuple(x.get("id") for x in d.get("data") or [])
+        if d.get("total") != base_total:
+            out[label] = f"✅ 生效(total {base_total} → {d.get('total')})"
+        elif ids != base_ids:
+            out[label] = "✅ 生效(改变了排序)"
+        else:
+            out[label] = "⚠️ 静默忽略(和不传完全一样)"
+    return {"基准total": base_total, "结果": out,
+            "note": "⚠️ 标记的参数传了没用但也不报错,别在代码里依赖它们。"}
