@@ -163,6 +163,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # 没绑的人这里是空 dict —— 关键是**不为 None**,这样 _token() 就知道
             # "在用户上下文里,他没绑",会直接报错而不是偷偷用 .env 里的公用 token。
             nb.CURRENT_CREDS.set(acc.get_creds(user["id"], "newsbreak"))
+            # 竞品查询的凭据同理按人放。注意它的取值规则和 NewsBreak 不同
+            # (自己没贴就回落 .env 那份公用的),原因见 insightrackr_client 顶部注释。
+            ir.CURRENT_CREDS.set(acc.get_creds(user["id"], "insightrackr"))
             CURRENT_USER_ID.set(user["id"])
             return await call_next(request)
 
@@ -715,7 +718,9 @@ def search_competitor_ads(keyword: str, days: int = 365, count: int = 8,
     except ir.InsightrackrError as e:
         # 凭据没配或过期 —— 必须把话原样带给用户,他才知道要去重新贴 Cookie。
         # 含糊地说"查不到"的话,他会以为是没有素材。
-        return {"error": str(e), "note": "把这段话原样告诉用户,包括拿凭据的步骤。"}
+        return {"error": str(e),
+                "note": "把这段话原样告诉用户。**并且告诉他:不用去改配置文件,"
+                        "点顶栏的 🕵️ 按钮贴一下新凭据就行,贴完立刻生效。**"}
     except Exception as e:
         return {"error": f"查竞品广告失败:{str(e)[:200]}"}
 
@@ -1907,6 +1912,50 @@ def set_account_token(body: TokenIn, request: Request):
 
 class AccountIn(BaseModel):
     account_id: str
+
+
+class SpyCredsIn(BaseModel):
+    authorization: str = ""
+    cookie: str = ""
+
+
+@app.get("/api/insightrackr")
+def get_spy_creds(request: Request):
+    """竞品查询凭据的现状:配没配、是自己贴的还是用公用的、掩码预览。"""
+    user = _current_user(request)
+    mine = acc.get_creds(user["id"], "insightrackr") if user else {}
+    auth = str(mine.get("authorization") or "")
+    return {
+        "configured": ir.is_configured(),
+        "source": "自己贴的" if auth else ("公用配置" if ir.is_configured() else "未配置"),
+        "masked": _mask(auth) if auth else "",
+        "updated_at": mine.get("updated_at", ""),
+        "howto": ir.HOWTO,
+    }
+
+
+@app.post("/api/insightrackr/token")
+def set_spy_creds(body: SpyCredsIn, request: Request):
+    """贴一对新凭据。**先验证再保存** —— 验不过就不覆盖旧的。
+
+    和存 NewsBreak token 一个规矩:填错一次不该把原来能用的那份冲掉。
+    """
+    user = _current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "请先登录"})
+    auth = (body.authorization or "").strip()
+    if not auth:
+        return JSONResponse(status_code=400, content={
+            "error": "Authorization 不能为空 —— 真正的登录票据是它,光换 Cookie 没用"})
+    ok, msg = ir.validate(auth, body.cookie or "")
+    if not ok:
+        return JSONResponse(status_code=400, content={"error": msg, "kept_old": True})
+    acc.set_creds(user["id"], "insightrackr", authorization=auth,
+                  cookie=(body.cookie or "").strip(),
+                  updated_at=sched.now_beijing().strftime("%Y-%m-%d %H:%M"))
+    ir.CURRENT_CREDS.set(acc.get_creds(user["id"], "insightrackr"))
+    print(f"[spy] {user['username']} 更新了 Insightrackr 凭据", flush=True)
+    return {"ok": True, "masked": _mask(auth), "note": "凭据已验证通过并保存,现在就能用"}
 
 
 @app.post("/api/account/select")

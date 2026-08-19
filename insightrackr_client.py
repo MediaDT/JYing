@@ -18,10 +18,22 @@
   startTime/endTime: "YYYY-MM-DD"
 """
 
+import contextvars
 import os
 from datetime import date, datetime, timedelta
 
 import httpx
+
+# 当前请求这个人自己的凭据(在 AuthMiddleware 里设,必须设在 call_next 之前)。
+#
+# **和 newsbreak_client.CURRENT_CREDS 的取值规则故意不一样,别当成 bug 改掉**:
+#   · NewsBreak 是"在用户上下文但没绑 → 直接报错,绝不回落 .env" ——
+#     那关系到各人自己的广告账户和钱,回落就等于没隔离;
+#   · Insightrackr 是**公司一份订阅的只读查询**,没有"谁的数据"之分,
+#     所以这里是"自己贴过就用自己的,没贴过就回落 .env 那份公用的"。
+#     各人贴各自的还有个额外好处:万一平台是单会话互踢,就不会互相顶掉。
+CURRENT_CREDS: contextvars.ContextVar = contextvars.ContextVar(
+    "insightrackr_creds", default=None)
 
 TIMEOUT = 30.0
 DEFAULT_URL = "https://data.insightrackr.com/cas/api/v2/imagevideo/search"
@@ -50,6 +62,8 @@ HOWTO = (
     "③在网站上随便搜一次素材;④在 Network 里点那条 search 请求 → Headers → "
     "把 `Authorization` 和 `Cookie` 两行的值整段复制出来;"
     "⑤分别填进 .env 的 INSIGHTRACKR_AUTHORIZATION 和 INSIGHTRACKR_COOKIE。"
+    "**两行都要换,尤其是 Authorization —— 真正的登录票据是它**"
+    "(实测只带 Cookie 会报「传入token为空」)。"
 )
 
 
@@ -57,8 +71,17 @@ class InsightrackrError(Exception):
     pass
 
 
+# .env 里的键名 → 用户凭据里的字段名
+_FIELD = {"INSIGHTRACKR_AUTHORIZATION": "authorization", "INSIGHTRACKR_COOKIE": "cookie"}
+
+
 def _conf(name: str, default: str = "") -> str:
-    """现读 .env(和项目其它地方一个路数:留空后来才填的键,运行中的进程也能读到)。"""
+    """取一项配置:**先看这个人自己贴的**,没有再回落 .env。"""
+    creds = CURRENT_CREDS.get()
+    if isinstance(creds, dict):
+        v = str(creds.get(_FIELD.get(name, ""), "") or "").strip()
+        if v:
+            return v
     try:
         import agent_server
         v = agent_server._read_env_value(name)
@@ -71,6 +94,68 @@ def _conf(name: str, default: str = "") -> str:
 
 def is_configured() -> bool:
     return bool(_conf("INSIGHTRACKR_AUTHORIZATION") and _conf("INSIGHTRACKR_COOKIE"))
+
+
+def validate(authorization: str = "", cookie: str = "") -> tuple[bool, str]:
+    """拿一对凭据打一次**最小**请求,确认它真的能用。
+
+    两个用处:①存之前先验,验不过就不覆盖旧的(和 NewsBreak 存 token 一个规矩,
+    免得填错一次把好凭据冲掉);②跑批量任务之前先验,别跑到一半才发现票据过期 ——
+    前面花的钱和时间就白搭了。
+
+    不传参数就验当前生效的那份。返回 (能不能用, 说明)。
+    """
+    auth = (authorization or "").strip() or _conf("INSIGHTRACKR_AUTHORIZATION")
+    ck = (cookie or "").strip() or _conf("INSIGHTRACKR_COOKIE")
+    if not auth:
+        return False, "缺 Authorization —— 真正的登录票据是它。" + HOWTO
+    # HTTP 头只认 latin-1。凭据里混进中文/全角字符(复制时带上了页面文字、
+    # 或者输入法没切回来)的话,httpx 会抛 'ascii' codec can't encode —— 那是天书,
+    # 用户根本不知道该改什么。这里提前挡下并说人话。
+    # (项目里同类的坑:WWW-Authenticate 放中文会 500,见 CLAUDE.md 第八节)
+    for label, val in (("Authorization", auth), ("Cookie", ck)):
+        try:
+            val.encode("latin-1")
+        except UnicodeEncodeError:
+            bad = next((c for c in val if ord(c) > 255), "?")
+            return False, (f"{label} 里混进了非法字符「{bad}」—— 凭据只能是英文数字符号。"
+                           "多半是复制时带上了网页文字,或者输入法没切回英文,重新复制一次。")
+    end = date.today()
+    body = _payload("test", (end - timedelta(days=7)).isoformat(), end.isoformat(),
+                    5, SORT_FIELD_IMPRESSIONS, "desc")
+    try:
+        with httpx.Client(timeout=TIMEOUT, trust_env=False) as c:
+            resp = c.post(_conf("INSIGHTRACKR_SEARCH_URL", DEFAULT_URL),
+                          json=body, headers=_headers(auth, ck))
+    except Exception as e:
+        return False, f"连不上平台:{str(e)[:120]}"
+    if resp.status_code >= 500:
+        # 504 是平台自己后端慢,不是凭据问题 —— 这两种绝不能混report,
+        # 否则用户会跑去反复换凭据,而问题根本不在他那儿
+        return False, f"平台暂时不可用(HTTP {resp.status_code}),这不是凭据问题,过几分钟再试"
+    try:
+        code = resp.json().get("code")
+    except Exception:
+        return False, f"平台返回的不是 JSON(HTTP {resp.status_code}),稍后再试"
+    if code in (None, 0, 200):
+        return True, "凭据有效"
+    if code == -3106:
+        return False, "登录已过期。**要换的是 `Authorization` 那一行**,光换 Cookie 没用"
+    if code == -3108:
+        return False, "没收到登录票据 —— Authorization 是空的或填错了"
+    return False, f"平台拒绝了这对凭据(错误码 {code})"
+
+
+def _headers(auth: str = "", cookie: str = "") -> dict:
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        # 平台按浏览器请求来对待,UA 照着 qx-ad-bot 生产环境的写
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+        "Authorization": auth or _conf("INSIGHTRACKR_AUTHORIZATION"),
+        "Cookie": cookie or _conf("INSIGHTRACKR_COOKIE"),
+    }
 
 
 def _payload(keyword: str, start: str, end: str, page_size: int,
@@ -269,17 +354,13 @@ def search(keyword: str, days: int = 365, count: int = 8, country: str = "") -> 
     if country.strip():
         # 实测格式:两位大写字母(["US"] 有效;"USA"/"840"/"us" 一条都返回不了)
         body["baseOption"]["countryLevel2"] = [country.strip().upper()]
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        # 平台按浏览器请求来对待,UA 照着 qx-ad-bot 生产环境的写
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-        "Authorization": _conf("INSIGHTRACKR_AUTHORIZATION"),
-        "Cookie": _conf("INSIGHTRACKR_COOKIE"),
-    }
     with httpx.Client(timeout=TIMEOUT, trust_env=False) as c:
-        resp = c.post(_conf("INSIGHTRACKR_SEARCH_URL", DEFAULT_URL), json=body, headers=headers)
+        resp = c.post(_conf("INSIGHTRACKR_SEARCH_URL", DEFAULT_URL),
+                      json=body, headers=_headers())
+        if resp.status_code >= 500:
+            # 平台后端慢(实测遇到过 504),和凭据无关,要说清楚免得用户瞎换凭据
+            raise InsightrackrError(
+                f"Insightrackr 平台暂时不可用(HTTP {resp.status_code}),这不是凭据问题,过几分钟再试")
         resp.raise_for_status()
     data = resp.json()
 
@@ -287,8 +368,17 @@ def search(keyword: str, days: int = 365, count: int = 8, country: str = "") -> 
     if code not in (None, 0, 200):
         # -3106 = 登录态失效。**这条必须单独翻译**:凭据是从浏览器拷的、会过期,
         # 不说清楚的话用户只会以为"搜不到素材",查半天查不到原因。
+        # -3106 登录态失效,-3108 压根没收到票据。**两个要分开报**:
+        # 实测过一次"用户以为换了凭据、其实只换了 Cookie"—— 因为鉴权只认
+        # Authorization 头,Cookie 几乎不参与(只带 Cookie 会得到 -3108)。
+        # 笼统说一句"过期了"的话,用户会反复换错那一半。
         if code == -3106:
-            raise InsightrackrError("Insightrackr 登录已过期(凭据是从浏览器拷的,会失效)。" + HOWTO)
+            raise InsightrackrError(
+                "Insightrackr 登录已过期。**真正的登录票据是 `Authorization` 那一行,"
+                "光换 Cookie 没用**(实测鉴权只认 Authorization)。" + HOWTO)
+        if code == -3108:
+            raise InsightrackrError(
+                "Insightrackr 没收到登录票据 —— `INSIGHTRACKR_AUTHORIZATION` 是空的或填错了。" + HOWTO)
         raise InsightrackrError(str(data.get("msg") or data.get("message") or f"平台返回错误码 {code}"))
 
     # 同一条素材会被不同广告/不同投放重复返回(平台的 materialRemovalRepeat

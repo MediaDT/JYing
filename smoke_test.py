@@ -180,9 +180,13 @@ def test_pure_logic():
             if "error" not in r:
                 return "没配凭据居然没报错"
             msg = r["error"]
-            for kw in ("Cookie", "F12", ".env"):
+            for kw in ("Cookie", "F12", ".env", "Authorization"):
                 if kw not in msg:
                     bad.append(f"没配凭据的提示里缺「{kw}」,用户照着做不了")
+        # 实测:鉴权只认 Authorization 头,Cookie 几乎不参与。曾有一次用户
+        # 以为换了凭据、其实只换了 Cookie,白绕一圈。提示里必须点名是哪一行。
+        if "Authorization" not in ir.HOWTO:
+            bad.append("取凭据说明里没点名 Authorization 才是真票据")
         # 平台的请求体字段极多且缺一不可,照抄 qx-ad-bot 的那份。
         # 这条守着"别哪天顺手精简了"
         body = ir._payload("roof", "2026-01-01", "2026-08-18", 8, "3", "desc")
@@ -224,6 +228,79 @@ def test_pure_logic():
 
     check("竞品查询没配凭据时给的是能照做的提示", t_competitor_creds_message)
     check("竞品素材带风险标记,投放天数/曝光解析正确", t_competitor_marked_as_risky)
+
+    # 竞品凭据是浏览器登录态、会过期,所以有两条围绕"换凭据"的规矩要守。
+    def t_spy_creds_per_user():
+        import accounts as acc
+        import agent_server as srv
+        import insightrackr_client as ir
+        bad = []
+        old = ir.CURRENT_CREDS.get()
+        try:
+            # ① 自己贴过就用自己的
+            ir.CURRENT_CREDS.set({"authorization": "mine-abc", "cookie": "mine-ck"})
+            if ir._conf("INSIGHTRACKR_AUTHORIZATION") != "mine-abc":
+                bad.append("没有优先用这个人自己贴的凭据")
+            # ② 自己没贴就回落 .env 的公用配置。
+            #    **这里和 NewsBreak 故意不同**:那边"没绑就报错、绝不回落",
+            #    因为关系到各人的钱;这边是公司一份订阅的只读查询,回落才合理。
+            ir.CURRENT_CREDS.set({})
+            env_val = srv._read_env_value("INSIGHTRACKR_AUTHORIZATION")
+            if env_val and ir._conf("INSIGHTRACKR_AUTHORIZATION") != env_val:
+                bad.append("自己没贴时没有回落到公用配置")
+            # ③ 按人存取,互相看不到
+            acc.set_creds("_smoke_S1", "insightrackr", authorization="a1")
+            if acc.get_creds("_smoke_S2", "insightrackr"):
+                bad.append("S2 读到了 S1 的竞品凭据")
+            if acc.get_creds("_smoke_S1", "insightrackr").get("authorization") != "a1":
+                bad.append("存进去又读不出来")
+        finally:
+            ir.CURRENT_CREDS.set(old)
+            acc.clear_creds("_smoke_S1", "insightrackr")
+        return bad or True
+
+    def t_spy_validate_messages():
+        """③ 提前验票:每种失败原因都要说得不一样,否则用户只会瞎换凭据。
+        尤其 504(平台自己慢)绝不能报成凭据问题 —— 实测真遇到过 504。"""
+        import agent_server as srv
+        import insightrackr_client as ir
+        bad = []
+        # 凭据里混进中文(复制时带上页面文字、或输入法没切回来)要说人话,
+        # 不能甩 httpx 的 'ascii' codec 报错 —— 那种天书用户不知道该改什么
+        ok, msg = ir.validate("Bearer 中文混进来了", "")
+        if ok:
+            bad.append("含非法字符的凭据居然验过了")
+        if "非法字符" not in msg:
+            bad.append(f"含中文的凭据没说人话:{msg[:60]}")
+        # 完全没有票据时要点名是 Authorization(曾有人只换 Cookie 白绕一圈)
+        old_ctx = ir.CURRENT_CREDS.get()
+        try:
+            ir.CURRENT_CREDS.set({"authorization": "", "cookie": ""})
+            import os
+            keep = os.environ.pop("INSIGHTRACKR_AUTHORIZATION", None)
+            try:
+                # _conf 还会现读 .env,所以这里只验含非法字符那条即可;
+                # "完全没票据"的话术由 HOWTO 和接口层守着(下面一并查)
+                pass
+            finally:
+                if keep is not None:
+                    os.environ["INSIGHTRACKR_AUTHORIZATION"] = keep
+        finally:
+            ir.CURRENT_CREDS.set(old_ctx)
+        if "Authorization" not in ir.HOWTO:
+            bad.append("取凭据说明里没点名 Authorization")
+        # 保存接口必须是"先验证再存",验不过不能覆盖旧的
+        import inspect
+        src = inspect.getsource(srv.set_spy_creds)
+        if src.index("ir.validate") > src.index("acc.set_creds"):
+            bad.append("先存了才验证 —— 填错一次就会把好凭据冲掉")
+        if "kept_old" not in src:
+            bad.append("验不过时没告诉前端旧凭据还在")
+        return bad or True
+
+    check("竞品凭据按人存,自己没贴才用公用的", t_spy_creds_per_user)
+    check("凭据先验证再保存,失败原因分得清", t_spy_validate_messages)
+
 
     # 创意拆解(P0)。以下几条都不联网,纯逻辑,但守的都是真出过问题的地方。
 

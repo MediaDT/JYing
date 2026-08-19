@@ -137,6 +137,44 @@ console.log("\n【6】/api/platforms 挂了:页面不能跟着崩");
   t("按钮监听还在", !!(app.registry["acct-btn"]._h || {}).click);
 }
 
+console.log("\n【7】竞品凭据弹窗:凭据会过期,必须能随手换掉");
+{
+  // 这个模块在文件末尾用 const 声明,而 applyLang 在那之前就会被调一次 ——
+  // 项目踩过这个坑(「点按钮没反应 = 初始化中途抛错」)。必须真跑一遍才测得出来。
+  const app = boot({}, { platforms: FAKE(true),
+    fetchBody: (u) => (u.indexOf("/api/insightrackr") === 0
+      ? { configured: true, source: "公用配置", masked: "", updated_at: "" } : null) });
+  await tick(); await tick();
+  t("🕵️ 按钮挂上了点击监听", !!(app.registry["spy-btn"]._h || {}).click);
+  t("其它按钮没被带崩", !!(app.registry["acct-btn"]._h || {}).click);
+
+  app.registry["spy-btn"].fire("click");
+  await tick(); await tick();
+  t("点了会打开弹窗", app.registry["spy-overlay"].classList.contains("show"));
+  t("标题渲染出来了", app.registry["spy-title"].textContent.indexOf("竞品") >= 0,
+    app.registry["spy-title"].textContent);
+  t("用公用配置时如实说明", app.registry["spy-status"].textContent.indexOf("公用") >= 0,
+    app.registry["spy-status"].textContent);
+
+  // Authorization 是真票据,空着直接拦下,别让用户白等一次请求
+  document.getElementById("spy-auth").value = "";
+  app.registry["spy-save"].fire("click");
+  await tick();
+  t("Authorization 空着会被拦下", app.registry["spy-msg"].textContent.indexOf("不能为空") >= 0,
+    app.registry["spy-msg"].textContent);
+}
+
+console.log("\n【8】一份凭据都没有时,要如实说没有");
+{
+  const app = boot({}, { platforms: FAKE(true),
+    fetchBody: (u) => (u.indexOf("/api/insightrackr") === 0 ? { configured: false } : null) });
+  await tick(); await tick();
+  app.registry["spy-btn"].fire("click");
+  await tick();
+  t("没凭据时如实说没有", app.registry["spy-status"].textContent.indexOf("还没有") >= 0,
+    app.registry["spy-status"].textContent);
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 
