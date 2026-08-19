@@ -168,138 +168,114 @@ def test_pure_logic():
     check("编造的素材地址会被挡下(防幻觉)", t_stock_url_must_come_from_search)
     check("素材来源新规矩中英提示词都同步了", t_creative_rules_in_prompt)
 
-    # 竞品广告查询(Insightrackr)。凭据是从浏览器拷的、会过期,
-    # 所以"没配"和"过期"这两条路径必须给出**能照着做的**提示,
-    # 而不是含糊地说"查不到" —— 用户会以为是没有素材,查不到真正原因。
-    def t_competitor_creds_message():
-        import insightrackr_client as ir
-        import agent_server as srv
+    # 竞品广告查询(OpenAdLibrary)。这家是正规 API key,不会像上一家那样几小时过期,
+    # 但**参数真相和文档对不上**,下面几条守的就是实测出来的那些值。
+    def t_competitor_params_verified():
+        import openadlibrary_client as oal
         bad = []
-        if not ir.is_configured():
-            r = srv.search_competitor_ads("roof repair")
-            if "error" not in r:
-                return "没配凭据居然没报错"
-            msg = r["error"]
-            for kw in ("Cookie", "F12", ".env", "Authorization"):
-                if kw not in msg:
-                    bad.append(f"没配凭据的提示里缺「{kw}」,用户照着做不了")
-        # 实测:鉴权只认 Authorization 头,Cookie 几乎不参与。曾有一次用户
-        # 以为换了凭据、其实只换了 Cookie,白绕一圈。提示里必须点名是哪一行。
-        if "Authorization" not in ir.HOWTO:
-            bad.append("取凭据说明里没点名 Authorization 才是真票据")
-        # 平台的请求体字段极多且缺一不可,照抄 qx-ad-bot 的那份。
-        # 这条守着"别哪天顺手精简了"
-        body = ir._payload("roof", "2026-01-01", "2026-08-18", 8, "3", "desc")
-        for k in ("keyWord", "baseOption", "materialRemovalRepeat", "productOption"):
-            if k not in body:
-                bad.append(f"请求体缺字段 {k}")
-        for k in ("startTime", "endTime", "pageSize", "sortField", "sortRule", "dayMode"):
-            if k not in body["baseOption"]:
-                bad.append(f"baseOption 缺字段 {k}")
-        # 排序代码是实测出来的,不是照抄 qx-ad-bot 的(它前端标的是错的:
-        # 1/2 一条都返回不了,3 也不是曝光排序)。改回去会让"按曝光排"失效。
-        if ir.SORT_FIELD_IMPRESSIONS != "4":
-            bad.append(f"按曝光排序的代码被改了:{ir.SORT_FIELD_IMPRESSIONS}(实测只有 4 有效)")
-        # 关键词匹配字段同理:默认的全字段会被正文噪音淹掉
-        if ir.KEYWORD_FIELDS != "0,2":
-            bad.append(f"关键词匹配字段被改了:{ir.KEYWORD_FIELDS}(实测 0=广告主 2=标题 才准)")
+        # 实测:sort 只有 placements / oldest 真的有效,别的(包括整个 sortBy 参数)
+        # 都是**静默忽略** —— 不报错、也不排序,比直接报错更难发现。
+        # 暴露一个用不了的排序选项比不暴露更糟,所以这里守住只留验证过的。
+        if set(oal.SORTS) != {"placements", "oldest"}:
+            bad.append(f"排序选项被改了:{sorted(oal.SORTS)}(实测只有 placements/oldest 有效)")
+        # 实测 minDaysRunning 稳定返回 503,是平台服务端的问题。
+        # 哪天有人看文档觉得"这参数好用"又加回来,这条会提醒他。
+        import inspect
+        src = inspect.getsource(oal.search)
+        if "minDaysRunning" in src:
+            bad.append("又用上 minDaysRunning 了 —— 实测它稳定 503,投放天数要自己算")
+        # 投放天数是自己算的,算错就整条功能没意义
+        if oal._days_running("2026-01-01T00:00:00Z", "2026-06-30T00:00:00Z") != 180:
+            bad.append("投放天数算错了")
+        if oal._days_running("", "") is not None:
+            bad.append("缺日期时没有如实返回 None")
         return bad or True
 
-    # 竞品素材和图库素材是两回事:图库的可以放心投,竞品的是别人的广告。
-    # 这个区别必须在**代码返回的数据里**就体现出来,不能只靠 AI 记得说。
-    def t_competitor_marked_as_risky():
-        import insightrackr_client as ir
-        fake = {"id": "x1", "title": "Roof Ad", "imageUrl": "https://cdn.example.com/a.jpg",
-                "width": 1200, "height": 628, "firstSeenTime": "2026-01-01",
-                "lastSeenTime": "2026-06-30", "impressions": "1,234,567", "brandName": "SomeCo"}
-        n = ir._normalize(fake)
+    def t_competitor_normalize():
+        """字段映射是实测确认的。两个点最容易坏:
+        ①imageUrl 是相对路径,不拼域名就是死链;②竞品素材必须带风险标记。"""
+        import openadlibrary_client as oal
+        fake = {"id": "x1", "headline": "Roof Ad", "body": "Free estimate today",
+                "imageUrl": "/api/public/assets/abc.webp", "adNetwork": "Taboola",
+                "trafficSource": "news.example.com", "advertiserName": "SomeCo",
+                "landingDomain": "someco.com", "placements": 17, "isActive": True,
+                "firstSeenAt": "2026-01-01T00:00:00Z", "lastSeenAt": "2026-06-30T00:00:00Z"}
+        n = oal._normalize(fake)
         bad = []
+        if not n["image_url"].startswith("https://"):
+            bad.append(f"相对路径没拼成完整地址:{n['image_url']}")
         if "⚠️" not in n["license"]:
             bad.append("竞品素材没有被标出风险,会被当成和图库图一样安全")
         if n["投放天数"] != 180:
-            bad.append(f"投放天数算错:{n['投放天数']}(2026-01-01 到 06-30 应为 180)")
-        if n["预估曝光"] != 1234567:
-            bad.append(f"带逗号的曝光数没解析对:{n['预估曝光']}")
-        if n["quality"]["verdict"] != "推荐":
-            bad.append(f"1200×628 应判「推荐」,实际「{n['quality']['verdict']}」")
-        if n["media_type"] != "IMAGE":
-            bad.append(f"类型判错:{n['media_type']}")
+            bad.append(f"投放天数算错:{n['投放天数']}")
+        if n["版位数"] != 17 or n["还在投"] is not True:
+            bad.append(f"版位数/在投状态没取对:{n['版位数']} {n['还在投']}")
+        # 平台是 leak-safe 设计,约六成广告没有广告主和落地页。没有就留空,不许编
+        empty = oal._normalize({"headline": "x", "imageUrl": "/a.webp"})
+        if empty["落地页域名"] != "":
+            bad.append("平台没给落地页时居然编了一个")
         return bad or True
 
-    check("竞品查询没配凭据时给的是能照做的提示", t_competitor_creds_message)
-    check("竞品素材带风险标记,投放天数/曝光解析正确", t_competitor_marked_as_risky)
+    def t_competitor_key_messages():
+        """key 失效 / 额度用尽 / 平台自己挂了,是三件事,报错要分得清 ——
+        否则用户只会瞎换 key。这条是上一个平台踩出来的教训。"""
+        import agent_server as srv
+        import openadlibrary_client as oal
+        bad = []
+        ok, msg = oal.validate("wrongprefix_123")
+        if ok or "oal_" not in msg:
+            bad.append(f"key 前缀不对时没说清楚:{msg[:60]}")
+        ok, msg = oal.validate("oal_中文混进来了")
+        if ok or "非法字符" not in msg:
+            bad.append(f"key 含中文时没说人话:{msg[:60]}")
+        import inspect
+        src = inspect.getsource(oal._check)
+        for code, kw in ((402, "额度"), (429, "频繁"), (401, "无效")):
+            if str(code) not in src:
+                bad.append(f"没有单独处理 HTTP {code}")
+        if "不是 key 的问题" not in src:
+            bad.append("5xx 没说清楚这不是 key 的问题 —— 用户会去瞎换 key")
+        # 保存接口必须先验证再存,验不过不能覆盖旧的
+        src2 = inspect.getsource(srv.set_spy_creds)
+        if src2.index("oal.validate") > src2.index("acc.set_creds"):
+            bad.append("先存了才验证 —— 填错一次就会把好 key 冲掉")
+        return bad or True
 
-    # 竞品凭据是浏览器登录态、会过期,所以有两条围绕"换凭据"的规矩要守。
+    check("竞品查询用的参数是实测验证过的", t_competitor_params_verified)
+    check("竞品素材字段映射正确、带风险标记", t_competitor_normalize)
+    check("key 失效/额度/平台故障 三种报错分得清", t_competitor_key_messages)
+
+    # 竞品 key 按人存。换平台之后 key 不会过期了,但"每人各贴各的"这条仍然要守。
     def t_spy_creds_per_user():
         import accounts as acc
         import agent_server as srv
-        import insightrackr_client as ir
+        import openadlibrary_client as oal
         bad = []
-        old = ir.CURRENT_CREDS.get()
+        old = oal.CURRENT_CREDS.get()
         try:
             # ① 自己贴过就用自己的
-            ir.CURRENT_CREDS.set({"authorization": "mine-abc", "cookie": "mine-ck"})
-            if ir._conf("INSIGHTRACKR_AUTHORIZATION") != "mine-abc":
-                bad.append("没有优先用这个人自己贴的凭据")
+            oal.CURRENT_CREDS.set({"api_key": "oal_mine"})
+            if oal._key() != "oal_mine":
+                bad.append("没有优先用这个人自己贴的 key")
             # ② 自己没贴就回落 .env 的公用配置。
             #    **这里和 NewsBreak 故意不同**:那边"没绑就报错、绝不回落",
             #    因为关系到各人的钱;这边是公司一份订阅的只读查询,回落才合理。
-            ir.CURRENT_CREDS.set({})
-            env_val = srv._read_env_value("INSIGHTRACKR_AUTHORIZATION")
-            if env_val and ir._conf("INSIGHTRACKR_AUTHORIZATION") != env_val:
+            oal.CURRENT_CREDS.set({})
+            env_val = srv._read_env_value("OPENADLIBRARY_API_KEY")
+            if env_val and oal._key() != env_val:
                 bad.append("自己没贴时没有回落到公用配置")
             # ③ 按人存取,互相看不到
-            acc.set_creds("_smoke_S1", "insightrackr", authorization="a1")
-            if acc.get_creds("_smoke_S2", "insightrackr"):
-                bad.append("S2 读到了 S1 的竞品凭据")
-            if acc.get_creds("_smoke_S1", "insightrackr").get("authorization") != "a1":
+            acc.set_creds("_smoke_S1", "openadlibrary", api_key="oal_a1")
+            if acc.get_creds("_smoke_S2", "openadlibrary"):
+                bad.append("S2 读到了 S1 的 key")
+            if acc.get_creds("_smoke_S1", "openadlibrary").get("api_key") != "oal_a1":
                 bad.append("存进去又读不出来")
         finally:
-            ir.CURRENT_CREDS.set(old)
-            acc.clear_creds("_smoke_S1", "insightrackr")
+            oal.CURRENT_CREDS.set(old)
+            acc.clear_creds("_smoke_S1", "openadlibrary")
         return bad or True
 
-    def t_spy_validate_messages():
-        """③ 提前验票:每种失败原因都要说得不一样,否则用户只会瞎换凭据。
-        尤其 504(平台自己慢)绝不能报成凭据问题 —— 实测真遇到过 504。"""
-        import agent_server as srv
-        import insightrackr_client as ir
-        bad = []
-        # 凭据里混进中文(复制时带上页面文字、或输入法没切回来)要说人话,
-        # 不能甩 httpx 的 'ascii' codec 报错 —— 那种天书用户不知道该改什么
-        ok, msg = ir.validate("Bearer 中文混进来了", "")
-        if ok:
-            bad.append("含非法字符的凭据居然验过了")
-        if "非法字符" not in msg:
-            bad.append(f"含中文的凭据没说人话:{msg[:60]}")
-        # 完全没有票据时要点名是 Authorization(曾有人只换 Cookie 白绕一圈)
-        old_ctx = ir.CURRENT_CREDS.get()
-        try:
-            ir.CURRENT_CREDS.set({"authorization": "", "cookie": ""})
-            import os
-            keep = os.environ.pop("INSIGHTRACKR_AUTHORIZATION", None)
-            try:
-                # _conf 还会现读 .env,所以这里只验含非法字符那条即可;
-                # "完全没票据"的话术由 HOWTO 和接口层守着(下面一并查)
-                pass
-            finally:
-                if keep is not None:
-                    os.environ["INSIGHTRACKR_AUTHORIZATION"] = keep
-        finally:
-            ir.CURRENT_CREDS.set(old_ctx)
-        if "Authorization" not in ir.HOWTO:
-            bad.append("取凭据说明里没点名 Authorization")
-        # 保存接口必须是"先验证再存",验不过不能覆盖旧的
-        import inspect
-        src = inspect.getsource(srv.set_spy_creds)
-        if src.index("ir.validate") > src.index("acc.set_creds"):
-            bad.append("先存了才验证 —— 填错一次就会把好凭据冲掉")
-        if "kept_old" not in src:
-            bad.append("验不过时没告诉前端旧凭据还在")
-        return bad or True
-
-    check("竞品凭据按人存,自己没贴才用公用的", t_spy_creds_per_user)
-    check("凭据先验证再保存,失败原因分得清", t_spy_validate_messages)
+    check("竞品 key 按人存,自己没贴才用公用的", t_spy_creds_per_user)
 
 
     # 创意拆解(P0)。以下几条都不联网,纯逻辑,但守的都是真出过问题的地方。

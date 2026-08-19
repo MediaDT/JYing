@@ -142,7 +142,7 @@ console.log("\n【7】竞品凭据弹窗:凭据会过期,必须能随手换掉")
   // 这个模块在文件末尾用 const 声明,而 applyLang 在那之前就会被调一次 ——
   // 项目踩过这个坑(「点按钮没反应 = 初始化中途抛错」)。必须真跑一遍才测得出来。
   const app = boot({}, { platforms: FAKE(true),
-    fetchBody: (u) => (u.indexOf("/api/insightrackr") === 0
+    fetchBody: (u) => (u.indexOf("/api/competitor") === 0
       ? { configured: true, source: "公用配置", masked: "", updated_at: "" } : null) });
   await tick(); await tick();
   t("🕵️ 按钮挂上了点击监听", !!(app.registry["spy-btn"]._h || {}).click);
@@ -167,7 +167,7 @@ console.log("\n【7】竞品凭据弹窗:凭据会过期,必须能随手换掉")
 console.log("\n【8】一份凭据都没有时,要如实说没有");
 {
   const app = boot({}, { platforms: FAKE(true),
-    fetchBody: (u) => (u.indexOf("/api/insightrackr") === 0 ? { configured: false } : null) });
+    fetchBody: (u) => (u.indexOf("/api/competitor") === 0 ? { configured: false } : null) });
   await tick(); await tick();
   app.registry["spy-btn"].fire("click");
   await tick();

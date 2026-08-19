@@ -351,9 +351,7 @@
       <div class="desc" id="spy-desc"></div>
       <div id="spy-status"></div>
       <label class="spy-label" id="spy-auth-label"></label>
-      <textarea id="spy-auth" class="spy-input" rows="3" spellcheck="false"></textarea>
-      <label class="spy-label" id="spy-cookie-label"></label>
-      <textarea id="spy-cookie" class="spy-input" rows="2" spellcheck="false"></textarea>
+      <textarea id="spy-auth" class="spy-input" rows="2" spellcheck="false"></textarea>
       <div class="modal-msg" id="spy-msg"></div>
       <div class="modal-actions">
         <button class="btn-primary" id="spy-save"></button>
@@ -428,18 +426,17 @@
       dashBtnTitle: "打开数据大屏(KPI / 趋势 / AI 诊断)",
       spyBtnTitle: "更新竞品查询凭据",
       spyTitle: "🕵️ 竞品查询凭据",
-      spyDesc: "查竞品广告用的凭据是从浏览器复制的登录态,**会过期**。过期时在这里贴一份新的即可,立刻生效,不用重启。",
-      spyAuthLabel: "Authorization(真正的登录票据,必填)",
-      spyCookieLabel: "Cookie(选填)",
-      spyHowto: "怎么拿:① Chrome 登录 insightrackr.com → ② 按 F12 打开 Network → ③ 在网站上随便搜一次素材 → ④ 点那条 search 请求 → Headers → ⑤ 复制 Request Headers 里 Authorization 和 Cookie 的值。",
+      spyDesc: "查竞品广告用的是 OpenAdLibrary 的 API key,**不会过期**。换 key 或换人用时在这里贴一下即可,立刻生效,不用重启。",
+      spyAuthLabel: "API key(以 oal_ 开头)",
+      spyHowto: "怎么拿:登录 openadlibrary.com → Settings → API keys → 新建一个。⚠️ key 只在创建时显示一次,当场复制下来。",
       spySave: "验证并保存",
       spyClose: "关闭",
       spyChecking: "正在验证凭据…",
       spySaved: "✅ 验证通过,已保存,现在就能查竞品广告了",
-      spyStatusMine: "当前:你自己贴的凭据({m},{t} 更新)",
-      spyStatusShared: "当前:在用公用配置。贴一份你自己的,可以避免和别人互相顶掉登录",
+      spyStatusMine: "当前:你自己的 key({m},{t} 更新)",
+      spyStatusShared: "当前:在用公用配置。贴一份你自己的 key,用量就算你自己的",
       spyStatusNone: "当前:还没有可用凭据",
-      spyNeedAuth: "Authorization 不能为空 —— 真正的登录票据是它,光换 Cookie 没用",
+      spyNeedAuth: "API key 不能为空",
       acctBtn: "🔗 账户",
       acctBtnTitle: "接入 / 切换广告账户",
       acctBtnUnlinked: "🔗 未接入账户",
@@ -518,18 +515,17 @@
       dashBtnTitle: "Open the data dashboard (KPIs / trends / AI review)",
       spyBtnTitle: "Update competitor-research credentials",
       spyTitle: "🕵️ Competitor research credentials",
-      spyDesc: "Competitor lookups run on a browser session copied from Insightrackr, and it **expires**. Paste a fresh one here whenever it does — it takes effect immediately, no restart.",
-      spyAuthLabel: "Authorization (the actual session ticket — required)",
-      spyCookieLabel: "Cookie (optional)",
-      spyHowto: "How to get it: 1) sign in to insightrackr.com in Chrome, 2) press F12 and open Network, 3) run any creative search on the site, 4) click that search request → Headers, 5) copy the Authorization and Cookie values from Request Headers.",
+      spyDesc: "Competitor lookups use an OpenAdLibrary API key, which does **not** expire. Paste one here to switch keys or use your own — it takes effect immediately, no restart.",
+      spyAuthLabel: "API key (starts with oal_)",
+      spyHowto: "How to get it: sign in to openadlibrary.com → Settings → API keys → create one. It is shown only once at creation, so copy it right away.",
       spySave: "Verify and save",
       spyClose: "Close",
       spyChecking: "Verifying…",
       spySaved: "✅ Verified and saved — competitor lookups work now",
-      spyStatusMine: "Now using: your own credentials ({m}, updated {t})",
-      spyStatusShared: "Now using: the shared configuration. Paste your own to avoid sessions kicking each other out",
+      spyStatusMine: "Now using: your own key ({m}, updated {t})",
+      spyStatusShared: "Now using: the shared configuration. Paste your own key to have usage counted against it",
       spyStatusNone: "Now using: no working credentials yet",
-      spyNeedAuth: "Authorization cannot be empty — it is the actual session ticket; replacing only the Cookie does nothing",
+      spyNeedAuth: "API key cannot be empty",
       acctBtn: "🔗 Account",
       acctBtnTitle: "Connect / switch ad account",
       acctBtnUnlinked: "🔗 Not connected",
@@ -1632,7 +1628,6 @@
       escapeHtml(d.spyDesc).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       + '<br><span class="spy-howto">' + escapeHtml(d.spyHowto) + "</span>";
     document.getElementById("spy-auth-label").textContent = d.spyAuthLabel;
-    document.getElementById("spy-cookie-label").textContent = d.spyCookieLabel;
     document.getElementById("spy-save").textContent = d.spySave;
     document.getElementById("spy-close").textContent = d.spyClose;
 
@@ -1653,7 +1648,7 @@
     spyMsgEl.className = "modal-msg";
     spyOverlay.classList.add("show");
     renderSpyModal();
-    fetch("/api/insightrackr")
+    fetch("/api/competitor")
       .then(function (r) { return r.json(); })
       .then(function (d) { spyState = d; renderSpyModal(); })
       .catch(function (e) { console.warn("查竞品凭据状态失败:", e); });
@@ -1671,13 +1666,10 @@
     btn.disabled = true;
     spyMsgEl.textContent = d.spyChecking;
     spyMsgEl.className = "modal-msg";
-    fetch("/api/insightrackr/token", {
+    fetch("/api/competitor/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        authorization: auth,
-        cookie: document.getElementById("spy-cookie").value.trim(),
-      }),
+      body: JSON.stringify({ api_key: auth }),
     })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
@@ -1691,7 +1683,6 @@
         spyMsgEl.textContent = I18N[lang].spySaved;
         spyMsgEl.className = "modal-msg ok";
         document.getElementById("spy-auth").value = "";
-        document.getElementById("spy-cookie").value = "";
         spyState = { configured: true, masked: res.j.masked, updated_at: "" };
         renderSpyModal();
       })

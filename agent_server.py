@@ -163,9 +163,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # 没绑的人这里是空 dict —— 关键是**不为 None**,这样 _token() 就知道
             # "在用户上下文里,他没绑",会直接报错而不是偷偷用 .env 里的公用 token。
             nb.CURRENT_CREDS.set(acc.get_creds(user["id"], "newsbreak"))
-            # 竞品查询的凭据同理按人放。注意它的取值规则和 NewsBreak 不同
-            # (自己没贴就回落 .env 那份公用的),原因见 insightrackr_client 顶部注释。
-            ir.CURRENT_CREDS.set(acc.get_creds(user["id"], "insightrackr"))
+            # 竞品查询的 key 同理按人放。注意它的取值规则和 NewsBreak 不同
+            # (自己没贴就回落 .env 那份公用的),原因见 openadlibrary_client 顶部注释。
+            oal.CURRENT_CREDS.set(acc.get_creds(user["id"], "openadlibrary"))
             CURRENT_USER_ID.set(user["id"])
             return await call_next(request)
 
@@ -259,9 +259,9 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      **质量评价是"不建议"的也照样列出来并说清差在哪**,别只挑好的报。
      用户选定后调 `use_found_creative` 转存,**拿到 assetUrl 才能建广告**
      —— 图库那个 image_url 不能直接当 asset_url 用。
-   · **用户想知道"同行都在投什么" → 调 search_competitor_ads**(查竞品正在投的真实广告)。
-     它比图库多了**市场验证**:一条能连投几个月的广告肯定跑得动。列表里要带上
-     **投放天数**和**预估曝光**,并帮用户**总结这些高效广告的共同点**
+   · **用户想知道"同行都在投什么" → 调 search_competitor_ads**(查竞品正在投的真实原生广告)。
+     它比图库多了**市场验证**:投得久、铺的版位多 = 广告主愿意持续为它花钱。列表里要带上
+     **投放天数**和**版位数**,并帮用户**总结这些高效广告的共同点**
      (画面风格、有没有真人、有没有价格/优惠字样、文案角度)—— 这比单纯给图有用。
      **必须提醒**:这是别人的广告素材,直接投有版权风险、平台可能拒审;
      更稳的做法是照着思路自己拍或用图库图。用户坚持要用,才调 use_found_creative。
@@ -389,7 +389,7 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
      the ad** — the library's image_url is NOT an asset_url.
    · **If they want to know what competitors are running → call search_competitor_ads**, which pulls real ads
      other advertisers are currently running. Its advantage over stock is **market validation**: an ad that has
-     run for months demonstrably works. Include **days running** and **estimated impressions**, and **summarise
+     run for months across many placements demonstrably works. Include **days running** and **placements**, and **summarise
      what the high-performing ones have in common** (visual style, real people or not, price/offer callouts,
      copy angle) — that is far more useful than the images alone.
      **You must warn them**: these are other advertisers' creatives; using one directly carries copyright risk
@@ -470,7 +470,7 @@ import newsbreak_client as nb  # noqa: E402
 import scheduler as sched  # noqa: E402
 import creative_search as cs  # noqa: E402
 import creative_lab as lab  # noqa: E402
-import insightrackr_client as ir  # noqa: E402
+import openadlibrary_client as oal  # noqa: E402
 
 
 def list_organizations() -> dict:
@@ -697,30 +697,29 @@ def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -
         return {"error": f"搜素材失败:{str(e)[:200]}"}
 
 
-def search_competitor_ads(keyword: str, days: int = 365, count: int = 8,
-                          country: str = "") -> dict:
-    """查**竞品正在投的真实广告**(Insightrackr),看别人的广告长什么样、投了多久。
+def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
+                          active_only: bool = True) -> dict:
+    """查**竞品正在投的真实原生广告**(OpenAdLibrary),看同行的广告长什么样、投了多久。
 
     什么时候用:用户想知道同行在投什么、想找有市场验证的素材和创意思路时。
-    比图库强的地方:这些是**真金白银在投的广告**,一条能连续投几个月的广告
-    肯定是跑得动的 —— 图库的图只是"好看",没有这个背书。
+    比图库强的地方:这些是**真金白银在投的广告**,铺的版位越多、投得越久,
+    说明广告主越愿意为它花钱 —— 图库的图只是"好看",没有这个背书。
 
     keyword:英文关键词,按品类给,如 "roof repair" / "gutter guard";
-    days:往前看多少天(默认365,最多365)。**想看最近的新广告就把 days 调小**;
-    count:要几条(默认8,最多40);country:两位大写国家码如 "US",**一般留空**
-    (平台在美国家装类目覆盖薄,硬筛 US 会几乎没结果;靠返回里的落地页域名判断更实用)。
-    结果按预估曝光从高到低排。
+    count:要几条(默认8,最多50);
+    country:两位大写国家码,默认 US(NewsBreak 是美国平台);留空则不限;
+    active_only:只看**现在还在投**的,默认开(实测能把结果收窄到约七分之一)。
 
-    返回每条带:素材、投放天数、首次/最近投放时间、预估曝光、尺寸和质量评价。
+    返回每条带:素材、投放天数、版位数、还在不在投、广告网络和投放媒体。
     """
     try:
-        r = ir.search(keyword, days=days, count=count, country=country)
-    except ir.InsightrackrError as e:
-        # 凭据没配或过期 —— 必须把话原样带给用户,他才知道要去重新贴 Cookie。
-        # 含糊地说"查不到"的话,他会以为是没有素材。
+        r = oal.search(keyword, count=count, country=country, active_only=active_only)
+    except oal.OpenAdLibraryError as e:
+        # key 无效 / 额度用尽 / 平台自己挂了 —— 这几种原因要原样带给用户,
+        # 含糊说一句"查不到"的话,他根本不知道该换 key 还是该等一会儿。
         return {"error": str(e),
-                "note": "把这段话原样告诉用户。**并且告诉他:不用去改配置文件,"
-                        "点顶栏的 🕵️ 按钮贴一下新凭据就行,贴完立刻生效。**"}
+                "note": "把这段话原样告诉用户。如果是 key 的问题,告诉他:"
+                        "**不用去改配置文件,点顶栏的 🕵️ 按钮贴一下新 key 就行。**"}
     except Exception as e:
         return {"error": f"查竞品广告失败:{str(e)[:200]}"}
 
@@ -731,22 +730,21 @@ def search_competitor_ads(keyword: str, days: int = 365, count: int = 8,
 
     if not r["results"]:
         return {"results": [], "note": (
-            f"没查到「{keyword}」的竞品广告。如实告诉用户,并建议换个更通用的英文词试试。"
-            "**不要编造广告数据或素材链接。**")}
+            f"没查到「{keyword}」的竞品广告(共匹配 {r.get('总匹配数', 0)} 条)。"
+            "如实告诉用户,并建议:①换个更通用的英文词;②把 country 留空试试不限国家;"
+            "③关掉 active_only 看看历史投过的。**不要编造广告数据或素材链接。**")}
 
     return {
         **r,
         "note": ("用**表格**列给用户看,每条用 `![广告N](thumbnail)` 插图。"
-                 "**必须带上「投放天数」和「预估曝光」** —— 这是这个功能的价值所在:"
-                 "投得越久说明越跑得动,比图库的图多了市场验证。"
+                 "**必须带上「投放天数」和「版位数」** —— 这是这个功能的价值所在:"
+                 "投得久、铺得广 = 广告主愿意持续为它花钱,比图库的图多了市场验证。"
                  "顺便帮用户**总结这些高效广告的共同点**(画面风格、有没有真人、"
                  "有没有价格/优惠字样、文案角度),这比单纯给图有用得多。"
-                 "**每一条都要显示「落地页域名」** —— 这个平台是全球的,"
-                 "排第一的可能是马来西亚(.com.my)或别的市场的广告。"
-                 "别人在别的市场跑得好,不代表在美国跑得好,用户要自己能看得出来。"
                  "\n\n**必须提醒用户一句**:这些是其它广告主正在投的广告素材,"
                  "**直接拿来投有版权风险,平台也可能拒审**;更稳妥的用法是照着它的"
-                 "思路自己拍一张或找张图库的图。用户坚持要用的话,调 use_found_creative 转存。"),
+                 "思路自己拍一张或找张图库的图,或者用 decompose_creative 拆开学套路。"
+                 "用户坚持要用的话,调 use_found_creative 转存。"),
     }
 
 
@@ -1915,47 +1913,44 @@ class AccountIn(BaseModel):
 
 
 class SpyCredsIn(BaseModel):
-    authorization: str = ""
-    cookie: str = ""
+    api_key: str = ""
 
 
-@app.get("/api/insightrackr")
+@app.get("/api/competitor")
 def get_spy_creds(request: Request):
-    """竞品查询凭据的现状:配没配、是自己贴的还是用公用的、掩码预览。"""
+    """竞品查询 key 的现状:配没配、是自己贴的还是用公用的、掩码预览。"""
     user = _current_user(request)
-    mine = acc.get_creds(user["id"], "insightrackr") if user else {}
-    auth = str(mine.get("authorization") or "")
+    mine = acc.get_creds(user["id"], "openadlibrary") if user else {}
+    key = str(mine.get("api_key") or "")
     return {
-        "configured": ir.is_configured(),
-        "source": "自己贴的" if auth else ("公用配置" if ir.is_configured() else "未配置"),
-        "masked": _mask(auth) if auth else "",
+        "configured": oal.is_configured(),
+        "source": "自己贴的" if key else ("公用配置" if oal.is_configured() else "未配置"),
+        "masked": _mask(key) if key else "",
         "updated_at": mine.get("updated_at", ""),
-        "howto": ir.HOWTO,
+        "howto": oal.HOWTO,
     }
 
 
-@app.post("/api/insightrackr/token")
+@app.post("/api/competitor/token")
 def set_spy_creds(body: SpyCredsIn, request: Request):
-    """贴一对新凭据。**先验证再保存** —— 验不过就不覆盖旧的。
+    """贴一把新的 API key。**先验证再保存** —— 验不过就不覆盖旧的。
 
-    和存 NewsBreak token 一个规矩:填错一次不该把原来能用的那份冲掉。
+    和存 NewsBreak token 一个规矩:填错一次不该把原来能用的那把冲掉。
     """
     user = _current_user(request)
     if not user:
         return JSONResponse(status_code=401, content={"error": "请先登录"})
-    auth = (body.authorization or "").strip()
-    if not auth:
-        return JSONResponse(status_code=400, content={
-            "error": "Authorization 不能为空 —— 真正的登录票据是它,光换 Cookie 没用"})
-    ok, msg = ir.validate(auth, body.cookie or "")
+    key = (body.api_key or "").strip()
+    if not key:
+        return JSONResponse(status_code=400, content={"error": "API key 不能为空"})
+    ok, msg = oal.validate(key)
     if not ok:
         return JSONResponse(status_code=400, content={"error": msg, "kept_old": True})
-    acc.set_creds(user["id"], "insightrackr", authorization=auth,
-                  cookie=(body.cookie or "").strip(),
+    acc.set_creds(user["id"], "openadlibrary", api_key=key,
                   updated_at=sched.now_beijing().strftime("%Y-%m-%d %H:%M"))
-    ir.CURRENT_CREDS.set(acc.get_creds(user["id"], "insightrackr"))
-    print(f"[spy] {user['username']} 更新了 Insightrackr 凭据", flush=True)
-    return {"ok": True, "masked": _mask(auth), "note": "凭据已验证通过并保存,现在就能用"}
+    oal.CURRENT_CREDS.set(acc.get_creds(user["id"], "openadlibrary"))
+    print(f"[spy] {user['username']} 更新了 OpenAdLibrary API key", flush=True)
+    return {"ok": True, "masked": _mask(key), "note": "key 已验证通过并保存,现在就能用"}
 
 
 @app.post("/api/account/select")
@@ -2255,13 +2250,13 @@ OPENAI_TOOL_SCHEMAS = [
               "source": {"type": "string", "enum": ["auto", "pexels", "pixabay", "openverse"],
                          "description": "图库,默认 auto(有钥匙的商业图库优先)"}}, ["keyword"]),
     _oa_tool("search_competitor_ads",
-             "查竞品正在投的真实广告(Insightrackr):素材长什么样、投了多久、预估曝光多少。"
+             "查竞品正在投的真实原生广告(OpenAdLibrary):素材长什么样、投了多久、铺了多少版位。"
              "用户想知道同行在投什么、或想找有市场验证的创意思路时用。"
-             "比图库强在这些是真金白银在投的广告,投得久=跑得动",
+             "比图库强在这些是真金白银在投的广告",
              {"keyword": {"type": "string", "description": "英文关键词,按品类给,如 roof repair"},
-              "days": {"type": "integer", "description": "往前看多少天,默认365,最多365;想看最近的新广告就调小"},
-              "count": {"type": "integer", "description": "要几条,默认8,最多40"},
-              "country": {"type": "string", "description": '两位大写国家码如 "US"。一般留空——硬筛美国会几乎没结果'}},
+              "count": {"type": "integer", "description": "要几条,默认8,最多50"},
+              "country": {"type": "string", "description": '两位大写国家码,默认 "US";留空则不限国家'},
+              "active_only": {"type": "boolean", "description": "只看现在还在投的,默认 true"}},
              ["keyword"]),
     _oa_tool("decompose_creative",
              "拆解一张广告素材:看懂它的版式、画面、文字层、配色、CTA 和文案角度。"
