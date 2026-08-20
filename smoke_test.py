@@ -826,6 +826,42 @@ def test_creative_render():
         return None
     check("生图走确认关卡:先报价、能挑版、查重、保险丝", t_propose)
 
+    # 生图很贵($0.20/张),所以**能失败的免费步骤必须排在花钱之前**。
+    # 血泪:第一版把文件名放在 cr.render() 之后算,图已生成、钱已付,却卡在起名上,
+    # 那一张的钱白花了。这条只能靠读源码守 —— 真跑一次要花钱。
+    def t_cheap_first():
+        import inspect
+        # 注意:注释里也写着 cr.render(),直接 index 会先命中注释 —— 要按**真正的调用点**找
+        src = "\n".join(ln for ln in inspect.getsource(srv._execute_make_creatives).splitlines()
+                         if not ln.strip().startswith("#"))
+        i_render, i_name = src.index("img = cr.render("), src.index("fname =")
+        if i_name > i_render:
+            return "文件名在生图之后才算 —— 起名失败会让已付费的图白扔"
+        if src.index("check_balance") > i_render:
+            return "余额检查排在生图之后,等于没查"
+        if src.index("local.write_bytes") > src.index("upload_asset"):
+            return "本地留档排在上传之后 —— 上传失败就等于钱付了图没了"
+        return None
+    check("花钱之前先做完所有免费又可能失败的步骤", t_cheap_first)
+
+    # 存进媒体库时 mediaName 是必填的,不给就 400(实测踩过,那一张的钱也白花了)
+    def t_media_name():
+        import inspect
+        src = inspect.getsource(srv._execute_make_creatives)
+        if "media_name=" not in src:
+            return "上传时没传 mediaName,存媒体库会报 400"
+        return None
+    check("上传素材带上必填的 mediaName", t_media_name)
+
+    # 成本必须是实测值。按公开单价算出来的 $0.05 实际差了 4 倍,
+    # 报低了会让用户以为很便宜,批量生成时才发现烧了不少。
+    def t_cost():
+        c = cr.COST_PER_IMAGE_USD
+        if not (0.10 <= c <= 0.40):
+            return f"单张成本 ${c} 不在实测区间(2026-08-20 实测 $0.203)"
+        return None
+    check("单张成本是实测校正过的值", t_cost)
+
     # 三处工具表漏注册一处,就是"某条大脑路径上这个工具不存在"
     def t_registered():
         tables = {

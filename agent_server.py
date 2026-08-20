@@ -863,6 +863,11 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
 
 _CREATIVE_PLANS: list[dict] = []   # 最近一次 summarize 出的方案(供生图工具照做)
 
+# 生成好的图先存这儿再上传。生图是花过钱的,上传万一失败也不能把图弄丢。
+# data/ 已被 .gitignore 排除。
+_GENERATED_DIR = Path(__file__).parent / "data" / "generated"
+_GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
     """把归纳出的方案**做成可投放的广告图**(AI 画无字底图 + 代码叠字),登记成待办等确认。
@@ -929,17 +934,48 @@ def _execute_make_creatives(a: dict) -> dict:
     except Exception as e:
         return {"error": f"拿不到广告账户:{e}"}
 
+    # 生图很贵(实测约 $0.20/张),所以**先看够不够钱**再动手。
+    # 不查的话会出现"3 张生到第 2 张余额见底",前面的钱照花、活没干完。
+    need = len(plans) * cr.COST_PER_IMAGE_USD
+    left = cr.check_balance()
+    if left is not None and left < need:
+        return {"error": f"生图通道余额不够:还剩 ${left:.2f},这一单大约要 ${need:.2f}。"
+                         f"请先充值,充完直接说一声重新确认就行(待办还在)。"}
+
+    import re as _re
+
     made, failed = [], []
     for idx, plan in zip(a.get("indexes", []), plans):
         tag = f"第{idx + 1}版「{plan.get('命名') or ''}」"
         try:
-            img = cr.render(str(plan.get("画面怎么拍") or ""),
+            # **所有不花钱、但可能失败的准备工作都放在生图之前。**
+            # 血泪:第一版把文件名放在 cr.render() 之后算,结果图已经生成、钱已经付了,
+            # 却卡在起名这种零成本的事上,那一张的钱就白花了。
+            slug = _re.sub(r"[^A-Za-z0-9]+", "-", plan.get("命名") or "").strip("-")[:24]
+            fname = f"gen-{slug or 'ad'}-{idx + 1}.jpg"
+            scene = str(plan.get("画面怎么拍") or "")
+            if not scene.strip():
+                raise RuntimeError("这一版没有「画面怎么拍」,没法生图")
+
+            img = cr.render(scene,
                             str(plan.get("主标题") or ""),
                             str(plan.get("描述") or ""),
                             str(plan.get("CTA") or plan.get("cta") or "Learn More"))
-            fname = f"gen-{_re.sub(r'[^A-Za-z0-9]+', '-', plan.get('命名') or 'ad')[:24]}-{idx + 1}.jpg"
+
+            # **图一生成就先落盘。** 到这一步钱已经花掉了($0.20/张),
+            # 后面上传再失败的话,不留个副本就是"钱付了、东西没了"。
+            # (实测踩过两次:一次卡在起文件名,一次卡在 mediaName 必填。)
+            local = _GENERATED_DIR / fname
             try:
-                data = nb.upload_asset(acct, fname, img, "image/jpeg", save_to_library=True)
+                local.write_bytes(img)
+            except Exception as e:
+                print(f"[write-op] 本地留档失败(不影响上传):{e}", flush=True)
+
+            # mediaName 是必填的 —— 存进媒体库时不给就报 400(实测)
+            media_name = (str(plan.get("主标题") or plan.get("命名") or "AI creative"))[:60]
+            try:
+                data = nb.upload_asset(acct, fname, img, "image/jpeg",
+                                       save_to_library=True, media_name=media_name)
             except Exception as up:
                 # 平台按内容查重,重了就不存媒体库再传一次(和 use_found_creative 同款降级)
                 if "409" not in str(up) and "already exists" not in str(up).lower():
@@ -954,7 +990,9 @@ def _execute_make_creatives(a: dict) -> dict:
                          "asset_url": url})
             print(f"[write-op] 生成素材 {tag} → {url}", flush=True)
         except Exception as e:
-            failed.append(f"{tag}:{str(e)[:150]}")
+            # 图已经生成(钱已花)但后续出错时,把本地副本的位置说出来 —— 别让钱白花
+            saved = f"(图已存在 {local})" if 'local' in dir() and local.exists() else ""
+            failed.append(f"{tag}:{str(e)[:150]}{saved}")
 
     if not made:
         return {"error": "一张都没做成 —— " + ";".join(failed)}

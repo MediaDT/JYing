@@ -29,9 +29,11 @@ AD_SIZE = (1200, 628)        # NewsBreak 建议的广告图尺寸
 GEN_SIZE = "1536x1024"       # 生成时就用横版(3:2),裁到 1200×628 只切边不伤主体
 IMAGE_MODEL = "openai/gpt-image-1.5"
 
-# 一张 1536×1024 的粗略成本,只用来在确认前给用户一个数量级的预期。
-# 依据 ofox 报的 output_image 单价 × 官方 token 数;**不是账单**,所以措辞要留余地。
-COST_PER_IMAGE_USD = 0.05
+# 一张 1536×1024 的成本,用来在确认前给用户预期、以及生成前判断余额够不够。
+# **$0.20 是实测值**(2026-08-20 记余额 → 生成一张 → 再记余额,差值 $0.2028),
+# 不是按单价估的 —— 一开始按 ofox 报的 output_image 单价 × 官方 token 数算出 $0.05,
+# 实际是它的 4 倍。**这类"按公开单价算出来的成本"一律要拿账单实测校正。**
+COST_PER_IMAGE_USD = 0.20
 
 TIMEOUT = 240.0
 
@@ -51,6 +53,26 @@ _BASE_RULES = (
     "Photorealistic advertising photography, bright natural daylight, "
     "sharp focus on the subject, wide landscape composition."
 )
+
+
+def check_balance(*, base_url: str = "", api_key: str = "") -> float | None:
+    """查生图通道还剩多少钱。查不到返回 None(不因为查不到就拦住用户)。
+
+    ofox 的这个接口不在 OpenAI 方言里(文档没写,是试出来的),所以要容错:
+    换了中转商就可能没有,那时应当放行而不是报错。
+    """
+    base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
+    api_key = api_key or os.getenv("OPENAI_API_KEY") or ""
+    if not base_url or not api_key:
+        return None
+    try:
+        r = httpx.get(f"{base_url}/user/balance", timeout=20, trust_env=False,
+                      headers={"Authorization": f"Bearer {api_key}"})
+        if r.status_code != 200:
+            return None
+        return float(r.json()["balance"])
+    except Exception:
+        return None
 
 
 def build_prompt(scene: str) -> str:
