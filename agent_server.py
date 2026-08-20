@@ -280,9 +280,11 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      方案里带「⚠️查重」标记的,说明那句文案和竞品原句太像,要提醒用户换个说法。
      拿到方案后有三条路拿到图,**都要告诉用户**:
      **(a) 让系统直接做出来 → propose_make_creatives** ——
-       AI 只画**没有文字**的画面,标题/描述/CTA 由**代码精确排版**压上去
-       (所以英文不会拼错、位置每次都一样,便于 A/B 对比)。
-       **要花钱**(每张几分钱),所以走确认关卡:先报价请用户点头,才真的生成。
+       出的是**干净的实拍画面,图上一个字都没有**。标题、描述和行动按钮是
+       NewsBreak **自己渲染**的独立字段,建广告时填进去即可;烧在图上会重复一遍,
+       还会和平台的真按钮撞在一起。每一版换一种镜头(远景/特写/仰拍…),
+       画面真的不同,才测得出哪种构图好使。
+       **要花钱**(每张约 $0.20),所以走确认关卡:先报价请用户点头,才真的生成。
        做好会直接传进素材库,说一句「用第N张建广告」就能接着建;
      (b) 用 search_stock_creatives 去授权图库找一张对得上的;
      (c) 按「画面怎么拍」自己拍。
@@ -420,10 +422,12 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
    · **If they want to "build one following what competitors do" → call decompose_creative on a few
      After a brief is ready, there are **three** ways to get the actual image —
      tell the user all three: **(a) have the system make it → propose_make_creatives**
-     (the model paints a **text-free** picture; headline/description/CTA are composited
-     by code, so English is never misspelled and placement is identical every time.
-     **It costs money**, so it goes through the confirm gate: quote first, generate only
-     after the user agrees); (b) find a matching licensed photo via search_stock_creatives;
+     (a **clean photograph with no text on it at all** — NewsBreak renders the headline,
+     description and call-to-action itself as separate fields, so burning them into the
+     image duplicates the copy and collides with the platform's real button. Each variant
+     uses a different shot — wide, close-up, low-angle — so the pictures genuinely differ
+     and an A/B test measures something. **It costs money** (~$0.20 per image), so it goes
+     through the confirm gate: quote first, generate only after the user agrees); (b) find a matching licensed photo via search_stock_creatives;
      (c) shoot it themselves following the art direction.
      (at least 2), then summarize_creative_patterns**. What comes back is **copy plus an art-direction
      brief — not an image**; say so plainly so they do not think the image already exists.
@@ -741,7 +745,10 @@ def _account_categories(ad_account_id: str = "") -> dict:
     查回来的是**别人行业**的广告,用户看半天全是无关的。
     和命名那条「类型词对不上必须问用户、不许自己编」是同一条规矩。
     """
-    key = ad_account_id or "_default"
+    # **缓存键必须带上是谁**。原来大家不指定账户时都落在同一个 "_default" 键上,
+    # B 登录后会直接读到 A 的品类 —— 每人各绑各的账号(第六之四节),
+    # 派生出来的数据同样不能串。
+    key = f"{CURRENT_USER_ID.get() or '-'}::{ad_account_id or '_default'}"
     hit = _MY_CATS_CACHE.get(key)
     if hit and (time.time() - hit["at"]) < _MY_CATS_TTL:
         return hit["val"]
@@ -954,7 +961,7 @@ _GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
-    """把归纳出的方案**做成可投放的广告图**(AI 画无字底图 + 代码叠字),登记成待办等确认。
+    """把归纳出的方案**做成可投放的广告图**(干净实拍,图上不放文字),登记成待办等确认。
 
     要先跑过 summarize_creative_patterns —— 只能照着**真归纳出来的方案**做图,
     不接受现编的文案(和 use_found_creative 一个道理,防止 AI 自己造内容去渲染)。
@@ -1002,14 +1009,15 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
         "尺寸": f"{cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}",
         "预估花费": f"约 ${cost:.2f}(每张约 ${cr.COST_PER_IMAGE_USD:.2f})",
         "note": (f"向用户复述:要做哪几版(列出主标题)、成品尺寸、**大概花多少钱**、"
-                 f"以及待办编号 {aid}。说明白两件事:①图上的文字是**代码精确排版**上去的,"
-                 f"不是 AI 手写,所以不会拼错;②AI 只负责画没有文字的画面。"
+                 f"以及待办编号 {aid}。说明白两件事:①出的是**干净的实拍图,图上没有文字** ——"
+                 f"标题和按钮由 NewsBreak 自己渲染,建广告时填进去就行;"
+                 f"②每一版用**不同的镜头**,画面真的不一样,方便测出哪种好使。"
                  f"**这条消息里不许调 confirm_action**,等用户下一条消息同意。"),
     }
 
 
 def _execute_make_creatives(a: dict) -> dict:
-    """真生成:逐版画底图 → 叠字 → 传进 NewsBreak 换 assetUrl。"""
+    """真生成:逐版画一张干净的实拍图 → 传进 NewsBreak 换 assetUrl。"""
     plans = [_CREATIVE_PLANS[i] for i in a.get("indexes", []) if i < len(_CREATIVE_PLANS)]
     if not plans:
         return {"error": "方案已经不在了(可能中途重新归纳过)。请重新登记一次。"}
@@ -2543,8 +2551,9 @@ OPENAI_TOOL_SCHEMAS = [
               "lang": {"type": "string", "description": "zh 或 en,跟随界面语言"}}, []),
     _oa_tool("propose_make_creatives",
              "把 summarize_creative_patterns 归纳出的方案做成可投放的广告图"
-             f"({cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}):AI 画没有文字的画面,代码把标题/描述/CTA "
-             "精确排版上去(所以不会拼错字)。要花钱,所以只登记待办,等用户确认后才生成",
+             f"({cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}):干净的实拍画面,**图上不放任何文字** —— "
+             "标题和按钮由 NewsBreak 自己渲染。每版换一种镜头。"
+             "要花钱(约 $0.20/张),所以只登记待办,等用户确认后才生成",
              {"variants": {"type": "string", "description": "要做哪几版,如 '1,3';留空=全做"},
               "ad_account_id": _ID}, []),
     _oa_tool("use_found_creative",

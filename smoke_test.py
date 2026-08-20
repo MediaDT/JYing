@@ -754,6 +754,43 @@ def test_creative_render():
         return None
     check("默认出干净的图(文字交给平台字段,不画假按钮)", t_clean_default)
 
+    # 品类缓存**不能跨用户串**。原来大家不指定账户时都落在同一个 "_default" 键上,
+    # B 登录后会直接读到 A 的品类 —— 和第六之四节"每人绑各自的账号"是同一条底线。
+    def t_cats_isolated():
+        srv._MY_CATS_CACHE.clear()
+        srv.CURRENT_USER_ID.set("smoke-A")
+        a_key = [k for k in ("smoke-A::_default",)][0]
+        srv._MY_CATS_CACHE[a_key] = {"at": 9e9, "val": {"品类": ["__a_only__"]}}
+        srv.CURRENT_USER_ID.set("smoke-B")
+        got = srv._account_categories().get("品类") or []
+        srv._MY_CATS_CACHE.clear()
+        srv.CURRENT_USER_ID.set(None)
+        if "__a_only__" in got:
+            return "B 读到了 A 的品类缓存 —— 缓存键没带用户"
+        return None
+    check("账户品类缓存不会串到别人身上", t_cats_isolated)
+
+    # **话术必须跟着行为一起改。** 这次把默认从"叠字"改成"出干净图"时,
+    # 六处描述(中英提示词、两个 docstring、提议话术、OpenAI schema)全都留在原地,
+    # 而五套测试当时是全绿的 —— 助手会照着旧话术跟用户说"文字是代码排上去的",
+    # 实际图上根本没字。项目规矩第 6 条说的就是这个。
+    def t_copy_matches_behavior():
+        import inspect
+        if inspect.signature(cr.render).parameters["overlay"].default is not False:
+            return None      # 哪天默认改回叠字了,这条自然不适用
+        stale = ("代码精确排版", "代码把标题", "composited\n     by code", "代码叠字")
+        hits = []
+        for text, where in ((srv.SYSTEM_PROMPT, "中文提示词"),
+                            (srv.SYSTEM_PROMPT_EN, "英文提示词"),
+                            (inspect.getdoc(srv.propose_make_creatives) or "", "propose docstring"),
+                            (inspect.getdoc(srv._execute_make_creatives) or "", "执行 docstring"),
+                            (inspect.getsource(srv.propose_make_creatives), "提议话术/schema")):
+            for kw in stale:
+                if kw.replace("\n     ", " ") in text.replace("\n", " "):
+                    hits.append(f"{where} 还在说「{kw.strip()}」")
+        return "默认已经不叠字了,但这些地方还在描述旧行为:" + ";".join(hits) if hits else None
+    check("对用户的说法和代码实际行为一致(没有残留的旧话术)", t_copy_matches_behavior)
+
     # 三版要靠**镜头语言**拉开差距。第一版三张用同一套模板 + 相近提示词,
     # 出来几乎一模一样,做 A/B 时变量只有文案,画面等于没变。
     def t_variety():

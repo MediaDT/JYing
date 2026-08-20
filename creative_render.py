@@ -86,6 +86,10 @@ def check_balance(*, base_url: str = "", api_key: str = "") -> float | None:
 
     ofox 的这个接口不在 OpenAI 方言里(文档没写,是试出来的),所以要容错:
     换了中转商就可能没有,那时应当放行而不是报错。
+
+    **注意计费有延迟**:实测什么都不做、隔 8 秒再读,余额也会往下掉
+    (上一笔请求还在结算)。所以这里读到的数偏高一点是正常的,
+    只能当"够不够"的粗略判断,别拿它做精确对账。
     """
     base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
     api_key = api_key or os.getenv("OPENAI_API_KEY") or ""
@@ -189,12 +193,8 @@ def compose(base_image: bytes, headline: str, description: str, cta: str,
             size: tuple[int, int] = AD_SIZE) -> bytes:
     """把文案确定性地压到底图上,返回成品 JPEG 字节。"""
     W, H = size
-    im = Image.open(io.BytesIO(base_image)).convert("RGB")
-
-    # 等比放大后居中裁切 —— 直接 resize 会把画面拉变形
-    s = max(W / im.width, H / im.height)
-    im = im.resize((max(W, round(im.width * s)), max(H, round(im.height * s))), Image.LANCZOS)
-    im = im.crop(((im.width - W) // 2, 0, (im.width - W) // 2 + W, H))
+    # 叠字时从顶部裁:文字压在上方,那块留白不能被切掉
+    im = _fit(base_image, size, top_anchored=True)
 
     # 顶部压一层由深到透的遮罩。**这层不能省**:白字压在亮天空上会糊成一片,
     # 而底图长什么样我们事先并不知道,只能靠遮罩兜住对比度。
@@ -231,15 +231,28 @@ def compose(base_image: bytes, headline: str, description: str, cta: str,
     return buf.getvalue()
 
 
-def _to_jpeg(image: bytes, size: tuple[int, int] = AD_SIZE) -> bytes:
-    """只裁到广告位尺寸,不加任何东西。"""
+def _fit(image: bytes, size: tuple[int, int], top_anchored: bool) -> Image.Image:
+    """等比放大后裁到目标尺寸(不拉伸变形)。
+
+    **top_anchored 决定从哪儿裁,这个区别很要紧**:
+    · 叠字时从**顶部**裁 —— 文字在上方,得保住那块留白;
+    · 不叠字时**居中**裁 —— 3:2 的原图裁成 1200×628 要去掉 22% 的高度,
+      一律从底部切的话,主体在下半部分的照片(蹲着干活的人、地上的材料)
+      正好被切掉。实测这批图的主体基本都在中下部。
+    """
     W, H = size
     im = Image.open(io.BytesIO(image)).convert("RGB")
     s = max(W / im.width, H / im.height)
     im = im.resize((max(W, round(im.width * s)), max(H, round(im.height * s))), Image.LANCZOS)
-    im = im.crop(((im.width - W) // 2, 0, (im.width - W) // 2 + W, H))
+    x = (im.width - W) // 2
+    y = 0 if top_anchored else (im.height - H) // 2
+    return im.crop((x, y, x + W, y + H))
+
+
+def _to_jpeg(image: bytes, size: tuple[int, int] = AD_SIZE) -> bytes:
+    """只裁到广告位尺寸,不加任何东西。"""
     buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=92)
+    _fit(image, size, top_anchored=False).save(buf, format="JPEG", quality=92)
     return buf.getvalue()
 
 
