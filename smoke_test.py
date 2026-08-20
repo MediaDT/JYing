@@ -862,6 +862,34 @@ def test_creative_render():
         return None
     check("单张成本是实测校正过的值", t_cost)
 
+    # 查竞品的关键词**不许 AI 自己编**。实测:用户只问了句"同行都在跑什么广告",
+    # AI 编了个 roof,而账户实际投的是 gutter/window —— 查回来全是别的行业的广告。
+    # 和命名那条「类型词对不上必须问用户」是同一条规矩,同样要守在代码里。
+    def t_keyword_guard():
+        import inspect
+        src = inspect.getsource(srv.search_competitor_ads)
+        if "_account_categories" not in src:
+            return "查竞品时没有比对账户实际在投的品类,AI 编的关键词没人拦"
+        if "⚠️关键词提醒" not in src:
+            return "关键词对不上时没有给出提醒字段"
+        for tbl, name in (([f.__name__ for f in srv.NEWSBREAK_TOOLS], "Gemini 工具表"),
+                          (list(srv.OPENAI_TOOL_FUNCS), "OpenAI 函数表"),
+                          ([t["function"]["name"] for t in srv.OPENAI_TOOL_SCHEMAS], "OpenAI schema")):
+            if "my_ad_categories" not in tbl:
+                return f"my_ad_categories 没注册进{name}"
+        return None
+    check("查竞品的关键词不许 AI 自己编(代码层比对账户品类)", t_keyword_guard)
+
+    # 提示词里也要写明白,两种语言都要 —— 只写中文的话英文模式下模型会照旧自己编
+    def t_keyword_prompt():
+        zh, en = srv.SYSTEM_PROMPT, srv.SYSTEM_PROMPT_EN
+        if "my_ad_categories" not in zh:
+            return "中文提示词没说「先看账户在投什么,别自己编关键词」"
+        if "my_ad_categories" not in en:
+            return "英文提示词没说这条 —— 英文模式下模型会照旧自己编关键词"
+        return None
+    check("双语提示词都写了「关键词先看账户、别自己编」", t_keyword_prompt)
+
     # 站点图标:四个页面都要有,而且**未登录时也得能取到** ——
     # 图标是在登录页就要显示的,被登录门拦住的话标签页还是那个默认小地球。
     def t_favicon():

@@ -17,6 +17,7 @@ import json
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 
 import anthropic
@@ -112,6 +113,7 @@ _TOOL_LABELS = {
     "recommend_creatives": "正在从你的历史广告里挑好素材…",
     "search_stock_creatives": "正在从授权图库里找素材…",
     "search_competitor_ads": "正在查竞品正在投的广告…",
+    "my_ad_categories": "正在看你的账户在投什么品类…",
     "decompose_creative": "正在拆解这条广告的创意结构…",
     "summarize_creative_patterns": "正在归纳套路、拟我们自己的方案…",
     "use_found_creative": "正在把选中的素材存进你的账户…",
@@ -261,6 +263,12 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      用户选定后调 `use_found_creative` 转存,**拿到 assetUrl 才能建广告**
      —— 图库那个 image_url 不能直接当 asset_url 用。
    · **用户想知道"同行都在投什么" → 调 search_competitor_ads**(查竞品正在投的真实原生广告)。
+     **关键词绝不许自己编**:用户没说品类时,**先调 my_ad_categories** 看他账户实际在投什么,
+     按那个查,并明说「我按 <品类> 查的,要看别的品类跟我说」。账户里也认不出来时**直接问他**
+     「你们主要做什么?」。编一个关键词的后果是:查回来全是**别的行业**的广告,
+     用户看半天才发现对不上(实测发生过:只问了句"同行在跑什么",AI 自己编了 roof,
+     而账户投的是 gutter 和 window)。
+     返回里带 `⚠️关键词提醒` 时,**必须先把这件事告诉用户并确认**,不许直接往下讲结果。
      它比图库多了**市场验证**:投得久、铺的版位多 = 广告主愿意持续为它花钱。列表里要带上
      **投放天数**和**版位数**,并帮用户**总结这些高效广告的共同点**
      (画面风格、有没有真人、有没有价格/优惠字样、文案角度)—— 这比单纯给图有用。
@@ -395,6 +403,12 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
      "not recommended" too, explaining what is wrong with them** — do not quietly show only the good ones.
      Once they pick one, call `use_found_creative` to transfer it in; **you need the returned assetUrl to create
      the ad** — the library's image_url is NOT an asset_url.
+   · **Never invent the keyword.** If the user did not say which category, call
+     **my_ad_categories** first to see what their own account actually advertises, search that,
+     and say plainly "I searched <category> — tell me if you want a different one".
+     If the account reveals nothing, **ask them** what business they are in.
+     When the result carries `⚠️关键词提醒`, raise that with the user and confirm
+     BEFORE presenting any findings.
    · **If they want to know what competitors are running → call search_competitor_ads**, which pulls real ads
      other advertisers are currently running. Its advantage over stock is **market validation**: an ad that has
      run for months across many placements demonstrably works. Include **days running** and **placements**, and **summarise
@@ -713,6 +727,63 @@ def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -
         return {"error": f"搜素材失败:{str(e)[:200]}"}
 
 
+# 「这个账户到底在投什么品类」缓存一小会儿。查一次要拉两个列表接口,
+# 而一轮对话里可能问好几次竞品,每次都重拉太慢。
+_MY_CATS_CACHE: dict = {}
+_MY_CATS_TTL = 600.0
+
+
+def _account_categories(ad_account_id: str = "") -> dict:
+    """看这个账户**实际在投什么品类** —— 依据是计划名和广告标题里的真实文字。
+
+    **为什么要有这个**:用户问"同行都在投什么"时并没说品类,AI 就自己编了一个
+    (实测编出 roof,而该账户投的其实是 gutter 和 window)。编出来的关键词
+    查回来的是**别人行业**的广告,用户看半天全是无关的。
+    和命名那条「类型词对不上必须问用户、不许自己编」是同一条规矩。
+    """
+    key = ad_account_id or "_default"
+    hit = _MY_CATS_CACHE.get(key)
+    if hit and (time.time() - hit["at"]) < _MY_CATS_TTL:
+        return hit["val"]
+
+    texts: list[str] = []
+    try:
+        acct = ad_account_id or _default_ad_account_id()
+        # limit 只能取平台允许的固定值([5,10,20,50,100,200,500]),50 在列表里
+        for c in (nb.list_campaigns(acct, limit=50).get("items") or []):
+            texts.append(str(c.get("name") or ""))
+        for a in (nb.list_ads(acct, limit=50).get("items") or []):
+            texts.append(str(a.get("name") or ""))
+            ct = (a.get("creative") or {}).get("content") or {}
+            texts.append(str(ct.get("headline") or ""))
+            texts.append(str(ct.get("description") or ""))
+    except Exception as e:
+        return {"error": f"看不了账户在投什么:{str(e)[:120]}"}
+
+    blob = " ".join(texts).lower()
+    counts = {t: blob.count(t) for t in KNOWN_AD_TYPES if blob.count(t) > 0}
+    ranked = sorted(counts, key=lambda t: -counts[t])
+    val = {"品类": ranked, "出现次数": counts,
+           "依据条数": len([t for t in texts if t.strip()])}
+    _MY_CATS_CACHE[key] = {"at": time.time(), "val": val}
+    return val
+
+
+def my_ad_categories(ad_account_id: str = "") -> dict:
+    """看这个广告账户**自己在投什么品类**(从计划名和广告文案里认)。
+
+    问"同行在投什么"却没说品类时,**先用这个**,别自己编一个关键词。
+    """
+    r = _account_categories(ad_account_id)
+    if r.get("error"):
+        return {**r, "note": "看不出来就**直接问用户做什么品类**,不要自己编一个关键词。"}
+    if not r.get("品类"):
+        return {**r, "note": "账户里认不出已知品类,**必须问用户**「你们主要做什么?」,"
+                             "拿到答复再去查竞品,不许自己编关键词。"}
+    return {**r, "note": f"这个账户主要在投:{'、'.join(r['品类'])}。"
+                         f"查竞品时用这个当关键词,并**告诉用户你是按哪个查的、可以换**。"}
+
+
 def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
                           active_only: bool = True, sort_by: str = "placements",
                           min_days: int = 0) -> dict:
@@ -722,7 +793,9 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
     比图库强的地方:这些是**真金白银在投的广告**,铺的版位越多、投得越久,
     说明广告主越愿意为它花钱 —— 图库的图只是"好看",没有这个背书。
 
-    keyword:英文关键词,按品类给,如 "roof repair" / "gutter guard";
+    keyword:英文关键词,按品类给,如 "gutter guard" / "roof repair"。
+      **用户没说做什么品类时,先调 my_ad_categories 看他自己在投什么,不要自己编一个**
+      —— 编出来的关键词查回来的是别的行业,用户看半天全是无关的广告;
     count:要几条(默认8,最多50);
     country:两位大写国家码,默认 US(NewsBreak 是美国平台);留空则不限;
     active_only:只看**现在还在投**的,默认开(实测能把结果收窄到约七分之一);
@@ -742,6 +815,17 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
                         "**不用去改配置文件,点顶栏的 🕵️ 按钮贴一下新 key 就行。**"}
     except Exception as e:
         return {"error": f"查竞品广告失败:{str(e)[:200]}"}
+
+    # 关键词跟这个账户实际在投的品类对不上时,**代码层直接点出来**。
+    # 实测:用户只问了一句"同行都在跑什么广告",AI 自己编了 roof,
+    # 而该账户投的是 gutter 和 window —— 查回来的全是别人行业的广告。
+    # 光靠提示词嘱咐是不够的(和文案查重、素材登记表是同一个思路)。
+    cats = _account_categories()
+    mine = cats.get("品类") or []
+    if mine and not any(t in (keyword or "").lower() for t in mine):
+        r["⚠️关键词提醒"] = (
+            f"你搜的是「{keyword}」,但这个广告账户实际在投的是:{'、'.join(mine)}。"
+            f"**先跟用户确认要查哪个品类再往下说** —— 别把别的行业的广告当成他的同行。")
 
     for item in r["results"]:
         _SEARCHED_ASSETS[item["image_url"]] = item
@@ -1576,7 +1660,7 @@ def cancel_action(action_id: str) -> dict:
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
-    recommend_creatives, search_stock_creatives, search_competitor_ads,
+    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -2424,6 +2508,10 @@ OPENAI_TOOL_SCHEMAS = [
               "count": {"type": "integer", "description": "要几张,1~12,默认6"},
               "source": {"type": "string", "enum": ["auto", "pexels", "pixabay", "openverse"],
                          "description": "图库,默认 auto(有钥匙的商业图库优先)"}}, ["keyword"]),
+    _oa_tool("my_ad_categories",
+             "看这个广告账户自己在投什么品类(从计划名和广告文案里认)。"
+             "用户问「同行在投什么」却没说品类时,先调这个,不要自己编关键词",
+             {"ad_account_id": _ID}, []),
     _oa_tool("search_competitor_ads",
              "查竞品正在投的真实原生广告(OpenAdLibrary):素材长什么样、投了多久、铺了多少版位。"
              "用户想知道同行在投什么、或想找有市场验证的创意思路时用。"
@@ -2482,7 +2570,7 @@ OPENAI_TOOL_SCHEMAS = [
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
-    recommend_creatives, search_stock_creatives, search_competitor_ads,
+    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
