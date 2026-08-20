@@ -1041,10 +1041,12 @@ def _execute_make_creatives(a: dict) -> dict:
             if not scene.strip():
                 raise RuntimeError("这一版没有「画面怎么拍」,没法生图")
 
-            img = cr.render(scene,
-                            str(plan.get("主标题") or ""),
-                            str(plan.get("描述") or ""),
-                            str(plan.get("CTA") or plan.get("cta") or "Learn More"))
+            # **默认出干净的实拍图,图上不放任何文字和按钮。**
+            # NewsBreak 的 headline / description / callToAction 是和 assetUrl
+            # 并列的独立字段,平台自己会渲染;图上再来一遍就是重复,
+            # 画个假按钮更是和平台的真按钮并排出现。理由详见 cr.render 的注释。
+            # variant=idx 让每一版换一种镜头语言 —— 否则三张画面几乎一样,A/B 测不出东西。
+            img = cr.render(scene, variant=idx)
 
             # **图一生成就先落盘。** 到这一步钱已经花掉了($0.20/张),
             # 后面上传再失败的话,不留个副本就是"钱付了、东西没了"。
@@ -1083,8 +1085,11 @@ def _execute_make_creatives(a: dict) -> dict:
     detail = f"做好 {len(made)} 张广告图" + (f";另有 {len(failed)} 张失败:" + ";".join(failed) if failed else "")
     return {"done": True, "detail": detail, "created": made,
             "note": ("把每张图用 `![第N版](asset_url)` 插进回复让用户直接看到,"
-                     "并列出对应的主标题和描述。告诉用户:**图已经传进素材库了**,"
-                     "说一句「用第N张建广告」就能直接拿去建。"
+                     "并列出对应的主标题和描述。说清三件事:"
+                     "①**图上是干净的画面,没有文字** —— 标题、描述和行动按钮是"
+                     "NewsBreak 自己渲染的独立字段,建广告时填进去就行,烧在图上反而重复;"
+                     "②每一版用了**不同的镜头**(远景/特写/仰拍…),方便真正测出哪种画面好使;"
+                     "③**图已经传进素材库**,说一句「用第N张建广告」就能直接拿去建。"
                      + ("有失败的要如实点名说明。" if failed else ""))}
 
 

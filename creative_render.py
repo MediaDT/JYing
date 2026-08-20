@@ -41,18 +41,44 @@ _FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 # 底图的硬规矩。**写死在代码里,不放提示词模板里由 AI 拼** ——
-# 少了任何一条,画出来的图就没法安全叠字或有版权风险。
+# 少了任何一条就是版权风险,或者画出来的图根本不能用。
 _BASE_RULES = (
     "ABSOLUTELY NO TEXT of any kind: no letters, no numbers, no words, no captions, "
     "no watermarks, no signage, no license plates, no readable labels. "
     "NO logos, NO brand marks, NO trademarks, NO company names. "
     "Do not imitate any existing advertisement or brand. "
-    "Keep the UPPER THIRD of the frame visually calm and uncluttered (open sky, "
-    "plain wall or soft background) so that text can be overlaid there later; "
-    "put the main subject in the lower half. "
-    "Photorealistic advertising photography, bright natural daylight, "
-    "sharp focus on the subject, wide landscape composition."
+    "Landscape composition, 3:2 aspect."
 )
+
+# 质量方向。**照着真正跑得动的竞品广告定的**,不是凭感觉:
+# 实测版位数最高的几条(3245 / 2108 / 1373)全是**朴素的纪实实拍** ——
+# 真人在真的干活、自然光、略带随手拍的粗糙感;没有一条是打光完美的棚拍摆拍。
+# 家装这个品类卖的就是"可信",太精致的商业摄影反而像广告、像假的。
+_QUALITY = (
+    "Candid documentary photograph, shot on a full-frame DSLR with a 35mm or 50mm lens. "
+    "Real working people in a real American residential setting, caught mid-action, "
+    "natural expressions, not posed and not looking at the camera. "
+    "Natural available daylight, realistic shadows, believable everyday imperfection "
+    "(worn tools, ordinary houses, real weather). "
+    "Sharp on the subject, honest colors, no HDR, no heavy retouching, "
+    "no glossy commercial studio look, no stock-photo perfection."
+)
+
+# 三版之间靠**镜头语言**拉开差距,不是靠换文案。
+# 血泪:第一版三张全用同一套模板 + 相近提示词,出来三张几乎一样的图,
+# 拿去做 A/B 根本测不出东西 —— 变量只有文案,画面是同一张。
+VARIETY = [
+    "Medium-wide establishing shot showing the whole house and its surroundings; "
+    "the worker is small in frame, context dominates.",
+    "Tight close-up on hands and the material or tool being worked on; "
+    "shallow depth of field, the person's face is out of frame or blurred.",
+    "Low-angle shot looking up at the worker against the sky; "
+    "strong diagonal lines from a ladder or roofline.",
+    "Over-the-shoulder view from behind the worker, showing what they see; "
+    "the house or gutter fills the far half of the frame.",
+    "Wide shot at golden hour with long shadows across the lawn; "
+    "a finished, well-kept exterior with the crew packing up in the background.",
+]
 
 
 def check_balance(*, base_url: str = "", api_key: str = "") -> float | None:
@@ -75,12 +101,18 @@ def check_balance(*, base_url: str = "", api_key: str = "") -> float | None:
         return None
 
 
-def build_prompt(scene: str) -> str:
-    """把方案里的「画面怎么拍」变成生图提示词。"""
-    return f"{(scene or '').strip()}\n\n{_BASE_RULES}"
+def build_prompt(scene: str, variant: int = 0) -> str:
+    """把方案里的「画面怎么拍」变成生图提示词。
+
+    variant:第几版(从 0 起)。用来从 VARIETY 里挑一种镜头语言,
+    **让同一批出来的几张画面真的不一样** —— 否则三张只有文案不同,A/B 测不出东西。
+    """
+    shot = VARIETY[variant % len(VARIETY)] if variant >= 0 else ""
+    parts = [(scene or "").strip(), shot, _QUALITY, _BASE_RULES]
+    return "\n\n".join(x for x in parts if x)
 
 
-def generate_base(scene: str, *, base_url: str = "", api_key: str = "",
+def generate_base(scene: str, variant: int = 0, *, base_url: str = "", api_key: str = "",
                   model: str = "") -> bytes:
     """让模型画一张无文字底图,返回图片字节。失败时抛 RuntimeError(说人话)。"""
     base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
@@ -92,7 +124,7 @@ def generate_base(scene: str, *, base_url: str = "", api_key: str = "",
         r = httpx.post(
             f"{base_url}/images/generations", timeout=TIMEOUT, trust_env=False,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model or IMAGE_MODEL, "prompt": build_prompt(scene),
+            json={"model": model or IMAGE_MODEL, "prompt": build_prompt(scene, variant),
                   "n": 1, "size": GEN_SIZE},
         )
     except httpx.HTTPError as e:
@@ -199,7 +231,38 @@ def compose(base_image: bytes, headline: str, description: str, cta: str,
     return buf.getvalue()
 
 
-def render(scene: str, headline: str, description: str, cta: str,
-           size: tuple[int, int] = AD_SIZE, **kw) -> bytes:
-    """一步到位:生成底图 + 叠字,返回成品图字节。"""
-    return compose(generate_base(scene, **kw), headline, description, cta, size)
+def _to_jpeg(image: bytes, size: tuple[int, int] = AD_SIZE) -> bytes:
+    """只裁到广告位尺寸,不加任何东西。"""
+    W, H = size
+    im = Image.open(io.BytesIO(image)).convert("RGB")
+    s = max(W / im.width, H / im.height)
+    im = im.resize((max(W, round(im.width * s)), max(H, round(im.height * s))), Image.LANCZOS)
+    im = im.crop(((im.width - W) // 2, 0, (im.width - W) // 2 + W, H))
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
+
+
+def render(scene: str, headline: str = "", description: str = "", cta: str = "",
+           size: tuple[int, int] = AD_SIZE, variant: int = 0,
+           overlay: bool = False, **kw) -> bytes:
+    """生成一张广告图。
+
+    **overlay 默认是关的,也就是出一张干净的实拍图,图上没有任何文字。**
+
+    为什么默认不叠字 —— 三条都是实打实的:
+    ① **NewsBreak 会自己渲染文字**。creative 里 `headline` / `description` /
+       `callToAction` 是和 `assetUrl` **并列的独立字段**,平台负责把它们画在图旁边。
+       再把标题烧进图里,同一句话就出现两遍。
+    ② **画一个假按钮是最糟的**。平台会渲染真的行动按钮(实测某账户是 `Get Quote`),
+       图上再画一个 `Learn More`,就成了一真一假两个按钮并排。
+    ③ **真正跑得动的竞品广告都是干净实拍**。实测版位数最高的几条
+       (3245 / 2108 / 1373)图上一个字都没有。
+
+    什么时候才打开 overlay:图要用在**平台不渲染文字**的位置(比如 Push 通知的
+    缩略图),或者用户明确要一张"自带标题"的图。那时也**不画按钮**(cta 留空即可)。
+    """
+    img = generate_base(scene, variant, **kw)
+    if not overlay:
+        return _to_jpeg(img, size)
+    return compose(img, headline, description, cta, size)

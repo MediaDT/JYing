@@ -734,10 +734,40 @@ def test_creative_render():
     # 那种图没法安全叠字,还可能有版权问题。
     def t_rules():
         pr = cr.build_prompt("a roof")
-        missing = [k for k in ("NO TEXT", "no letters", "NO logos", "UPPER THIRD")
-                   if k not in pr]
+        missing = [k for k in ("NO TEXT", "no letters", "NO logos") if k not in pr]
         return f"底图提示词少了:{missing}" if missing else None
-    check("底图提示词写死了「不许有字/logo、上部留白」", t_rules)
+    check("底图提示词写死了「不许有字、不许有 logo」", t_rules)
+
+    # **默认必须出干净的图**:NewsBreak 的 headline/description/callToAction 是和
+    # assetUrl 并列的独立字段,平台自己渲染。把标题烧进图里是重复,画个假按钮
+    # 更会和平台的真按钮并排出现。实测跑得最好的竞品广告(3245 版位)图上一个字都没有。
+    def t_clean_default():
+        import inspect
+        if inspect.signature(cr.render).parameters["overlay"].default is not False:
+            return "render 默认还在叠字 —— 平台已经渲染文字了,图上再来一遍是重复"
+        src = "\n".join(ln for ln in inspect.getsource(srv._execute_make_creatives).splitlines()
+                         if not ln.strip().startswith("#"))
+        if "overlay=True" in src:
+            return "生图时强行叠了字"
+        if "Learn More" in src:
+            return "还在往图上画假的行动按钮 —— 平台会渲染真按钮,两个会并排出现"
+        return None
+    check("默认出干净的图(文字交给平台字段,不画假按钮)", t_clean_default)
+
+    # 三版要靠**镜头语言**拉开差距。第一版三张用同一套模板 + 相近提示词,
+    # 出来几乎一模一样,做 A/B 时变量只有文案,画面等于没变。
+    def t_variety():
+        if len(cr.VARIETY) < 3:
+            return f"只有 {len(cr.VARIETY)} 种镜头,不够三版各不相同"
+        shots = {cr.build_prompt("gutter cleaning", i) for i in range(3)}
+        if len(shots) != 3:
+            return "三版的提示词有重复 —— 出来的画面会长得一样"
+        import inspect
+        src = inspect.getsource(srv._execute_make_creatives)
+        if "variant=" not in src:
+            return "生图时没把版次传下去,三张还是同一种镜头"
+        return None
+    check("三版用不同镜头,画面真的不一样", t_variety)
 
     # 实测踩过:先生成 1024×1024 方图再裁成 1200×628,会把画面下半部分的正主
     # (屋顶样品)整个裁掉,只剩虚化背景 —— 等于广告主体没了。
