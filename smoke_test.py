@@ -862,6 +862,20 @@ def test_creative_render():
         return None
     check("单张成本是实测校正过的值", t_cost)
 
+    # 站点图标:四个页面都要有,而且**未登录时也得能取到** ——
+    # 图标是在登录页就要显示的,被登录门拦住的话标签页还是那个默认小地球。
+    def t_favicon():
+        import pathlib as _pl
+        missing = [f for f in ("login.html", "platforms.html", "index.html", "dashboard.html")
+                   if "favicon.svg" not in (_pl.Path("static") / f).read_text()]
+        if missing:
+            return f"这些页面没有站点图标:{missing}"
+        for f in ("favicon.svg", "favicon-32.png", "apple-touch-icon.png"):
+            if not (_pl.Path("static") / f).exists():
+                return f"图标文件 {f} 不存在(页面引用了但文件没有 = 还是默认图标)"
+        return None
+    check("四个页面都有站点图标,文件也在", t_favicon)
+
     # 三处工具表漏注册一处,就是"某条大脑路径上这个工具不存在"
     def t_registered():
         tables = {
@@ -1272,6 +1286,13 @@ def test_http():
             srv._route_brain = orig
 
     check("流式接口是 SSE、禁用代理缓冲、能吐出 done", t_stream_sse)
+
+    def t_icon_public():
+        r = client.get("/static/favicon.svg")
+        if r.status_code != 200:
+            return f"未登录取不到站点图标(HTTP {r.status_code})—— 登录页的标签页会是默认图标"
+        return None
+    check("未登录也能取到站点图标", t_icon_public)
 
     check("Markdown 渲染库在位",
           lambda: True if client.get("/static/marked.min.js").status_code == 200 else "marked.min.js 丢了")
