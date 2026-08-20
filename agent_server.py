@@ -115,6 +115,7 @@ _TOOL_LABELS = {
     "decompose_creative": "正在拆解这条广告的创意结构…",
     "summarize_creative_patterns": "正在归纳套路、拟我们自己的方案…",
     "use_found_creative": "正在把选中的素材存进你的账户…",
+    "propose_make_creatives": "正在准备生成广告图…",
     "get_delivery_tree": "正在看这条计划底下的广告组和广告…",
     "get_report": "正在拉报表数据…",
     "propose_status_change": "正在登记开关待办…",
@@ -269,7 +270,14 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      再 summarize_creative_patterns 出方案**。产出的是**文案 + 画面方案,不是图**,
      这一点要跟用户说清楚,别让他以为图已经有了。
      方案里带「⚠️查重」标记的,说明那句文案和竞品原句太像,要提醒用户换个说法。
-     拿到方案后,用户可以按「画面怎么拍」自己拍,或用 search_stock_creatives 去图库找对上的图。
+     拿到方案后有三条路拿到图,**都要告诉用户**:
+     **(a) 让系统直接做出来 → propose_make_creatives** ——
+       AI 只画**没有文字**的画面,标题/描述/CTA 由**代码精确排版**压上去
+       (所以英文不会拼错、位置每次都一样,便于 A/B 对比)。
+       **要花钱**(每张几分钱),所以走确认关卡:先报价请用户点头,才真的生成。
+       做好会直接传进素材库,说一句「用第N张建广告」就能接着建;
+     (b) 用 search_stock_creatives 去授权图库找一张对得上的;
+     (c) 按「画面怎么拍」自己拍。
    · **仍然绝对不许**:自己编素材链接、声称能生成图片、或从上面三个工具之外的地方拿图。
      素材来源必须可查证 —— 要么是他自己账户投过的,要么是工具从授权图库搜来的(带许可证)。
      两个工具都找不到时如实说没有,并告诉他上传自己的图就行(建议 1200×628 以上、清晰、别放大段文字);
@@ -396,6 +404,13 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
      and the platform may reject it. The safer play is to shoot your own or use a stock image following the same
      idea. Only if they still want it, call use_found_creative.
    · **If they want to "build one following what competitors do" → call decompose_creative on a few
+     After a brief is ready, there are **three** ways to get the actual image —
+     tell the user all three: **(a) have the system make it → propose_make_creatives**
+     (the model paints a **text-free** picture; headline/description/CTA are composited
+     by code, so English is never misspelled and placement is identical every time.
+     **It costs money**, so it goes through the confirm gate: quote first, generate only
+     after the user agrees); (b) find a matching licensed photo via search_stock_creatives;
+     (c) shoot it themselves following the art direction.
      (at least 2), then summarize_creative_patterns**. What comes back is **copy plus an art-direction
      brief — not an image**; say so plainly so they do not think the image already exists.
      Any variant carrying a `⚠️查重` flag is too close to a competitor's own wording — tell them to reword it.
@@ -470,6 +485,7 @@ import newsbreak_client as nb  # noqa: E402
 import scheduler as sched  # noqa: E402
 import creative_search as cs  # noqa: E402
 import creative_lab as lab  # noqa: E402
+import creative_render as cr  # noqa: E402
 import openadlibrary_client as oal  # noqa: E402
 
 
@@ -778,7 +794,11 @@ def decompose_creative(image_url: str) -> dict:
                          "或者让用户自己看一遍再描述给你。"}
     try:
         data, _name, mime = cs.download(info["image_url"])
-        model = lab.decompose(data, mime)
+        # 把这条广告的文案一并传进去 —— 原生广告的文字不在图上,
+        # 只看图的话「文案角度」判断不出来(实测三张图的文字层全是空)
+        model = lab.decompose(data, mime,
+                              headline=str(info.get("title") or ""),
+                              body=str(info.get("文案") or ""))
     except Exception as e:
         return {"error": f"拆解失败:{str(e)[:200]}"}
     if model.get("error"):
@@ -823,6 +843,8 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
         return {"error": f"归纳失败:{str(e)[:200]}"}
     if out.get("error"):
         return out
+    _CREATIVE_PLANS.clear()
+    _CREATIVE_PLANS.extend(out.get("方案") or [])
     return {
         **out,
         "依据条数": len(models),
@@ -830,10 +852,118 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
                  "用表格列出来(主标题/描述/画面怎么拍/学的是哪一条)。"
                  "说清三件事:①这些方案是照着同行的**套路**写的,不是抄他们的图或文案;"
                  "②里面不含任何竞品品牌名和具体价格承诺;"
-                 "③**现在还没有图** —— 用户可以按「画面怎么拍」自己拍、"
-                 "或用 search_stock_creatives 去图库找一张对上的。"
+                 "③**现在只有方案还没有图**,拿到图有三条路,一并告诉用户:"
+                 "**(a) 让系统直接做出来** —— 调 propose_make_creatives,"
+                 "AI 画没有文字的画面、代码把文案精确排上去,做完直接能投(要花一点钱,会先问过他);"
+                 "(b) 用 search_stock_creatives 去授权图库找一张对得上的;"
+                 "(c) 按「画面怎么拍」自己拍。"
                  "用户选定某一版后,可以直接用那版的主标题和描述去建广告。"),
     }
+
+
+_CREATIVE_PLANS: list[dict] = []   # 最近一次 summarize 出的方案(供生图工具照做)
+
+
+def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
+    """把归纳出的方案**做成可投放的广告图**(AI 画无字底图 + 代码叠字),登记成待办等确认。
+
+    要先跑过 summarize_creative_patterns —— 只能照着**真归纳出来的方案**做图,
+    不接受现编的文案(和 use_found_creative 一个道理,防止 AI 自己造内容去渲染)。
+
+    variants:要做哪几版,如 "1,3";留空=全做。
+    **生图要花钱**,所以走确认关卡:先登记,用户同意后才真的生成。
+    """
+    if not _CREATIVE_PLANS:
+        return {"error": "还没有可用的方案。请先用 decompose_creative 拆几条竞品素材,"
+                         "再用 summarize_creative_patterns 归纳出方案,然后才能做图。"}
+
+    picked = list(range(len(_CREATIVE_PLANS)))
+    if (variants or "").strip():
+        picked = []
+        for chunk in str(variants).replace(",", ",").split(","):
+            chunk = chunk.strip()
+            if chunk.isdigit() and 1 <= int(chunk) <= len(_CREATIVE_PLANS):
+                picked.append(int(chunk) - 1)
+        picked = sorted(set(picked))
+        if not picked:
+            return {"error": f"没看懂要做哪几版。现在有 {len(_CREATIVE_PLANS)} 版,"
+                             f"请用编号,比如 variants='1,3'。"}
+
+    plans = [_CREATIVE_PLANS[i] for i in picked]
+    cost = len(plans) * cr.COST_PER_IMAGE_USD
+    action = {
+        "type": "make_creatives", "seq": _REQUEST_SEQ,
+        "indexes": picked, "ad_account_id": ad_account_id or "",
+        "summary": f"生成 {len(plans)} 张广告图(第 {'、'.join(str(i + 1) for i in picked)} 版)",
+    }
+    dup = _find_duplicate(action)
+    if dup:
+        return {"action_id": dup, "note": f"这一单之前已经登记过,编号 {dup},不要重复登记,"
+                                          f"用户同意后直接 confirm_action('{dup}')。"}
+    aid = uuid.uuid4().hex[:8]
+    PENDING_ACTIONS[aid] = action
+    _save_actions()
+    print(f"[write-op] 登记待办 {aid}: 生成 {len(plans)} 张广告图", flush=True)
+    return {
+        "action_id": aid,
+        "要做的图": [{"第几版": i + 1, "命名": p.get("命名", ""),
+                      "主标题": p.get("主标题", ""), "描述": p.get("描述", ""),
+                      "画面": str(p.get("画面怎么拍", ""))[:90]}
+                     for i, p in zip(picked, plans)],
+        "尺寸": f"{cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}",
+        "预估花费": f"约 ${cost:.2f}(每张约 ${cr.COST_PER_IMAGE_USD:.2f})",
+        "note": (f"向用户复述:要做哪几版(列出主标题)、成品尺寸、**大概花多少钱**、"
+                 f"以及待办编号 {aid}。说明白两件事:①图上的文字是**代码精确排版**上去的,"
+                 f"不是 AI 手写,所以不会拼错;②AI 只负责画没有文字的画面。"
+                 f"**这条消息里不许调 confirm_action**,等用户下一条消息同意。"),
+    }
+
+
+def _execute_make_creatives(a: dict) -> dict:
+    """真生成:逐版画底图 → 叠字 → 传进 NewsBreak 换 assetUrl。"""
+    plans = [_CREATIVE_PLANS[i] for i in a.get("indexes", []) if i < len(_CREATIVE_PLANS)]
+    if not plans:
+        return {"error": "方案已经不在了(可能中途重新归纳过)。请重新登记一次。"}
+    try:
+        acct = a.get("ad_account_id") or _default_ad_account_id()
+    except Exception as e:
+        return {"error": f"拿不到广告账户:{e}"}
+
+    made, failed = [], []
+    for idx, plan in zip(a.get("indexes", []), plans):
+        tag = f"第{idx + 1}版「{plan.get('命名') or ''}」"
+        try:
+            img = cr.render(str(plan.get("画面怎么拍") or ""),
+                            str(plan.get("主标题") or ""),
+                            str(plan.get("描述") or ""),
+                            str(plan.get("CTA") or plan.get("cta") or "Learn More"))
+            fname = f"gen-{_re.sub(r'[^A-Za-z0-9]+', '-', plan.get('命名') or 'ad')[:24]}-{idx + 1}.jpg"
+            try:
+                data = nb.upload_asset(acct, fname, img, "image/jpeg", save_to_library=True)
+            except Exception as up:
+                # 平台按内容查重,重了就不存媒体库再传一次(和 use_found_creative 同款降级)
+                if "409" not in str(up) and "already exists" not in str(up).lower():
+                    raise
+                data = nb.upload_asset(acct, fname, img, "image/jpeg", save_to_library=False)
+            url = data.get("assetUrl") or data.get("url") or ""
+            if not url:
+                raise RuntimeError("平台没返回素材地址")
+            _ASSET_TYPES[url] = "IMAGE"
+            made.append({"第几版": idx + 1, "命名": plan.get("命名", ""),
+                         "主标题": plan.get("主标题", ""), "描述": plan.get("描述", ""),
+                         "asset_url": url})
+            print(f"[write-op] 生成素材 {tag} → {url}", flush=True)
+        except Exception as e:
+            failed.append(f"{tag}:{str(e)[:150]}")
+
+    if not made:
+        return {"error": "一张都没做成 —— " + ";".join(failed)}
+    detail = f"做好 {len(made)} 张广告图" + (f";另有 {len(failed)} 张失败:" + ";".join(failed) if failed else "")
+    return {"done": True, "detail": detail, "created": made,
+            "note": ("把每张图用 `![第N版](asset_url)` 插进回复让用户直接看到,"
+                     "并列出对应的主标题和描述。告诉用户:**图已经传进素材库了**,"
+                     "说一句「用第N张建广告」就能直接拿去建。"
+                     + ("有失败的要如实点名说明。" if failed else ""))}
 
 
 def use_found_creative(image_url: str, ad_account_id: str = "") -> dict:
@@ -1280,6 +1410,8 @@ def confirm_action(action_id: str) -> dict:
                 "done": True, "detail": f"定时任务已生效(编号 {r['task_id']}),首次执行:{r.get('next_run', '-')}"}
         elif action.get("type") == "create_campaign":
             result = _execute_create_campaign(action)
+        elif action.get("type") == "make_creatives":
+            result = _execute_make_creatives(action)
         else:
             # 一次可能要改好几个对象(开启广告要三层一起开)。逐个改、逐个记账,
             # 有失败的也要如实说明是哪一个 —— 别让用户以为全成了。
@@ -1408,7 +1540,7 @@ NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
     recommend_creatives, search_stock_creatives, search_competitor_ads,
     decompose_creative, summarize_creative_patterns,
-    use_found_creative, get_delivery_tree,
+    use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
     propose_schedule, list_schedules, cancel_schedule,
@@ -2278,6 +2410,12 @@ OPENAI_TOOL_SCHEMAS = [
               "landing_url": {"type": "string", "description": "我们的落地页链接"},
               "n_variants": {"type": "integer", "description": "出几版方案,默认3,最多5"},
               "lang": {"type": "string", "description": "zh 或 en,跟随界面语言"}}, []),
+    _oa_tool("propose_make_creatives",
+             "把 summarize_creative_patterns 归纳出的方案做成可投放的广告图"
+             f"({cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}):AI 画没有文字的画面,代码把标题/描述/CTA "
+             "精确排版上去(所以不会拼错字)。要花钱,所以只登记待办,等用户确认后才生成",
+             {"variants": {"type": "string", "description": "要做哪几版,如 '1,3';留空=全做"},
+              "ad_account_id": _ID}, []),
     _oa_tool("use_found_creative",
              "把用户在 search_stock_creatives 结果里选中的那张图转存进 NewsBreak,"
              "换回建广告要用的 assetUrl。只接受搜索结果里出现过的地址",
@@ -2308,7 +2446,7 @@ OPENAI_TOOL_SCHEMAS = [
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     recommend_creatives, search_stock_creatives, search_competitor_ads,
     decompose_creative, summarize_creative_patterns,
-    use_found_creative, get_delivery_tree,
+    use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
     get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,

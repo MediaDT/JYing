@@ -716,6 +716,128 @@ def test_validation():
 
 # ============ 3. 写操作护栏(用假 id,不会真改) ============
 
+def test_creative_render():
+    """生成广告图:AI 画无字底图 + 代码叠字。
+
+    叠字那半是纯本地的,不花钱也不联网,可以完整测;
+    真生图要花钱,所以这里只测提示词规则、尺寸约定和报错翻译。
+    """
+    import io
+
+    import agent_server as srv
+    import creative_render as cr
+    from PIL import Image
+
+    print("\n【6】生成广告图(无字底图 + 代码叠字)")
+
+    # 底图的硬规矩必须写死在代码里。少一条就是"画出来的图自带文字或 logo" ——
+    # 那种图没法安全叠字,还可能有版权问题。
+    def t_rules():
+        pr = cr.build_prompt("a roof")
+        missing = [k for k in ("NO TEXT", "no letters", "NO logos", "UPPER THIRD")
+                   if k not in pr]
+        return f"底图提示词少了:{missing}" if missing else None
+    check("底图提示词写死了「不许有字/logo、上部留白」", t_rules)
+
+    # 实测踩过:先生成 1024×1024 方图再裁成 1200×628,会把画面下半部分的正主
+    # (屋顶样品)整个裁掉,只剩虚化背景 —— 等于广告主体没了。
+    def t_gen_size():
+        w, h = (int(x) for x in cr.GEN_SIZE.split("x"))
+        if w <= h:
+            return f"生图尺寸不是横版({cr.GEN_SIZE}),裁成广告位时会切掉主体"
+        if w / h > cr.AD_SIZE[0] / cr.AD_SIZE[1] + 0.35:
+            return f"生图比例({w}/{h})比广告位宽太多,左右会被切掉不少"
+        return None
+    check("生图时就按横版出,不先方后裁", t_gen_size)
+
+    def t_compose():
+        buf = io.BytesIO()
+        Image.new("RGB", (1536, 1024), (90, 130, 170)).save(buf, "PNG")
+        out = cr.compose(buf.getvalue(),
+                         "A Headline That Is Quite Long And Will Wrap Onto Lines",
+                         "A description line that also wraps around here.",
+                         "Get a Free Quote")
+        im = Image.open(io.BytesIO(out))
+        if im.size != cr.AD_SIZE:
+            return f"成品尺寸是 {im.size},应该是 {cr.AD_SIZE}"
+        if im.format != "JPEG":
+            return f"成品格式是 {im.format},平台要 JPEG"
+        return None
+    check("超长文案也能叠成正确尺寸的成品图", t_compose)
+
+    # 余额不足 ≠ 钥匙无效。混着说会让人跑去反复检查钥匙,而真正要做的是充值。
+    # (和坑表「400 和 401/403 不能混报」是同一条教训)
+    def t_errors():
+        class R:
+            def __init__(self, c):
+                self.status_code, self.text = c, "{}"
+            def json(self):
+                return {"error": {"message": "boom"}}
+        e402, e401, e503 = (cr._gen_error(R(c)) for c in (402, 401, 503))
+        if "余额" not in e402 or "充值" not in e402:
+            return f"402 没说清是余额问题:{e402[:60]}"
+        if "钥匙" in e402:
+            return f"402 误报成了钥匙问题:{e402[:60]}"
+        if "钥匙" not in e401:
+            return f"401 没说是钥匙问题:{e401[:60]}"
+        if "平台" not in e503:
+            return f"5xx 没说清是平台自己的问题:{e503[:60]}"
+        return None
+    check("生图报错分得清余额/钥匙/平台故障", t_errors)
+
+    # 只能照着**真归纳出来的**方案做图,不许 AI 现编文案去渲染
+    # (和 use_found_creative 只认搜索结果里的地址是同一个思路)
+    def t_needs_plan():
+        srv._CREATIVE_PLANS.clear()
+        return None if srv.propose_make_creatives().get("error") else "没方案时居然让做图了"
+    check("没归纳过方案就不许生图(防AI现编)", t_needs_plan)
+
+    def t_propose():
+        # 待办是落盘持久化的,之前跑测试造的还在 → 查重会直接命中,
+        # 拿不到"新登记"那条分支。所以先清场,跑完也把自己造的收走,
+        # 别把测试垃圾留在用户的保险箱里。
+        for k in [k for k, v in srv.PENDING_ACTIONS.items()
+                  if v.get("type") == "make_creatives"]:
+            srv.PENDING_ACTIONS.pop(k, None)
+        srv._CREATIVE_PLANS.clear()
+        srv._CREATIVE_PLANS.extend(
+            {"命名": f"方案{i}", "主标题": f"Headline {i}", "描述": "Desc.",
+             "画面怎么拍": "a roof", "CTA": "Learn More"} for i in (1, 2, 3))
+        r = srv.propose_make_creatives()
+        if not r.get("action_id"):
+            return f"没登记出待办:{r}"
+        if "$" not in str(r.get("预估花费")):
+            return "确认前没告诉用户大概花多少钱"
+        if len(r.get("要做的图") or []) != 3:
+            return "留空时应该三版全做"
+        r2 = srv.propose_make_creatives(variants="1,3")
+        if [x["第几版"] for x in r2.get("要做的图") or []] != [1, 3]:
+            return "指定 variants='1,3' 没只挑这两版"
+        if srv.propose_make_creatives(variants="1,3").get("action_id") != r2["action_id"]:
+            return "同样的一单被重复登记了(查重没生效)"
+        # 生图要花钱,同样必须守保险丝:登记和执行不能在同一条用户消息里
+        if "保险丝" not in str(srv.confirm_action(r2["action_id"]).get("error")):
+            return "生图没走保险丝,AI 可以自问自答直接花钱"
+        for k in [k for k, v in srv.PENDING_ACTIONS.items()
+                  if v.get("type") == "make_creatives"]:
+            srv.PENDING_ACTIONS.pop(k, None)
+        srv._save_actions()
+        srv._CREATIVE_PLANS.clear()
+        return None
+    check("生图走确认关卡:先报价、能挑版、查重、保险丝", t_propose)
+
+    # 三处工具表漏注册一处,就是"某条大脑路径上这个工具不存在"
+    def t_registered():
+        tables = {
+            "Gemini 工具表": [f.__name__ for f in srv.NEWSBREAK_TOOLS],
+            "OpenAI 函数表": list(srv.OPENAI_TOOL_FUNCS),
+            "OpenAI schema": [t["function"]["name"] for t in srv.OPENAI_TOOL_SCHEMAS],
+        }
+        miss = [k for k, v in tables.items() if "propose_make_creatives" not in v]
+        return f"这些表里漏了 propose_make_creatives:{miss}" if miss else None
+    check("生图工具三处工具表都注册了", t_registered)
+
+
 def test_guardrail():
     import agent_server as srv
 
@@ -1154,6 +1276,7 @@ if __name__ == "__main__":
     test_validation()
     test_guardrail()
     test_newsbreak_readonly()
+    test_creative_render()
     test_http()
 
     print("\n" + "=" * 60)
