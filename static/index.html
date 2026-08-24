@@ -953,6 +953,18 @@
       return;
     }
 
+    // **没绑账号就一条都发不出去。** 只把输入框和发送键 disabled 是不够的:
+    // 快捷提问按钮是直接调 send(q) 的,完全绕过那两个控件。实测就是这样
+    // 白白发出去一轮、烧掉一次额度,再拿回一条报错。闸门要设在 send() 里,
+    // 以后不管谁调用它都拦得住。
+    if (!PLATFORM_BOUND) {
+      var nb = document.getElementById("not-bound");
+      if (nb && nb.scrollIntoView) nb.scrollIntoView();
+      var gb = document.getElementById("go-bind");
+      if (gb && gb.focus) gb.focus();
+      return;
+    }
+
     const text = (presetText || inputEl.value).trim();
     if (!text) return;
 
@@ -1636,6 +1648,19 @@
     inputEl.disabled = true;
     inputEl.placeholder = d.notBoundTitle.replace(/\{p\}/g, p.name);
     sendBtn.disabled = true;
+    setChipsEnabled(false);   // 快捷提问也要一起停,否则点了只是"没反应"
+  }
+
+  /** 快捷提问按钮跟着绑定状态开关。点了没反应很难查,置灰能一眼看懂。 */
+  function setChipsEnabled(on) {
+    var wrap = document.getElementById("chips");
+    if (!wrap) return;
+    var kids = wrap.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      kids[i].disabled = !on;
+      kids[i].style.opacity = on ? "" : ".45";
+      kids[i].style.cursor = on ? "" : "not-allowed";
+    }
   }
 
   /** 存完 token 后回头问一次后端:这个平台现在算绑定了吗?算就把界面放开。
@@ -1658,6 +1683,7 @@
     if (row && row.remove) row.remove();
     inputEl.disabled = false;
     sendBtn.disabled = false;
+    setChipsEnabled(true);
     inputEl.placeholder = t().placeholder;
     addBubble("bot", t().boundOk.replace(/\{p\}/g, (p && p.name) || PLATFORM_NAME));
     inputEl.focus();

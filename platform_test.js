@@ -175,6 +175,27 @@ console.log("\n【8】一份凭据都没有时,要如实说没有");
     app.registry["spy-status"].textContent);
 }
 
+console.log("\n【10】没绑账号时,快捷提问也不能发出去");
+{
+  const app = boot({}, { platforms: FAKE(false) });
+  await tick(); await tick(); await tick();
+  t("输入框被停用", app.registry["input"].disabled === true);
+  t("发送键被停用", app.registry["send"].disabled === true);
+
+  // 快捷提问按钮是直接调 send(q) 的,只锁输入框拦不住它 ——
+  // 实测线上就是这样白发出去一轮、烧掉一次额度,再拿回一条报错。
+  const kids = (app.registry["chips"] || {}).children || [];
+  t("有快捷提问按钮", kids.length > 0, String(kids.length));
+  t("快捷提问也被停用了", kids.length > 0 && kids.every((b) => b.disabled === true));
+
+  // 就算有人绕过界面直接调 send(),也得拦住 —— 闸门要设在 send() 里
+  const msgsBefore = ((app.registry["messages"] || {}).children || []).length;
+  if (kids[0] && kids[0].onclick) kids[0].onclick();
+  await tick(); await tick();
+  const after = ((app.registry["messages"] || {}).children || []).length;
+  t("点了不会冒出用户气泡(请求没发出去)", after === msgsBefore, `${msgsBefore}→${after}`);
+}
+
 console.log("\n【9】点素材图能放大看(缩略图才 100px,看不清画面就白给了)");
 {
   const app = boot({}, { platforms: FAKE(true) });
