@@ -16,7 +16,6 @@
 配额:Pro 5000 次/天 + 120 次/分钟的瞬时上限
 """
 
-import contextvars
 import os
 from datetime import date, timedelta
 
@@ -35,23 +34,31 @@ HOWTO = ("拿 key 的办法:登录 openadlibrary.com → Settings → API keys �
          "然后在网页上点 🕵️ 按钮贴进去即可(不用改配置文件、不用重启)。")
 
 # 当前请求这个人自己贴的 key(在 AuthMiddleware 里设,必须设在 call_next 之前)。
-# 取值规则:**自己贴过就用自己的,没贴过就回落 .env 那份公用的** ——
-# 这是公司一份订阅的只读查询,没有"谁的数据"之分,和 NewsBreak 那种
-# "没绑就报错、绝不回落"的规矩故意不同(那边关系到各人的钱)。
-CURRENT_CREDS: contextvars.ContextVar = contextvars.ContextVar(
-    "openadlibrary_creds", default=None)
-
-
 class OpenAdLibraryError(Exception):
     pass
 
 
+# 平台的 `geoCountry` 参数**不用了,国家一律在本地筛**。
+#
+# 实测(2026-08-20)它有两种坏法,而且会交替出现:
+#   · 大多数时候直接 **503**(和 `minDaysRunning`、`lastSeenFrom` 一个毛病);
+#   · 偶尔 **200 但一条都不返回** —— 这种更阴险,看不出是坏了。
+# 只针对 503 做降级会被第二种骗过去(实测就骗到了:返回 0 条,而降级没触发)。
+# 反正每条结果都带 `geos`,本地筛既准又不会被平台的毛病影响
+# (实测 US 有结果、JP 为 0,筛得对)。这和「平台排不了的我们自己排」是同一条路子。
+
+
 def _key() -> str:
-    creds = CURRENT_CREDS.get()
-    if isinstance(creds, dict):
-        v = str(creds.get("api_key", "") or "").strip()
-        if v:
-            return v
+    """取 API key —— **全公司一份,配在 .env 里**。
+
+    这里**故意不做"每人一份"**:key 不过期、额度 5000 次/天,而且查的是公开的
+    竞品广告库,没有"谁的数据"之分。给每人配一份只会多一套要维护的界面和状态,
+    换不来任何隔离价值。(NewsBreak 那边是相反的:各人各绑,绝不回落 `.env` ——
+    因为那关系到各自的广告账户和钱。)
+
+    走 `_read_env_value` 现读文件,而不是只信进程启动时的环境变量:
+    `.env` 里后来才填上的键,运行中的进程是读不到的(第八节「空值配置读不到」)。
+    """
     try:
         import agent_server
         v = agent_server._read_env_value("OPENADLIBRARY_API_KEY")
@@ -197,6 +204,8 @@ def _normalize(item: dict) -> dict:
         "还在投": bool(item.get("isActive")),
         "广告网络": str(item.get("adNetwork") or ""),
         "投放媒体": str(item.get("trafficSource") or ""),
+        # geos 要带出来:平台的 geoCountry 参数坏掉时,靠它在本地筛国家
+        "geos": [str(g).upper() for g in (item.get("geos") or []) if g],
         "source": "OpenAdLibrary(竞品广告)",
         "source_page": "",
         # 风险标记写死在这里,不靠提示词 —— 这是别人正在投的广告素材
@@ -256,11 +265,11 @@ def search(keyword: str, count: int = 8, country: str = "US",
     pages = max(1, min(int(pages or 2), MAX_PAGES))
     per = max(1, min(int(count or 8) * 6, 50))     # 候选池开大一点才排得准
 
+    want_geo = country.strip().upper()
     pool, seen, total = [], set(), None
     for page in range(1, pages + 1):
+        # 注意不发 geoCountry,国家在本地筛(原因见上面那段注释)
         params = {"search": (keyword or "").strip(), "pageSize": per, "page": page}
-        if country.strip():
-            params["geoCountry"] = country.strip().upper()
         if active_only:
             params["status"] = "active"
         data = raw_search(**params)
@@ -277,6 +286,12 @@ def search(keyword: str, count: int = 8, country: str = "US",
             pool.append(one)
         if len(rows) < per:      # 已经到底了,别白白多打一次
             break
+
+    # 国家一律本地筛(条目自带 geos)。没有 geos 的条目保留 ——
+    # 宁可多给一条待确认的,也不要因为平台没给字段就把它悄悄丢了。
+    if want_geo:
+        pool = [x for x in pool
+                if not x.get("geos") or want_geo in [str(g).upper() for g in x["geos"]]]
 
     # 先剔掉松匹配捞进来的无关广告,再排序 —— 顺序不能反
     on_topic = [x for x in pool if _relevant(x, keyword)]

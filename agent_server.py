@@ -168,7 +168,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             nb.CURRENT_CREDS.set(acc.get_creds(user["id"], "newsbreak"))
             # 竞品查询的 key 同理按人放。注意它的取值规则和 NewsBreak 不同
             # (自己没贴就回落 .env 那份公用的),原因见 openadlibrary_client 顶部注释。
-            oal.CURRENT_CREDS.set(acc.get_creds(user["id"], "openadlibrary"))
             CURRENT_USER_ID.set(user["id"])
             return await call_next(request)
 
@@ -818,8 +817,9 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
         # key 无效 / 额度用尽 / 平台自己挂了 —— 这几种原因要原样带给用户,
         # 含糊说一句"查不到"的话,他根本不知道该换 key 还是该等一会儿。
         return {"error": str(e),
-                "note": "把这段话原样告诉用户。如果是 key 的问题,告诉他:"
-                        "**不用去改配置文件,点顶栏的 🕵️ 按钮贴一下新 key 就行。**"}
+                "note": "把这段话原样告诉用户。竞品查询用的是**公用的一份 key**"
+                        "(配在服务器的 .env 里,5000 次/天),所以 key 出问题时"
+                        "**不是用户能自己解决的**,请他找管理员看一下,别让他去翻设置。"}
     except Exception as e:
         return {"error": f"查竞品广告失败:{str(e)[:200]}"}
 
@@ -2186,43 +2186,6 @@ class AccountIn(BaseModel):
 
 class SpyCredsIn(BaseModel):
     api_key: str = ""
-
-
-@app.get("/api/competitor")
-def get_spy_creds(request: Request):
-    """竞品查询 key 的现状:配没配、是自己贴的还是用公用的、掩码预览。"""
-    user = _current_user(request)
-    mine = acc.get_creds(user["id"], "openadlibrary") if user else {}
-    key = str(mine.get("api_key") or "")
-    return {
-        "configured": oal.is_configured(),
-        "source": "自己贴的" if key else ("公用配置" if oal.is_configured() else "未配置"),
-        "masked": _mask(key) if key else "",
-        "updated_at": mine.get("updated_at", ""),
-        "howto": oal.HOWTO,
-    }
-
-
-@app.post("/api/competitor/token")
-def set_spy_creds(body: SpyCredsIn, request: Request):
-    """贴一把新的 API key。**先验证再保存** —— 验不过就不覆盖旧的。
-
-    和存 NewsBreak token 一个规矩:填错一次不该把原来能用的那把冲掉。
-    """
-    user = _current_user(request)
-    if not user:
-        return JSONResponse(status_code=401, content={"error": "请先登录"})
-    key = (body.api_key or "").strip()
-    if not key:
-        return JSONResponse(status_code=400, content={"error": "API key 不能为空"})
-    ok, msg = oal.validate(key)
-    if not ok:
-        return JSONResponse(status_code=400, content={"error": msg, "kept_old": True})
-    acc.set_creds(user["id"], "openadlibrary", api_key=key,
-                  updated_at=sched.now_beijing().strftime("%Y-%m-%d %H:%M"))
-    oal.CURRENT_CREDS.set(acc.get_creds(user["id"], "openadlibrary"))
-    print(f"[spy] {user['username']} 更新了 OpenAdLibrary API key", flush=True)
-    return {"ok": True, "masked": _mask(key), "note": "key 已验证通过并保存,现在就能用"}
 
 
 @app.post("/api/account/select")

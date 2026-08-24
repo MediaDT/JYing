@@ -281,18 +281,6 @@
   }
   .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
   /* 竞品凭据弹窗:凭据串很长,用等宽字体的多行框,贴进去能看清有没有断 */
-  .spy-label { display: block; font-size: 12.5px; font-weight: 600; margin: 14px 0 5px; color: #374151; }
-  .spy-input {
-    width: 100%; box-sizing: border-box; resize: vertical;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
-    line-height: 1.5; padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 9px;
-    background: #f9fafb; color: #111827;
-  }
-  .spy-input:focus { outline: 2px solid var(--accent1); outline-offset: 1px; background: #fff; }
-  .spy-status { font-size: 12.5px; padding: 9px 12px; border-radius: 9px; margin: 12px 0 4px; }
-  .spy-status.ok   { background: #ecfdf5; color: #065f46; }
-  .spy-status.warn { background: #fffbeb; color: #92400e; }
-  .spy-howto { display: block; margin-top: 8px; color: #6b7280; font-size: 12px; line-height: 1.65; }
   .modal-msg { font-size: 12.5px; margin-top: 12px; line-height: 1.6; }
   .modal-msg.err { color: #dc2626; }
   .modal-msg.ok { color: #16a34a; }
@@ -362,7 +350,6 @@
       <span id="user-chip" class="ghost-btn" style="display:none;cursor:default"></span>
       <button id="dash-btn" class="ghost-btn" title="打开数据大屏(KPI/趋势/AI诊断)" onclick="location.href='/dashboard'">📊 大屏</button>
       <button id="acct-btn" class="ghost-btn" title="接入 / 切换广告账户">🔗 账户</button>
-      <button id="spy-btn" class="ghost-btn" title="更新竞品查询凭据">🕵️</button>
       <button id="lang-toggle" class="ghost-btn" title="切换中文 / English">🌐 EN</button>
       <button id="new-chat" class="ghost-btn" title="开一个新对话(当前对话会存进左侧列表)">✚ 新对话</button>
     </div>
@@ -383,20 +370,6 @@
 
   <!-- 竞品查询凭据弹窗。凭据是浏览器登录态、会过期,所以要能随时贴一下就换掉,
        不用登服务器改配置文件、也不用重启 -->
-  <div class="overlay" id="spy-overlay">
-    <div class="modal">
-      <h2 id="spy-title">🕵️ 竞品查询凭据</h2>
-      <div class="desc" id="spy-desc"></div>
-      <div id="spy-status"></div>
-      <label class="spy-label" id="spy-auth-label"></label>
-      <textarea id="spy-auth" class="spy-input" rows="2" spellcheck="false"></textarea>
-      <div class="modal-msg" id="spy-msg"></div>
-      <div class="modal-actions">
-        <button class="btn-primary" id="spy-save"></button>
-        <button class="ghost-btn" id="spy-close"></button>
-      </div>
-    </div>
-  </div>
 
   <!-- 图片放大浮层。聊天里的素材缩略图只有 100~160px,看不清画面细节,
        而"看清竞品的画面长什么样"正是这个功能的意义所在 -->
@@ -476,19 +449,6 @@
       imgZoomHint: "点图片可以放大看",
       imgOpenNew: "在新标签页打开原图 ↗",
       imgLoading: "加载中…",
-      spyBtnTitle: "更新竞品查询凭据",
-      spyTitle: "🕵️ 竞品查询凭据",
-      spyDesc: "查竞品广告用的是 OpenAdLibrary 的 API key,**不会过期**。换 key 或换人用时在这里贴一下即可,立刻生效,不用重启。",
-      spyAuthLabel: "API key(以 oal_ 开头)",
-      spyHowto: "怎么拿:登录 openadlibrary.com → Settings → API keys → 新建一个。⚠️ key 只在创建时显示一次,当场复制下来。",
-      spySave: "验证并保存",
-      spyClose: "关闭",
-      spyChecking: "正在验证凭据…",
-      spySaved: "✅ 验证通过,已保存,现在就能查竞品广告了",
-      spyStatusMine: "当前:你自己的 key({m},{t} 更新)",
-      spyStatusShared: "当前:在用公用配置。贴一份你自己的 key,用量就算你自己的",
-      spyStatusNone: "当前:还没有可用凭据",
-      spyNeedAuth: "API key 不能为空",
       acctBtn: "🔗 账户",
       acctBtnTitle: "接入 / 切换广告账户",
       acctBtnUnlinked: "🔗 未接入账户",
@@ -568,19 +528,6 @@
       imgZoomHint: "Click an image to enlarge",
       imgOpenNew: "Open original in a new tab ↗",
       imgLoading: "Loading…",
-      spyBtnTitle: "Update competitor-research credentials",
-      spyTitle: "🕵️ Competitor research credentials",
-      spyDesc: "Competitor lookups use an OpenAdLibrary API key, which does **not** expire. Paste one here to switch keys or use your own — it takes effect immediately, no restart.",
-      spyAuthLabel: "API key (starts with oal_)",
-      spyHowto: "How to get it: sign in to openadlibrary.com → Settings → API keys → create one. It is shown only once at creation, so copy it right away.",
-      spySave: "Verify and save",
-      spyClose: "Close",
-      spyChecking: "Verifying…",
-      spySaved: "✅ Verified and saved — competitor lookups work now",
-      spyStatusMine: "Now using: your own key ({m}, updated {t})",
-      spyStatusShared: "Now using: the shared configuration. Paste your own key to have usage counted against it",
-      spyStatusNone: "Now using: no working credentials yet",
-      spyNeedAuth: "API key cannot be empty",
       acctBtn: "🔗 Account",
       acctBtnTitle: "Connect / switch ad account",
       acctBtnUnlinked: "🔗 Not connected",
@@ -668,9 +615,6 @@
       renderAcctBtn();
       if (document.getElementById("acct-overlay").classList.contains("show")) renderAcctModal();
     }
-    // 竞品凭据弹窗同理,也要等它自己的模块初始化完才敢调
-    if (spyReady) renderSpyModal();
-
     document.getElementById("sidebar-head").textContent = d.sidebarHead;
     document.getElementById("sidebar-toggle").title = d.sidebarToggleTitle;
     if (typeof renderConvList === "function") renderConvList();
@@ -682,7 +626,6 @@
   // ===== 页面的"记忆":完整聊天记录。API 不记事,每次都把它全量发给后端 =====
   // 存在浏览器的 localStorage 里,刷新/关标签页都不会丢(换浏览器或清缓存才会没)
   var acctReady;   // 账户模块是否已初始化(见文件末尾「广告账户接入」)
-  var spyReady;    // 竞品凭据模块是否已初始化(见文件末尾「竞品查询凭据」)
 
   const STORE_KEY = "adbot-chat-history";        // 老版本的单条历史(用于一次性迁移)
   const CONVS_KEY = "adbot-conversations";       // 新版:所有会话
@@ -1690,99 +1633,6 @@
   }
 
   loadPlatform();
-  // ===== 竞品查询凭据 =====
-  // 这份凭据是从浏览器复制的登录态、**会过期**,所以必须能随手换掉 ——
-  // 原来要 SSH 上服务器改配置文件再重启,太重了,重到人宁可不换。
-  // 注意:这个模块在文件末尾,里面的 const 不会提升,所以 applyLang 要靠
-  // spyReady 标志判断能不能调 renderSpyModal(见上面「点按钮没反应」那条教训)。
-  spyReady = false;
-  const spyBtn = document.getElementById("spy-btn");
-  const spyOverlay = document.getElementById("spy-overlay");
-  const spyMsgEl = document.getElementById("spy-msg");
-  let spyState = null;      // 后端回来的凭据现状
-
-  function renderSpyModal() {
-    const d = I18N[lang];
-    spyBtn.title = d.spyBtnTitle;
-    document.getElementById("spy-title").textContent = d.spyTitle;
-    document.getElementById("spy-desc").innerHTML =
-      escapeHtml(d.spyDesc).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      + '<br><span class="spy-howto">' + escapeHtml(d.spyHowto) + "</span>";
-    document.getElementById("spy-auth-label").textContent = d.spyAuthLabel;
-    document.getElementById("spy-save").textContent = d.spySave;
-    document.getElementById("spy-close").textContent = d.spyClose;
-
-    let txt = d.spyStatusNone;
-    if (spyState && spyState.masked) {
-      txt = d.spyStatusMine.replace("{m}", spyState.masked)
-                           .replace("{t}", spyState.updated_at || "-");
-    } else if (spyState && spyState.configured) {
-      txt = d.spyStatusShared;
-    }
-    const st = document.getElementById("spy-status");
-    st.textContent = txt;
-    st.className = "spy-status " + (spyState && spyState.configured ? "ok" : "warn");
-  }
-
-  function openSpyModal() {
-    spyMsgEl.textContent = "";
-    spyMsgEl.className = "modal-msg";
-    spyOverlay.classList.add("show");
-    renderSpyModal();
-    fetch("/api/competitor")
-      .then(function (r) { return r.json(); })
-      .then(function (d) { spyState = d; renderSpyModal(); })
-      .catch(function (e) { console.warn("查竞品凭据状态失败:", e); });
-  }
-
-  function saveSpyCreds() {
-    const d = I18N[lang];
-    const auth = document.getElementById("spy-auth").value.trim();
-    if (!auth) {
-      spyMsgEl.textContent = d.spyNeedAuth;
-      spyMsgEl.className = "modal-msg err";
-      return;
-    }
-    const btn = document.getElementById("spy-save");
-    btn.disabled = true;
-    spyMsgEl.textContent = d.spyChecking;
-    spyMsgEl.className = "modal-msg";
-    fetch("/api/competitor/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: auth }),
-    })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (res) {
-        btn.disabled = false;
-        if (!res.ok) {
-          // 验不过时后端不会覆盖旧凭据,这一点要让用户看见,不然他以为白填了
-          spyMsgEl.textContent = res.j.error || "保存失败";
-          spyMsgEl.className = "modal-msg err";
-          return;
-        }
-        spyMsgEl.textContent = I18N[lang].spySaved;
-        spyMsgEl.className = "modal-msg ok";
-        document.getElementById("spy-auth").value = "";
-        spyState = { configured: true, masked: res.j.masked, updated_at: "" };
-        renderSpyModal();
-      })
-      .catch(function (e) {
-        btn.disabled = false;
-        spyMsgEl.textContent = String(e);
-        spyMsgEl.className = "modal-msg err";
-      });
-  }
-
-  spyBtn.addEventListener("click", openSpyModal);
-  document.getElementById("spy-save").addEventListener("click", saveSpyCreds);
-  document.getElementById("spy-close").addEventListener("click", function () {
-    spyOverlay.classList.remove("show");
-  });
-  spyOverlay.addEventListener("click", function (e) {
-    if (e.target === spyOverlay) spyOverlay.classList.remove("show");
-  });
-  spyReady = true;   // 到这里这个模块的变量和函数才真正可用
 
   // ===== 图片放大 =====
   // 聊天里的素材缩略图只有 100~160px(表格里更小),而"看清竞品的画面长什么样"

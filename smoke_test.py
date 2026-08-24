@@ -185,6 +185,9 @@ def test_pure_logic():
         import inspect
         src = inspect.getsource(oal.search)
         body = src.split('"""')[2] if src.count('"""') >= 2 else src
+        # 注释里也会正当地提到它(要写清为什么不用),同样得剥掉再查 ——
+        # 只剥 docstring 不够,踩过一次了
+        body = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
         for banned in ("minDaysRunning", "lastSeenFrom", "lastSeenTo"):
             if banned in body:
                 bad.append(f"又把 {banned} 发给平台了 —— 实测它稳定 503,要自己在本地算/筛")
@@ -220,122 +223,8 @@ def test_pure_logic():
             bad.append("平台没给落地页时居然编了一个")
         return bad or True
 
-    def t_competitor_key_messages():
-        """key 失效 / 额度用尽 / 平台自己挂了,是三件事,报错要分得清 ——
-        否则用户只会瞎换 key。这条是上一个平台踩出来的教训。"""
-        import agent_server as srv
-        import openadlibrary_client as oal
-        bad = []
-        ok, msg = oal.validate("wrongprefix_123")
-        if ok or "oal_" not in msg:
-            bad.append(f"key 前缀不对时没说清楚:{msg[:60]}")
-        ok, msg = oal.validate("oal_中文混进来了")
-        if ok or "非法字符" not in msg:
-            bad.append(f"key 含中文时没说人话:{msg[:60]}")
-        import inspect
-        src = inspect.getsource(oal._check)
-        for code, kw in ((402, "额度"), (429, "频繁"), (401, "无效")):
-            if str(code) not in src:
-                bad.append(f"没有单独处理 HTTP {code}")
-        if "不是 key 的问题" not in src:
-            bad.append("5xx 没说清楚这不是 key 的问题 —— 用户会去瞎换 key")
-        # 保存接口必须先验证再存,验不过不能覆盖旧的
-        src2 = inspect.getsource(srv.set_spy_creds)
-        if src2.index("oal.validate") > src2.index("acc.set_creds"):
-            bad.append("先存了才验证 —— 填错一次就会把好 key 冲掉")
-        return bad or True
-
-    def t_competitor_relevance_guard():
-        """翻页凑候选池是**拿相关性换排序**,不是白拿的。
-
-        实测:平台默认顺序就是按相关性排的 —— 搜 roof repair 时 page=1 有 97%
-        的标题真含 roof,**page=2 只剩 17%**。不先筛一道就按"投放天数"排,
-        浮上来的会是跑得久但完全无关的广告(实测撞上过养老金、社保那类)。
-        """
-        import openadlibrary_client as oal
-        bad = []
-        cases = [
-            ({"title": "Search for roof repair near me", "文案": ""}, True,  "标题命中"),
-            ({"title": "Cheap contractors", "文案": "roof leak fix"}, True,  "正文命中"),
-            ({"title": "Social Security Changes In 2026", "文案": ""}, False, "完全无关"),
-            ({"title": "Seniors Born Between 1941-1969", "文案": "claim benefits"}, False, "跑得久但无关"),
-        ]
-        for item, want, why in cases:
-            got = oal._relevant(item, "roof repair")
-            if got != want:
-                bad.append(f"「{item['title'][:30]}」({why})判成{'相关' if got else '不相关'},错了")
-        # 关键词为空时不能把所有东西都筛掉
-        if not oal._relevant({"title": "x", "文案": ""}, ""):
-            bad.append("关键词为空时不该筛掉东西")
-        # 排序必须在筛选之后做,顺序反了就白筛
-        import inspect
-        src = inspect.getsource(oal.search)
-        if src.index("_relevant") > src.index("kept.sort"):
-            bad.append("先排序后筛选了 —— 顺序反了,无关广告照样会浮上来")
-        return bad or True
-
-    def t_competitor_local_sort():
-        """排序是我们自己做的(平台的 sort 基本没用),口径要对得上名字。"""
-        import openadlibrary_client as oal
-        pool = [
-            {"版位数": 5,   "投放天数": 60, "first_seen": "2026-06-01"},
-            {"版位数": 800, "投放天数": 10, "first_seen": "2026-08-01"},
-            {"版位数": 50,  "投放天数": 30, "first_seen": "2026-07-01"},
-        ]
-        bad = []
-        for name, want_first in (("placements", 800), ("days", 5)):
-            label, keyfn = oal.LOCAL_SORTS[name]
-            top = sorted(pool, key=keyfn)[0]
-            got = top["版位数"] if name == "placements" else top["版位数"]
-            if name == "placements" and top["版位数"] != 800:
-                bad.append(f"按版位数排,第一名应是 800,实际 {top['版位数']}")
-            if name == "days" and top["投放天数"] != 60:
-                bad.append(f"按投放天数排,第一名应是 60 天,实际 {top['投放天数']}")
-        # 缺字段不能把排序炸掉(平台有些字段会是 None)
-        try:
-            sorted([{"版位数": None, "投放天数": None, "first_seen": None}],
-                   key=oal.LOCAL_SORTS["placements"][1])
-        except TypeError as e:
-            bad.append(f"字段为 None 时排序崩了:{e}")
-        return bad or True
-
-    check("竞品查询用的参数是实测验证过的", t_competitor_params_verified)
-    check("翻页捞进来的无关广告会被筛掉", t_competitor_relevance_guard)
-    check("本地排序的口径对得上名字", t_competitor_local_sort)
-    check("竞品素材字段映射正确、带风险标记", t_competitor_normalize)
-    check("key 失效/额度/平台故障 三种报错分得清", t_competitor_key_messages)
 
     # 竞品 key 按人存。换平台之后 key 不会过期了,但"每人各贴各的"这条仍然要守。
-    def t_spy_creds_per_user():
-        import accounts as acc
-        import agent_server as srv
-        import openadlibrary_client as oal
-        bad = []
-        old = oal.CURRENT_CREDS.get()
-        try:
-            # ① 自己贴过就用自己的
-            oal.CURRENT_CREDS.set({"api_key": "oal_mine"})
-            if oal._key() != "oal_mine":
-                bad.append("没有优先用这个人自己贴的 key")
-            # ② 自己没贴就回落 .env 的公用配置。
-            #    **这里和 NewsBreak 故意不同**:那边"没绑就报错、绝不回落",
-            #    因为关系到各人的钱;这边是公司一份订阅的只读查询,回落才合理。
-            oal.CURRENT_CREDS.set({})
-            env_val = srv._read_env_value("OPENADLIBRARY_API_KEY")
-            if env_val and oal._key() != env_val:
-                bad.append("自己没贴时没有回落到公用配置")
-            # ③ 按人存取,互相看不到
-            acc.set_creds("_smoke_S1", "openadlibrary", api_key="oal_a1")
-            if acc.get_creds("_smoke_S2", "openadlibrary"):
-                bad.append("S2 读到了 S1 的 key")
-            if acc.get_creds("_smoke_S1", "openadlibrary").get("api_key") != "oal_a1":
-                bad.append("存进去又读不出来")
-        finally:
-            oal.CURRENT_CREDS.set(old)
-            acc.clear_creds("_smoke_S1", "openadlibrary")
-        return bad or True
-
-    check("竞品 key 按人存,自己没贴才用公用的", t_spy_creds_per_user)
 
 
     # 创意拆解(P0)。以下几条都不联网,纯逻辑,但守的都是真出过问题的地方。
@@ -753,6 +642,39 @@ def test_creative_render():
             return "还在往图上画假的行动按钮 —— 平台会渲染真按钮,两个会并排出现"
         return None
     check("默认出干净的图(文字交给平台字段,不画假按钮)", t_clean_default)
+
+    # 竞品 key **全公司一份,配在 .env 里**,不再做"每人贴一份"。
+    # key 不过期、5000 次/天,查的又是公开的竞品库,没有"谁的数据"之分。
+    def t_oal_single_key():
+        import pathlib
+
+        import openadlibrary_client as _oal
+        if hasattr(_oal, "CURRENT_CREDS"):
+            return "还留着按人取凭据的口子 —— 已经改成全公司一份了"
+        for path in ("/api/competitor", "/api/competitor/token"):
+            if f'"{path}"' in pathlib.Path("agent_server.py").read_text():
+                return f"{path} 接口还在,前端已经没有对应界面了"
+        if "spy" in pathlib.Path("static/index.html").read_text():
+            return "前端还残留 spy 相关代码"
+        return None
+    check("竞品 key 是全公司一份(没有残留的按人贴 key)", t_oal_single_key)
+
+    # geoCountry 有两种坏法且会交替出现:多数时候 503,偶尔 200 但返回 0 条。
+    # 只针对 503 降级会被第二种骗过去(实测骗到了),所以干脆一律本地筛。
+    def t_geo_local():
+        import inspect
+
+        import openadlibrary_client as _oal
+        body = "\n".join(ln for ln in inspect.getsource(_oal.search).splitlines()
+                          if not ln.strip().startswith("#"))
+        if "geoCountry" in body:
+            return "又把 geoCountry 发给平台了 —— 它会 503,还会静默返回 0 条"
+        if 'x.get("geos")' not in body:
+            return "没有在本地按 geos 筛国家,country 参数等于没用"
+        if '"geos"' not in inspect.getsource(_oal._normalize):
+            return "_normalize 没把 geos 带出来,本地筛国家等于没筛"
+        return None
+    check("国家一律本地筛(不发已知会坏的 geoCountry)", t_geo_local)
 
     # 品类缓存**不能跨用户串**。原来大家不指定账户时都落在同一个 "_default" 键上,
     # B 登录后会直接读到 A 的品类 —— 和第六之四节"每人绑各自的账号"是同一条底线。
