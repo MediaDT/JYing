@@ -713,6 +713,49 @@ def test_creative_render():
         return "默认已经不叠字了,但这些地方还在描述旧行为:" + ";".join(hits) if hits else None
     check("对用户的说法和代码实际行为一致(没有残留的旧话术)", t_copy_matches_behavior)
 
+    # 老板要的那条链:拆解 → **专业关键词** → 出图。关键在于生图提示词要用
+    # **从素材里真拆出来的关键词**,不是代码里写死的模板 —— 否则拆解等于白做。
+    def t_keywords():
+        import creative_lab as lab
+        if len(lab.KEYWORD_DIMENSIONS) < 9:
+            return f"拆解角度只有 {len(lab.KEYWORD_DIMENSIONS)} 个,不够拼一条完整的生图提示词"
+        keys = [en for en, _zh, _t in lab.KEYWORD_DIMENSIONS]
+        # 键名必须是英文:一开始键用中文、值里写英文名,模型直接把值里的英文词
+        # 当成了键,返回来中英混着一串,按中文名取全是空。
+        if any(not k.isascii() for k in keys):
+            return f"关键词的键必须是英文(模型会把值里的英文词当成键):{keys}"
+        if cr._KW_ORDER != keys:
+            return f"生图侧的键和拆解侧对不上:{cr._KW_ORDER} vs {keys}"
+        for want in ("shot", "lens", "light", "treatment"):
+            if want not in keys:
+                return f"少了「{want}」这个角度 —— 它直接决定出图长什么样"
+        if "生图关键词" not in lab._DECOMPOSE_PROMPT:
+            return "拆解提示词里没让模型吐关键词"
+        if "生图关键词" not in lab._summary_prompt([], "", "", 3):
+            return "归纳提示词里没让每版方案带上关键词"
+        return None
+    check("拆解能出九个角度的专业生图关键词", t_keywords)
+
+    def t_keywords_drive_prompt():
+        kw = {"subject": "a roofer", "action": "installing gutters",
+              "shot": "low-angle", "lens": "35mm f/2.8",
+              "light": "overcast daylight", "treatment": "documentary"}
+        prompt = cr.build_prompt("", 0, kw)
+        for v in kw.values():
+            if v not in prompt:
+                return f"关键词「{v}」没进提示词"
+        # 关键词里已经指定了镜头,就不该再塞模板里的镜头 —— 两句话会打架
+        if any(v in prompt for v in cr.VARIETY):
+            return "关键词已给了镜头,却还塞了模板镜头,两者会冲突"
+        # 没关键词时要能兜底,不能直接不出图
+        if len(cr.build_prompt("a roof on a house", 1)) < 100:
+            return "没有关键词时兜底失效"
+        import inspect
+        if "keywords=" not in inspect.getsource(srv._execute_make_creatives):
+            return "生成时没把关键词传下去,拆解出来的东西没用上"
+        return None
+    check("生图提示词由关键词驱动(不是写死的模板)", t_keywords_drive_prompt)
+
     # 三版要靠**镜头语言**拉开差距。第一版三张用同一套模板 + 相近提示词,
     # 出来几乎一模一样,做 A/B 时变量只有文案,画面等于没变。
     def t_variety():

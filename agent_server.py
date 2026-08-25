@@ -1004,7 +1004,9 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
         "action_id": aid,
         "要做的图": [{"第几版": i + 1, "命名": p.get("命名", ""),
                       "主标题": p.get("主标题", ""), "描述": p.get("描述", ""),
-                      "画面": str(p.get("画面怎么拍", ""))[:90]}
+                      "画面": str(p.get("画面怎么拍", ""))[:90],
+                      # 关键词是这版图长什么样的真正依据,确认前要能看到
+                      "生图关键词": p.get("生图关键词") or {}}
                      for i, p in zip(picked, plans)],
         "尺寸": f"{cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}",
         "预估花费": f"约 ${cost:.2f}(每张约 ${cr.COST_PER_IMAGE_USD:.2f})",
@@ -1046,15 +1048,21 @@ def _execute_make_creatives(a: dict) -> dict:
             slug = _re.sub(r"[^A-Za-z0-9]+", "-", plan.get("命名") or "").strip("-")[:24]
             fname = f"gen-{slug or 'ad'}-{idx + 1}.jpg"
             scene = str(plan.get("画面怎么拍") or "")
-            if not scene.strip():
-                raise RuntimeError("这一版没有「画面怎么拍」,没法生图")
+            kws = plan.get("生图关键词")
+            kws = kws if isinstance(kws, dict) and any(
+                str(v).strip() for v in kws.values()) else None
+            if not scene.strip() and not kws:
+                raise RuntimeError("这一版既没有「生图关键词」也没有「画面怎么拍」,没法生图")
 
             # **默认出干净的实拍图,图上不放任何文字和按钮。**
             # NewsBreak 的 headline / description / callToAction 是和 assetUrl
             # 并列的独立字段,平台自己会渲染;图上再来一遍就是重复,
             # 画个假按钮更是和平台的真按钮并排出现。理由详见 cr.render 的注释。
             # variant=idx 让每一版换一种镜头语言 —— 否则三张画面几乎一样,A/B 测不出东西。
-            img = cr.render(scene, variant=idx)
+            # **优先用方案里的「生图关键词」** —— 那是从竞品素材真拆出来、
+            # 再归纳出来的英文专业术语(九个角度见 creative_lab.KEYWORD_DIMENSIONS),
+            # 比中文散文精确得多。中文的「画面怎么拍」当兜底。
+            img = cr.render(scene, variant=idx, keywords=kws)
 
             # **图一生成就先落盘。** 到这一步钱已经花掉了($0.20/张),
             # 后面上传再失败的话,不留个副本就是"钱付了、东西没了"。

@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(78)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(30)、`node stream_test.js`(13)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(80)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(30)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(78)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(30)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(80)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(30)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -485,6 +485,41 @@ NewsBreak 建议的 1200×628),原图拿不到;②这类广告画面上全是文
 > 那套界面就成了纯粹的负担,已整体拆除(2026-08-20)。
 > **会过期的凭据,换起来的成本决定功能死活;不会过期的,就别为它建界面。**
 
+## 六之十三之二、生图关键词(拆解 → 关键词 → 出图 的中间一环)
+
+**老板要的那条链的关键**:拆解不是为了出份报告,是为了拿到**能直接驱动生图的专业关键词**。
+所以拆解的角度必须和「一条合格的生图提示词由哪几部分组成」对齐。
+
+九个角度(`creative_lab.KEYWORD_DIMENSIONS`,顺序即提示词里的拼接顺序):
+
+| 键 | 中文标签 | 例 |
+|---|---|---|
+| `subject` | 主体 | `middle-aged roofer in worn hi-vis vest` |
+| `action` | 动作 | `kneeling on a driveway assembling a gutter section` |
+| `environment` | 环境 | `ordinary suburban house, green lawn, parked work van` |
+| `shot` | 镜头 | `over-the-shoulder medium shot` / `low-angle` |
+| `lens` | 镜头参数 | `35mm f/2.8, shallow depth of field` |
+| `light` | 光线 | `natural overcast daylight, soft shadows` |
+| `color` | 色调 | `muted earth tones, desaturated sky` |
+| `treatment` | 质感 | `candid documentary photography, unposed` |
+| `technical` | 技术 | `sharp focus on subject, natural skin texture, no HDR` |
+
+- **顺序有讲究**:模型对提示词开头的词更敏感,所以主体/动作在前、成像技术在最后。
+- **为什么用英文**:生图模型是按英文摄影术语训练的。中文散文(「光线柔和一点」)它只能猜,
+  `overcast diffused daylight` 是它认得的词。中文的「画面怎么拍」保留着 —— 那是给人看的。
+- **键名必须是英文**。血泪:一开始键用中文、值的开头写英文名
+  (`"主体": "subject —— 画面里最主要的…"`),模型直接把值里的英文词当成了键,
+  返回来是 `主体 / action / environment` 混着的一串,按中文名取全是空。
+  **键名和值里的内容长得像,模型就会分不清哪个是键。**
+- **九项一个都不许留空**。拆解提示词里原有一条"图上没有的就留空、绝不要编",
+  模型会把它套到关键词上。但镜头、光线这些是**任何照片都必然有的属性** ——
+  留空的那几项,生成时就只能靠模板去猜,拆解等于白做。已在提示词里单列一条说明。
+- **归纳时要参考版位数高的那几条**:那是被市场验证过跑得动的画面语言。
+  同一批 N 版方案的 `shot` / `lens` **必须彼此不同**,否则 A/B 里画面这个变量等于没变。
+- 生图侧 `cr.build_prompt(scene, variant, keywords)`:**有关键词优先用关键词**,
+  中文 `scene` 当兜底;关键词里已经给了镜头就不再塞模板镜头(两句话会打架)。
+  冒烟测试守着「键名一致」「关键词真的进了提示词」「不冲突」。
+
 ## 六之十五、把方案做成广告图(creative_render.py)
 
 **默认出的是一张干净的实拍图,图上没有任何文字和按钮。**
@@ -692,7 +727,7 @@ NewsBreak 建议的 1200×628),原图拿不到;②这类广告画面上全是文
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 78 + 前端 22 + 大屏 9 + 平台 30 + 流式 13)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 80 + 前端 22 + 大屏 9 + 平台 30 + 流式 13)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -734,5 +769,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 78 / 前端 22 / 大屏 9 / 平台 30 / 流式 13)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 80 / 前端 22 / 大屏 9 / 平台 30 / 流式 13)
 → 更新本文件相关章节 → 提交 git。

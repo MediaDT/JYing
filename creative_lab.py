@@ -84,6 +84,39 @@ def _ask_vision(image: bytes, mime: str, prompt: str) -> dict:
 
 # ============ 拆解 ============
 
+# ── 生图关键词的九个角度 ───────────────────────────────────
+# **这是整条链的关键一环**:拆解不是为了写份报告,是为了拿到能直接驱动生图的
+# 专业关键词。所以拆解的角度必须和「一条合格的生图提示词由哪几部分组成」对齐 ——
+# 业内通行的结构就是下面这九段,顺序也是有讲究的(主体在前、技术在后)。
+#
+# 为什么要英文:关键词最终要喂给生图模型,而这些模型是按英文摄影术语训练的。
+# 中文散文("光线柔和一点")模型只能猜;`overcast diffused daylight` 是它认得的词。
+# 中文那份「画面怎么拍」保留着 —— 那是给人看的,两者用途不同。
+# **JSON 的键统一用英文**(中文只做显示标签)。血泪:一开始键用中文、值的开头写
+# 英文名(`"主体": "subject —— 画面里最主要的…"`),模型直接把值里的英文词当成了键,
+# 返回来是 `主体 / action / environment` 混着的一串,按中文名取全是空。
+# 键名和值里的内容长得像,模型就会分不清哪个是键。
+KEYWORD_DIMENSIONS = [
+    ("subject", "主体", "画面正中最主要的人或物,带上关键特征(年纪/穿着/材质/新旧)"),
+    ("action", "动作", "他/它正在做什么,要是**正在进行**的动作,不是摆拍姿势"),
+    ("environment", "环境", "在什么地方,周围有什么(房子类型、草坪、车、工具)"),
+    ("shot", "镜头", "景别和机位:wide establishing / medium / close-up / macro /"
+                     " over-the-shoulder / low-angle / high-angle"),
+    ("lens", "镜头参数", "焦段光圈和景深,如 35mm f/2.8 shallow depth of field"),
+    ("light", "光线", "光的来源和质地,如 natural overcast daylight, soft shadows /"
+                      " golden hour backlight / harsh midday sun"),
+    ("color", "色调", "整体色彩倾向,如 muted earth tones, desaturated sky"),
+    ("treatment", "质感", "摄影门类,如 candid documentary photography, unposed /"
+                          " editorial / product studio / phone-shot UGC"),
+    ("technical", "技术", "成像细节,如 sharp focus on subject, natural skin texture,"
+                          " no HDR, no heavy retouching"),
+]
+
+# 英文键 → 中文标签,给人看的时候用
+KEYWORD_LABELS = {en: zh for en, zh, _ in KEYWORD_DIMENSIONS}
+
+_KW_SCHEMA = ",\n    ".join(f'"{en}": "{tip}"' for en, _zh, tip in KEYWORD_DIMENSIONS)
+
 _DECOMPOSE_PROMPT = """你是广告创意分析师。看这张广告图,拆出它的「素材模型」。
 
 **只输出 JSON,不要任何解释文字。** 格式:
@@ -98,14 +131,34 @@ _DECOMPOSE_PROMPT = """你是广告创意分析师。看这张广告图,拆出�
   "信任背书": ["如 Licensed & Insured 徽章 / 五星评分 / BBB logo"],
   "文案角度": "痛点 / 优惠 / 紧迫感 / 社会证明 / 好奇心,可多个",
   "可复用的点": "这条广告值得学的是什么,一两句话",
-  "竞品标识": ["图上出现的品牌名或 logo,原样列出;没有就空数组"]
+  "竞品标识": ["图上出现的品牌名或 logo,原样列出;没有就空数组"],
+  "生图关键词": {
+    __KW_SCHEMA__
+  }
 }
 
 三条硬规矩:
 1. **只描述你真正看到的东西。** 图上没有的字段留空字符串或空数组,**绝对不要编**。
    这如果不是一张广告图(比如只是张风景照),就把 CTA、信任背书、文案角度都留空。
 2. 「文字层」里的内容要**原样照抄图上的文字**,不要翻译、不要改写。
-3. 「竞品标识」要老实列全 —— 后面要靠它把别人的品牌剔干净。"""
+3. 「竞品标识」要老实列全 —— 后面要靠它把别人的品牌剔干净。
+4. **「生图关键词」全部用英文**,而且要用**摄影和广告行业的专业说法**,
+   不是把中文直译过去。每一项是短语不是句子,同一项里可以用逗号并列几个词。
+   这一段的用途是**直接拿去生成新素材**,所以要写得让另一个人照着就能拍出同样的画面:
+   · 好:`middle-aged roofer in worn hi-vis vest`、`35mm f/2.8 shallow depth of field`、
+     `overcast diffused daylight, soft shadows`、`candid documentary photography, unposed`
+   · 不好:`a man`、`good lighting`、`nice photo`、`高质量摄影`
+5. **关键词只描述画面,不含任何文字、logo、品牌名**(那些是平台单独渲染的字段,
+   烧进图里会重复;而且带竞品品牌就是侵权)。
+6. **「生图关键词」九项一个都不许留空。** 上面第 1 条"没有就留空"针对的是
+   文字层、信任背书、竞品标识那类**图上可能真的没有**的东西;而镜头、光线、色调、
+   质感这些是**任何一张照片都必然有的属性** —— 你看到的就是某种景别、某种光线。
+   看不太准就按你的判断给最接近的专业说法(如 `medium shot, eye-level`、
+   `bright direct midday sunlight`),**不要留空**:留空的那几项,后面生成新素材时
+   就只能靠模板去猜,拆解等于白做。"""
+
+# 提示词里全是 JSON 大括号,不能用 f-string(会被当成占位符),所以事后替换
+_DECOMPOSE_PROMPT = _DECOMPOSE_PROMPT.replace("__KW_SCHEMA__", _KW_SCHEMA)
 
 
 def decompose(image: bytes, mime: str = "", headline: str = "", body: str = "") -> dict:
@@ -126,6 +179,10 @@ def decompose(image: bytes, mime: str = "", headline: str = "", body: str = "") 
 
 
 # ============ 归纳 + 出方案 ============
+
+_KW_KEYS = ",\n        ".join(
+    f'"{en}": "{tip}"' for en, _zh, tip in KEYWORD_DIMENSIONS)
+
 
 def _summary_prompt(models: list, brand: str, landing: str, n_variants: int) -> str:
     """拼归纳提示词。合规要求放在**最前面**,和 SYSTEM_PROMPT_EN 那条教训一样 ——
@@ -163,8 +220,10 @@ def _summary_prompt(models: list, brand: str, landing: str, n_variants: int) -> 
       "命名": "给这版方案起个短名字",
       "主标题": "≤90 字符,英文",
       "描述": "3~90 字符,英文",
-      "画面怎么拍": "具体到能照着去找图或拍图:主体、角度、光线、有没有人",
-      "版式建议": "文字放哪、什么颜色",
+      "画面怎么拍": "中文,给人看的:具体到能照着去找图或拍图",
+      "生图关键词": {{
+        {_KW_KEYS}
+      }},
       "学的是哪一条": "对应上面「共同点」里的哪一条"
     }}
   ],
@@ -173,7 +232,18 @@ def _summary_prompt(models: list, brand: str, landing: str, n_variants: int) -> 
 
 「方案」要出 {n_variants} 版,**角度彼此不同**(别三版都是打折促销)。
 主标题和描述的字符数限制是平台硬性要求,超了建不了广告。
-「出现次数」要如实数,数不出来就填 0,不要编。"""
+「出现次数」要如实数,数不出来就填 0,不要编。
+
+【关于「生图关键词」—— 这一段最重要,它是要直接拿去生成新素材的】
+· **全部英文,用摄影和广告行业的专业说法**,每项是短语不是句子;
+· **要从上面那批素材模型里真的归纳出来**,不是套模板 ——
+  素材模型里每条都带 `生图关键词`,尤其要看**版位数高的那几条**用的是什么镜头、
+  什么光线、什么质感,那是被市场验证过跑得动的画面语言;
+· **{n_variants} 版的「镜头」和「镜头参数」必须彼此不同**(远景/特写/仰拍/过肩…) ——
+  三版画面一样的话,A/B 测试里画面这个变量等于没变;
+· 只描述画面,**不含任何文字、logo、品牌名**;
+· 好:`middle-aged roofer in worn hi-vis vest`、`overcast diffused daylight, soft shadows`;
+  不好:`a man`、`good lighting`、`高质量摄影`。"""
 
 
 def summarize(models: list, brand: str = "", landing: str = "",

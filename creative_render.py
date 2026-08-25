@@ -105,19 +105,45 @@ def check_balance(*, base_url: str = "", api_key: str = "") -> float | None:
         return None
 
 
-def build_prompt(scene: str, variant: int = 0) -> str:
-    """把方案里的「画面怎么拍」变成生图提示词。
+# 关键词按这个顺序拼。**顺序有讲究**:生图模型对提示词开头的词更敏感,
+# 所以主体和动作排前面、成像技术细节排最后。这也是业内提示词的通行结构。
+_KW_ORDER = ["subject", "action", "environment", "shot", "lens",
+             "light", "color", "treatment", "technical"]
 
-    variant:第几版(从 0 起)。用来从 VARIETY 里挑一种镜头语言,
-    **让同一批出来的几张画面真的不一样** —— 否则三张只有文案不同,A/B 测不出东西。
+
+def build_prompt(scene: str, variant: int = 0, keywords: dict | None = None) -> str:
+    """拼生图提示词。
+
+    **优先用 `keywords`** —— 那是从竞品素材里真拆出来、再归纳出来的专业关键词
+    (九个角度见 `creative_lab.KEYWORD_DIMENSIONS`),已经是英文摄影术语,
+    模型认得,比中文散文精确得多。
+
+    `scene`(中文的「画面怎么拍」)是给人看的,同时当**兜底** ——
+    没有关键词时照样能出图,只是精度差些。
+
+    variant:第几版。**只有关键词里没交代镜头时**才从 VARIETY 补一种,
+    免得同一批几张长得一样;关键词里已经指定了镜头就别再塞,否则两句话打架。
     """
-    shot = VARIETY[variant % len(VARIETY)] if variant >= 0 else ""
-    parts = [(scene or "").strip(), shot, _QUALITY, _BASE_RULES]
+    kw = keywords if isinstance(keywords, dict) else {}
+    body = ", ".join(x for x in (str(kw.get(k) or "").strip() for k in _KW_ORDER) if x)
+
+    parts = []
+    if body:
+        parts.append(body)
+        if not (kw.get("shot") or kw.get("lens")):
+            parts.append(VARIETY[variant % len(VARIETY)])
+        # 质感/技术是"看着可信不可信"的兜底,关键词里没写就补上
+        if not (kw.get("treatment") or kw.get("technical")):
+            parts.append(_QUALITY)
+    else:
+        parts += [(scene or "").strip(), VARIETY[variant % len(VARIETY)], _QUALITY]
+
+    parts.append(_BASE_RULES)
     return "\n\n".join(x for x in parts if x)
 
 
-def generate_base(scene: str, variant: int = 0, *, base_url: str = "", api_key: str = "",
-                  model: str = "") -> bytes:
+def generate_base(scene: str, variant: int = 0, keywords: dict | None = None, *,
+                  base_url: str = "", api_key: str = "", model: str = "") -> bytes:
     """让模型画一张无文字底图,返回图片字节。失败时抛 RuntimeError(说人话)。"""
     base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "").rstrip("/")
     api_key = api_key or os.getenv("OPENAI_API_KEY") or ""
@@ -128,7 +154,7 @@ def generate_base(scene: str, variant: int = 0, *, base_url: str = "", api_key: 
         r = httpx.post(
             f"{base_url}/images/generations", timeout=TIMEOUT, trust_env=False,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model or IMAGE_MODEL, "prompt": build_prompt(scene, variant),
+            json={"model": model or IMAGE_MODEL, "prompt": build_prompt(scene, variant, keywords),
                   "n": 1, "size": GEN_SIZE},
         )
     except httpx.HTTPError as e:
@@ -258,7 +284,7 @@ def _to_jpeg(image: bytes, size: tuple[int, int] = AD_SIZE) -> bytes:
 
 def render(scene: str, headline: str = "", description: str = "", cta: str = "",
            size: tuple[int, int] = AD_SIZE, variant: int = 0,
-           overlay: bool = False, **kw) -> bytes:
+           overlay: bool = False, keywords: dict | None = None, **kw) -> bytes:
     """生成一张广告图。
 
     **overlay 默认是关的,也就是出一张干净的实拍图,图上没有任何文字。**
@@ -275,7 +301,7 @@ def render(scene: str, headline: str = "", description: str = "", cta: str = "",
     什么时候才打开 overlay:图要用在**平台不渲染文字**的位置(比如 Push 通知的
     缩略图),或者用户明确要一张"自带标题"的图。那时也**不画按钮**(cta 留空即可)。
     """
-    img = generate_base(scene, variant, **kw)
+    img = generate_base(scene, variant, keywords, **kw)
     if not overlay:
         return _to_jpeg(img, size)
     return compose(img, headline, description, cta, size)
