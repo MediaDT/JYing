@@ -115,6 +115,7 @@ _TOOL_LABELS = {
     "search_competitor_ads": "正在查竞品正在投的广告…",
     "my_ad_categories": "正在看你的账户在投什么品类…",
     "platform_kind": "正在判断这是哪类投放平台…",
+    "native_market_scan": "正在扫原生平台上什么在跑得最好…",
     "decompose_creative": "正在拆解这条广告的创意结构…",
     "summarize_creative_patterns": "正在归纳套路、拟我们自己的方案…",
     "use_found_creative": "正在把选中的素材存进你的账户…",
@@ -263,7 +264,18 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      用户选定后调 `use_found_creative` 转存,**拿到 assetUrl 才能建广告**
      —— 图库那个 image_url 不能直接当 asset_url 用。
    · **用户想知道"同行都在投什么" → 调 search_competitor_ads**(查竞品正在投的真实原生广告)。
-     **先搞清楚素材该从哪儿找**:调 `platform_kind` 判断目标平台是哪一类。
+     **先分清用户问的是哪一种**,这两种走完全不同的路:
+     **(甲)开放探索** —— 「现在什么广告跑得好」「这平台适合跑什么单子」「有什么新机会」,
+       **句子里没有品类**。→ 调 `native_market_scan` 扫全市场,给他**品类排行 + 钩子排行**。
+       **绝对不要拿他账户已有的品类去框**(别老围着 roof / gutter / window 打转)——
+       他问这话通常正是想看看现有生意之外还有什么方向,框回去等于没回答。
+     **(乙)品类明确** —— 「我要投 roof,同行怎么打」,**用户自己说了品类**。
+       → 用 `search_competitor_ads` 按那个词查。他说什么就查什么,
+       哪怕和他账户在投的对不上也照查(他可能正想试新方向),不用反复确认。
+     只有**用户没给品类、而你又必须填一个**的时候,才先用 `my_ad_categories`
+     看他账户在投什么 —— 别自己凭空编一个词。
+
+     **搞清楚素材该从哪儿找**:调 `platform_kind` 判断目标平台是哪一类。
      确定是**原生广告平台**(NewsBreak 就是),那就把**所有原生平台**
      (Taboola / Outbrain / Yahoo / MGID / Revcontent…)上跑同品类的广告都捞来学 ——
      **不要只盯着目标平台自己的广告**。这类平台之间创意套路通用,池子大得多、规律更可靠。
@@ -416,6 +428,13 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
      "not recommended" too, explaining what is wrong with them** — do not quietly show only the good ones.
      Once they pick one, call `use_found_creative` to transfer it in; **you need the returned assetUrl to create
      the ad** — the library's image_url is NOT an asset_url.
+   · **Tell the two questions apart first.** (a) An **open question** with no category
+     ("what's working right now", "what kind of offers suit this platform") → call
+     **native_market_scan** for a whole-market category + hook ranking. **Do NOT narrow it
+     to whatever their account already runs** — they are usually asking precisely because
+     they want to see beyond their current business. (b) A **stated category**
+     ("I want to run roof") → search_competitor_ads with that word, exactly as they said it,
+     even if it differs from what their account runs.
    · **Never invent the keyword.** If the user did not say which category, call
      **my_ad_categories** first to see what their own account actually advertises, search that,
      and say plainly "I searched <category> — tell me if you want a different one".
@@ -788,6 +807,34 @@ def _account_categories(ad_account_id: str = "") -> dict:
     return val
 
 
+def native_market_scan(top_n: int = 200, active_only: bool = False) -> dict:
+    """**不指定品类**,看整个原生广告市场上什么类型的单子跑得最好。
+
+    什么时候用:用户问「现在什么广告跑得好」「这个平台适合跑什么单子」
+    「有什么新机会」这类**开放问题**时。
+    **这种时候不要拿他账户已有的品类去框** —— 那会把他困在现有生意里,看不到别的方向。
+    (反过来,他明确说了"我要投 roof"时,才用 search_competitor_ads 按品类查。)
+
+    按版位数取全库最靠前的一批,汇总成**品类排行**和**钩子排行**。
+    top_n 看多少条(20~500,默认 200)。
+    """
+    try:
+        r = oal.market_scan(top_n=top_n, active_only=active_only)
+    except oal.OpenAdLibraryError as e:
+        return {"error": str(e),
+                "note": "把这段话原样告诉用户。竞品查询用的是公用的一份 key,"
+                        "key 出问题不是用户能自己解决的,请他找管理员。"}
+    except Exception as e:
+        return {"error": f"扫描失败:{str(e)[:200]}"}
+    return {**r, "note": (
+        "讲给用户听时:①先说**哪几个品类铺得最广**(用版位合计说话),并点几条真实标题当例子;"
+        "②再说**哪几种钩子最吃香** —— 那是可以跨品类照搬的,比品类本身更有用;"
+        "③如实说明「其它」占了多少,那是词典没覆盖到,**不是市场上没有**;"
+        "④**口径必须讲清楚**:版位数=铺了多少个位置,平台不给展示量和点击率,"
+        "**绝不许说成点击率或转化率**。"
+        "最后问他:要不要挑其中一个品类深入看看(那时再用 search_competitor_ads)。")}
+
+
 def platform_kind(platform: str = "") -> dict:
     """判断一个投放平台属于哪一类(原生广告平台 / 大媒体 / DSP),
     并说清**该去哪儿找竞品素材来学**。
@@ -873,9 +920,15 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
     cats = _account_categories()
     mine = cats.get("品类") or []
     if mine and not any(t in (keyword or "").lower() for t in mine):
-        r["⚠️关键词提醒"] = (
-            f"你搜的是「{keyword}」,但这个广告账户实际在投的是:{'、'.join(mine)}。"
-            f"**先跟用户确认要查哪个品类再往下说** —— 别把别的行业的广告当成他的同行。")
+        # 只是**提示**,不是拦截。用户自己说了要看别的品类是完全正常的
+        # (他可能正想找新方向),不该反过来把他框回现有生意里。
+        # 真正要拦的是"用户没给品类、模型自己编一个"那种情况。
+        r["ℹ️品类提示"] = (
+            f"你搜的是「{keyword}」,而这个账户目前在投的是:{'、'.join(mine)}。"
+            f"**这个词要是用户自己说的,就照他说的查,别多问** —— 他可能正想看新方向;"
+            f"**只有当这个词是你自己填的**(用户没指定品类)时,才跟他确认一下。"
+            f"还有:用户问的要是「现在什么广告跑得好」这类**没有品类的开放问题**,"
+            f"就不该在这儿编一个词 —— 应该改用 native_market_scan 扫全市场。")
 
     for item in r["results"]:
         _SEARCHED_ASSETS[item["image_url"]] = item
@@ -1732,7 +1785,7 @@ def cancel_action(action_id: str) -> dict:
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
-    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind,
+    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -2543,6 +2596,12 @@ OPENAI_TOOL_SCHEMAS = [
               "count": {"type": "integer", "description": "要几张,1~12,默认6"},
               "source": {"type": "string", "enum": ["auto", "pexels", "pixabay", "openverse"],
                          "description": "图库,默认 auto(有钥匙的商业图库优先)"}}, ["keyword"]),
+    _oa_tool("native_market_scan",
+             "不指定品类,看整个原生广告市场上什么类型的单子跑得最好(品类排行+钩子排行)。"
+             "用户问「现在什么广告跑得好」「这平台适合跑什么单子」这类**开放问题**时用 —— "
+             "这时不要拿他账户已有的品类去框",
+             {"top_n": {"type": "integer", "description": "看多少条,20~500,默认200"},
+              "active_only": {"type": "boolean", "description": "只看还在投的"}}, []),
     _oa_tool("platform_kind",
              "判断投放平台属于哪一类(原生广告平台/大媒体/DSP),并说清该去哪儿找竞品素材。"
              "用户说要在某平台投某品类时先调这个 —— 确定是原生平台,就去竞品库捞"
@@ -2611,7 +2670,7 @@ OPENAI_TOOL_SCHEMAS = [
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
-    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind,
+    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,

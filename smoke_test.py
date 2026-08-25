@@ -742,6 +742,38 @@ def test_creative_render():
         return None
     check("拆解回答的是「为什么跑得动」而不是「长什么样」", t_why_it_works)
 
+    # 「现在什么广告跑得好」是**开放问题**,不该被账户已有的品类框住。
+    # 上一版为了防 AI 编关键词,一律按账户品类查 —— 结果开放问题也被框回
+    # roof/gutter/window,用户看不到别的机会。防幻觉不能变成画地为牢。
+    def t_open_question():
+        import inspect
+
+        import openadlibrary_client as _oal
+        if not hasattr(_oal, "market_scan"):
+            return "没有全市场扫描,开放问题只能靠编一个关键词回答"
+        for name in ("VERTICALS", "HOOKS"):
+            if len(getattr(_oal, name, [])) < 5:
+                return f"{name} 分桶太少,汇总不出有用的排行"
+        # 提示词必须把两种问法分开,否则模型还是会拿账户品类去框
+        for kw in ("开放探索", "品类明确", "native_market_scan"):
+            if kw not in srv.SYSTEM_PROMPT:
+                return f"中文提示词里没写清「{kw}」,开放问题还是会被框回账户品类"
+        if "native_market_scan" not in srv.SYSTEM_PROMPT_EN:
+            return "英文提示词没提全市场扫描,英文模式下还是会被框住"
+        # 品类对不上时只是**提示**,不是拦截 —— 用户自己说要看别的品类很正常
+        src = inspect.getsource(srv.search_competitor_ads)
+        if "⚠️关键词提醒" in src:
+            return "品类对不上还在当成警告拦一道,用户想看新方向会被反复追问"
+        if "ℹ️品类提示" not in src:
+            return "连提示都没有了,AI 自己编关键词时没人拦"
+        for tbl, name in (([f.__name__ for f in srv.NEWSBREAK_TOOLS], "Gemini 工具表"),
+                          (list(srv.OPENAI_TOOL_FUNCS), "OpenAI 函数表"),
+                          ([t["function"]["name"] for t in srv.OPENAI_TOOL_SCHEMAS], "OpenAI schema")):
+            if "native_market_scan" not in tbl:
+                return f"native_market_scan 没注册进{name}"
+        return None
+    check("开放问题扫全市场,不被账户品类框住", t_open_question)
+
     # 素材池要跨平台:在 NewsBreak 上投,该学的是**所有原生平台**上的同品类广告,
     # 不是只看 NewsBreak 自己的。同类型平台之间创意套路通用,池子大得多。
     def t_cross_platform():
@@ -956,8 +988,8 @@ def test_creative_render():
         src = inspect.getsource(srv.search_competitor_ads)
         if "_account_categories" not in src:
             return "查竞品时没有比对账户实际在投的品类,AI 编的关键词没人拦"
-        if "⚠️关键词提醒" not in src:
-            return "关键词对不上时没有给出提醒字段"
+        if "ℹ️品类提示" not in src:
+            return "关键词对不上时没有给出提示字段"
         for tbl, name in (([f.__name__ for f in srv.NEWSBREAK_TOOLS], "Gemini 工具表"),
                           (list(srv.OPENAI_TOOL_FUNCS), "OpenAI 函数表"),
                           ([t["function"]["name"] for t in srv.OPENAI_TOOL_SCHEMAS], "OpenAI schema")):

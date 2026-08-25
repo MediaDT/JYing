@@ -313,6 +313,135 @@ def search(keyword: str, count: int = 8, country: str = "US",
     }
 
 
+# ── 品类词典(粗分桶,用来做"市场上什么在跑"的汇总) ──────────
+# **这是一份粗分桶,不是精确分类。** 靠标题里的词命中,命中不了的一律进「其它」
+# 并**如实报出占比** —— 假装分类完整比分错更糟,用户会以为看到了全貌。
+# 词典只在这里存一份,加品类改这里就行。
+VERTICALS = [
+    ("健康养生", ["weight", "belly", "fat", "pound", "diabet", "blood sugar", "blood pressure",
+                  "joint", "knee", "shoulder", "back pain", "spine", "stenosis", "nerve",
+                  "neuropathy", "hearing", "dental", "teeth", "gum", "implant",
+                  "skin", "wrinkle", "hair", "supplement", "vitamin", "collagen",
+                  "sleep apnea", "snor", "prostate", "bladder", "vision", "eye ",
+                  "throat", "mucus", "lung", "gut", "digest", "artery", "heart",
+                  "cholesterol", "cognitive", "memory", "brain", "hydrat", "doctor",
+                  "cardiologist", "surgeon", "clinic", "symptom", "remedy", "detox"]),
+    ("医美塑形", ["breast", "lift", "botox", "filler", "liposuction", "tummy tuck",
+                  "facelift", "before-and-after", "before and after"]),
+    ("家装维修", ["roof", "gutter", "window", "siding", "hvac", "furnace", "plumb",
+                  "bathroom", "shower", "kitchen", "remodel", "foundation", "driveway",
+                  "garage", "insulation", "solar", "fence", "deck", "basement",
+                  "walk-in tub", "granny pod", "adu"]),
+    ("金融投资", ["insurance", "loan", "mortgage", "refinanc", "credit", "debt",
+                  "medicare", "retire", "annuit", "invest", "stock", "crypto", "bitcoin",
+                  "trading", "bank", "savings", "tax", "settlement", "payout",
+                  "send money", "cash", "wealth", "richest", "millionaire"]),
+    ("政府补贴福利", ["grant", "benefit", "stimulus", "eligible", "qualify",
+                      "social security", "assistance", "subsid", "relief",
+                      "may be entitled", "government"]),
+    ("家居日用", ["mattress", "bedsheet", "sheets", "pillow", "sofa", "furniture",
+                  "vacuum", "air purifier", "appliance", "cookware", "showerhead",
+                  "patch", "costco", "amazon", "walmart"]),
+    ("汽车", ["car ", "cars", "suv", "truck", "vehicle", "auto ", "ev ", "tire",
+              "dealership", "lease", "drivers"]),
+    ("宠物", ["dog", "cat ", "cats", "puppy", "pet ", "vet "]),
+    ("旅游出行", ["cruise", "flight", "fly ", "business class", "hotel", "travel",
+                  "vacation", "resort", "airline"]),
+    ("科技数码", ["phone", "iphone", "laptop", "internet", "wifi", "streaming",
+                  "app ", "ai ", "chatgpt", "robot"]),
+    ("教育就业", ["job", "career", "degree", "course", "training", "hiring", "salary"]),
+    ("猎奇内容", ["you won't believe", "take a look", "look inside", "photos",
+                  "never went", "in the 1950s", "history", "celebrit", "actress",
+                  "actor", "son is", "star ", "most handsome", "most beautiful"]),
+]
+
+# 钩子套路(标题的写法)。比品类更能说明"原生平台吃哪一套"。
+HOOKS = [
+    ("资格/福利框架", ["eligible", "qualify", "if you live", "zip code", "born between",
+                       "homeowners in", "residents", "may be entitled", "who ask"]),
+    ("价格悬念", ["cost", "price", "how much", "what should", "cheap", "$", "for free"]),
+    ("否定既有认知", ["thing of the past", "stop ", "never ", "forget ", "don't ",
+                      "myth", "wrong", "changing the way"]),
+    ("清单/名单", ["companies", "ways", "things", "reasons", "signs", "tips",
+                   " list", "here are"]),
+    ("身份对号入座", ["seniors", "homeowners", "drivers", "women over", "men over",
+                     "if you're", "side sleepers", "-year-old"]),
+    ("秘诀/内幕", ["secret", "few know", "doctors", "experts say", "here's what",
+                   "here's why", "trick", "hack"]),
+    ("时间紧迫", ["before ", "now ", "2026", "this year", "deadline", "ending"]),
+]
+
+
+def _bucket(text: str, table: list) -> str:
+    """粗分桶。命中不了返回空字符串 —— **不猜**,交给上层归到「其它」。"""
+    low = (text or "").lower()
+    for name, words in table:
+        if any(w in low for w in words):
+            return name
+    return ""
+
+
+def market_scan(top_n: int = 200, active_only: bool = False) -> dict:
+    """**不指定品类**,看整个原生广告市场上什么在跑得最好。
+
+    用途:用户问「现在什么广告跑得好」「这个平台适合跑什么单子」这类**开放问题**时用 ——
+    这时不该拿他账户已有的品类去框(那会把他困在现有生意里,看不到别的机会)。
+
+    做法:按版位数取全库最靠前的一批,然后按**品类**和**钩子套路**两个维度汇总。
+    版位数 = 这条广告铺了多少个位置,是平台唯一给的"跑得动"信号
+    (展示量、点击率、转化率平台一概不给)。
+    """
+    top_n = max(20, min(int(top_n or 200), 500))
+    per = 50
+    rows, seen = [], set()
+    for page in range(1, (top_n // per) + 2):
+        params = {"pageSize": per, "page": page, "sort": "placements"}
+        if active_only:
+            params["status"] = "active"
+        data = raw_search(**params)
+        got = data.get("data") or []
+        if not got:
+            break
+        for r in got:
+            rid = r.get("id")
+            if rid and rid not in seen:
+                seen.add(rid)
+                rows.append(r)
+        if len(rows) >= top_n:
+            break
+    rows = rows[:top_n]
+
+    def tally(table):
+        agg: dict = {}
+        for r in rows:
+            text = f"{r.get('headline') or ''} {r.get('body') or ''}"
+            name = _bucket(text, table) or "其它(词典没命中)"
+            a = agg.setdefault(name, {"条数": 0, "版位数合计": 0, "例子": []})
+            a["条数"] += 1
+            a["版位数合计"] += int(r.get("placements") or 0)
+            if len(a["例子"]) < 3:
+                a["例子"].append({"标题": str(r.get("headline") or "")[:90],
+                                  "版位数": r.get("placements"),
+                                  "广告网络": r.get("adNetwork")})
+        return sorted(agg.items(), key=lambda kv: -kv[1]["版位数合计"])
+
+    nets: dict = {}
+    for r in rows:
+        n = str(r.get("adNetwork") or "(未标注)")
+        nets[n] = nets.get(n, 0) + 1
+
+    return {
+        "看了多少条": len(rows),
+        "口径": "按版位数取全库最靠前的一批。版位数=铺了多少个位置,"
+                "是平台唯一给的「跑得动」信号;展示量/点击率/转化率平台不提供。",
+        "品类排行": [{"品类": k, **v} for k, v in tally(VERTICALS)],
+        "钩子排行": [{"钩子": k, **v} for k, v in tally(HOOKS)],
+        "覆盖的原生平台": nets,
+        "提醒": "品类是靠标题里的关键词粗分的,**命中不了的都归在「其它」** —— "
+                "那一栏占比高就说明这份词典没覆盖到,别当成「这市场上没有别的品类」。",
+    }
+
+
 def param_check(keyword: str = "roof repair") -> dict:
     """**参数体检**:逐个试探哪些查询参数是真的生效的。
 
