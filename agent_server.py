@@ -114,6 +114,7 @@ _TOOL_LABELS = {
     "search_stock_creatives": "正在从授权图库里找素材…",
     "search_competitor_ads": "正在查竞品正在投的广告…",
     "my_ad_categories": "正在看你的账户在投什么品类…",
+    "platform_kind": "正在判断这是哪类投放平台…",
     "decompose_creative": "正在拆解这条广告的创意结构…",
     "summarize_creative_patterns": "正在归纳套路、拟我们自己的方案…",
     "use_found_creative": "正在把选中的素材存进你的账户…",
@@ -262,6 +263,11 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      用户选定后调 `use_found_creative` 转存,**拿到 assetUrl 才能建广告**
      —— 图库那个 image_url 不能直接当 asset_url 用。
    · **用户想知道"同行都在投什么" → 调 search_competitor_ads**(查竞品正在投的真实原生广告)。
+     **先搞清楚素材该从哪儿找**:调 `platform_kind` 判断目标平台是哪一类。
+     确定是**原生广告平台**(NewsBreak 就是),那就把**所有原生平台**
+     (Taboola / Outbrain / Yahoo / MGID / Revcontent…)上跑同品类的广告都捞来学 ——
+     **不要只盯着目标平台自己的广告**。这类平台之间创意套路通用,池子大得多、规律更可靠。
+     返回里的 `素材来自这些原生平台` 要报给用户看,让他知道覆盖面。
      **关键词绝不许自己编**:用户没说品类时,**先调 my_ad_categories** 看他账户实际在投什么,
      按那个查,并明说「我按 <品类> 查的,要看别的品类跟我说」。账户里也认不出来时**直接问他**
      「你们主要做什么?」。编一个关键词的后果是:查回来全是**别的行业**的广告,
@@ -273,6 +279,12 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
      (画面风格、有没有真人、有没有价格/优惠字样、文案角度)—— 这比单纯给图有用。
      **必须提醒**:这是别人的广告素材,直接投有版权风险、平台可能拒审;
      更稳的做法是照着思路自己拍或用图库图。用户坚持要用,才调 use_found_creative。
+   · **拆解回答的是「它为什么跑得动」,不是「它长什么样」。** 每条会给出:
+     为什么有展示 / 为什么被点(钩子类型+原话+机制)/ 为什么有转化 /
+     **亮点**(只有一个)/ 亮点为什么成立 / **如何发挥这个亮点** / 可迁移的公式。
+     讲给用户时**先讲亮点和怎么用**,画面细节次要。
+     **平台不给点击率和转化率**,所有结论都是从版位数和投放天数倒推的 ——
+     转述时要保留这个口径,**绝不许说出"点击率 X%"这类数字**,那是编的。
    · **用户想"照着同行的套路做一版" → 先 decompose_creative 拆几条(至少2条),
      再 summarize_creative_patterns 出方案**。产出的是**文案 + 画面方案,不是图**,
      这一点要跟用户说清楚,别让他以为图已经有了。
@@ -503,6 +515,7 @@ import scheduler as sched  # noqa: E402
 import creative_search as cs  # noqa: E402
 import creative_lab as lab  # noqa: E402
 import creative_render as cr  # noqa: E402
+import ad_platform_kinds as apk  # noqa: E402
 import openadlibrary_client as oal  # noqa: E402
 
 
@@ -775,6 +788,26 @@ def _account_categories(ad_account_id: str = "") -> dict:
     return val
 
 
+def platform_kind(platform: str = "") -> dict:
+    """判断一个投放平台属于哪一类(原生广告平台 / 大媒体 / DSP),
+    并说清**该去哪儿找竞品素材来学**。
+
+    用户说「我要在 X 上投 Y」时先调这个:确定 X 是原生平台,就去竞品库里
+    捞**所有原生平台**上跑 Y 的素材来拆(不只是 X 自己的),因为同类型平台之间
+    创意套路是通用的,池子大得多。认不出的平台**会明说认不出,不许猜**。
+    """
+    name = (platform or "").strip() or plat.DEFAULT_ID
+    d = apk.describe(name)
+    if d.get("认不出"):
+        return d
+    return {**d, "note": (
+        f"告诉用户:{name} 属于**{d['类型']}**。"
+        f"所以查竞品时不该只看 {name} 上的广告,而是把**所有{d['类型']}**上"
+        f"跑同一个品类的广告都捞来学 —— 这类平台之间创意套路是通用的,"
+        f"素材池大得多,规律也更可靠。查回来的结果里带 `素材来自这些原生平台`,"
+        f"可以把覆盖面报给用户看。")}
+
+
 def my_ad_categories(ad_account_id: str = "") -> dict:
     """看这个广告账户**自己在投什么品类**(从计划名和广告文案里认)。
 
@@ -827,6 +860,16 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
     # 实测:用户只问了一句"同行都在跑什么广告",AI 自己编了 roof,
     # 而该账户投的是 gutter 和 window —— 查回来的全是别人行业的广告。
     # 光靠提示词嘱咐是不够的(和文案查重、素材登记表是同一个思路)。
+    # **素材池要跨平台**:用户在 NewsBreak 上投,该学的不是"NewsBreak 上的广告",
+    # 而是**所有同类型平台上的同品类广告** —— 原生广告的玩法在 Taboola /
+    # Outbrain / Yahoo 上是通用的,池子大得多,规律也更可靠。
+    # 这里把查回来的网络分布如实报出来,让用户看得见覆盖面。
+    nets: dict = {}
+    for item in r["results"]:
+        n = str(item.get("广告网络") or "").strip() or "(未标注)"
+        nets[n] = nets.get(n, 0) + 1
+    r["素材来自这些原生平台"] = nets
+
     cats = _account_categories()
     mine = cats.get("品类") or []
     if mine and not any(t in (keyword or "").lower() for t in mine):
@@ -887,9 +930,17 @@ def decompose_creative(image_url: str) -> dict:
         data, _name, mime = cs.download(info["image_url"])
         # 把这条广告的文案一并传进去 —— 原生广告的文字不在图上,
         # 只看图的话「文案角度」判断不出来(实测三张图的文字层全是空)
-        model = lab.decompose(data, mime,
-                              headline=str(info.get("title") or ""),
-                              body=str(info.get("文案") or ""))
+        # 把投放实绩一并喂进去 —— 拆解要回答的是"它为什么跑得动",
+        # 只看一张图是答不了的。只传平台真给的字段,不给模型编的余地。
+        model = lab.decompose(
+            data, mime,
+            headline=str(info.get("title") or ""),
+            body=str(info.get("文案") or ""),
+            perf={"版位数(铺了多少个位置)": info.get("版位数"),
+                  "投放天数": info.get("投放天数"),
+                  "现在还在投": info.get("还在投"),
+                  "广告网络": info.get("广告网络"),
+                  "投放媒体": info.get("投放媒体")})
     except Exception as e:
         return {"error": f"拆解失败:{str(e)[:200]}"}
     if model.get("error"):
@@ -1681,7 +1732,7 @@ def cancel_action(action_id: str) -> dict:
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
-    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories,
+    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -2492,6 +2543,11 @@ OPENAI_TOOL_SCHEMAS = [
               "count": {"type": "integer", "description": "要几张,1~12,默认6"},
               "source": {"type": "string", "enum": ["auto", "pexels", "pixabay", "openverse"],
                          "description": "图库,默认 auto(有钥匙的商业图库优先)"}}, ["keyword"]),
+    _oa_tool("platform_kind",
+             "判断投放平台属于哪一类(原生广告平台/大媒体/DSP),并说清该去哪儿找竞品素材。"
+             "用户说要在某平台投某品类时先调这个 —— 确定是原生平台,就去竞品库捞"
+             "**所有原生平台**上跑同品类的素材来拆,不只是那一家",
+             {"platform": {"type": "string", "description": "平台名,留空=当前平台"}}, []),
     _oa_tool("my_ad_categories",
              "看这个广告账户自己在投什么品类(从计划名和广告文案里认)。"
              "用户问「同行在投什么」却没说品类时,先调这个,不要自己编关键词",
@@ -2555,7 +2611,7 @@ OPENAI_TOOL_SCHEMAS = [
 
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
-    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories,
+    recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,

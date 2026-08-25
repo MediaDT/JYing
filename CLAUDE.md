@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(80)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(30)、`node stream_test.js`(13)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(82)、`node frontend_test.js`(22)、`node dashboard_test.js`(9)、`node platform_test.js`(30)、`node stream_test.js`(13)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -36,7 +36,7 @@
           static/dashboard.html  数据大屏(KPI卡/趋势图/柱状图/AI诊断/明细表,同样双语)
 ② 大脑层  agent_server.py     三级火箭:Gemini flash → flash-lite → OpenAI通道
                              `.env` 里 BRAIN 可指定主力:auto(默认)/openai/claude
-③ 工具层  agent_server.py     24个工具:13查询(含转化事件、素材推荐、图库查找、竞品广告、创意拆解、投放树) + 1报表 + 5写操作护栏 + 3定时
+③ 工具层  agent_server.py     25个工具:13查询(含转化事件、素材推荐、图库查找、竞品广告、创意拆解、投放树) + 1报表 + 5写操作护栏 + 3定时
 ④ 客户端  newsbreak_client.py NewsBreak API 封装(读+写)
           creative_search.py   授权图库素材搜索(第六之十一节)
           openadlibrary_client.py 竞品广告查询(第六之十二节)
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(80)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(30)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(82)+ `frontend_test.js` 多会话(22)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(30)+ `stream_test.js` 流式(13),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -485,6 +485,50 @@ NewsBreak 建议的 1200×628),原图拿不到;②这类广告画面上全是文
 > 那套界面就成了纯粹的负担,已整体拆除(2026-08-20)。
 > **会过期的凭据,换起来的成本决定功能死活;不会过期的,就别为它建界面。**
 
+## 六之十三之一、拆解要回答「为什么跑得动」(不是「长什么样」)
+
+**这条最容易做偏,做偏过一次。** 第一版拆解问的是"它是怎么拍的"——出来一份摄影笔记,
+好看但没用。老板要的是:**它凭什么拿到展示、凭什么被点、凭什么有转化,
+亮点在哪,怎么把这个亮点用到我们自己的广告上。**
+
+拆解产出(`creative_lab._DECOMPOSE_PROMPT`):
+
+| 字段 | 问的是 |
+|---|---|
+| `为什么有展示` | 铺得广、投得久靠什么(题材普适?人群宽?) |
+| `为什么被点` | 钩子类型 + **钩子原话** + 为什么有效(戳中什么心理) |
+| `为什么有转化` | 承诺什么、门槛多低、信任从哪来;**看不出就写"从素材看不出"** |
+| **`亮点`** | 最值得偷师的**那一个**点 —— 只写一个 |
+| `亮点为什么成立` | 讲机制,不许只说"吸引人" |
+| **`如何发挥这个亮点`** | 换成我们的广告具体怎么做 |
+| `可迁移的公式` | 抽成一句能套用的模板 |
+| `生图关键词` | 见下一节 |
+
+- **必须把投放实绩喂进去**(`decompose(perf=...)`):只看一张图答不了"为什么跑得动"。
+  传的是平台真给的字段:版位数、投放天数、还在不在投、广告网络、投放媒体。
+- **绝不许编数据,这条守在提示词最前面**:平台**不给**展示量、点击率、转化率,
+  只给版位数和投放天数。所有结论都是从「广告主愿意持续为它花钱」倒推的,
+  写出来也要保留这个口径。**出现「点击率 3.2%」这类数字就是编的。**
+  提示词、工具说明、`SYSTEM_PROMPT` 三处都写了这条。
+- 归纳(`_summary_prompt`)同样围绕亮点:`为什么这批能跑起来`(讲机制+证据)、
+  `最该学的亮点`(只挑一个)、`可迁移的公式`,每版方案还要说清`亮点用在哪`。
+
+## 六之十三之三、素材池要跨平台(ad_platform_kinds.py)
+
+**在 NewsBreak 上投,该学的不是"NewsBreak 上的广告",而是所有同类型平台上的同品类广告。**
+原生广告的玩法(标题当钩子、图是干净实拍、文字由平台渲染)在 Taboola / Outbrain /
+Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
+
+- `platform_kind(platform)` 判断三类:**原生广告平台 / 大媒体(封闭生态)/ DSP**,
+  并说清各自的素材长什么样、能不能互相学。
+  - 原生:NewsBreak、Taboola、Outbrain、Yahoo、MGID、Revcontent、Microsoft Audience…
+  - 大媒体:Meta、Google、TikTok…(**别拿原生的套路套过去**,受众心态和版位形态都不同)
+  - DSP:The Trade Desk、DV360…(图要自己承载文字,和原生正相反)
+- **认不出的平台明说认不出,不许猜** —— 和「类型词对不上必须问用户」是同一条规矩。
+- OpenAdLibrary 实测覆盖 5 家原生网络(Yahoo/Verizon 90、Taboola 62、Outbrain 26、
+  Microsoft Audience 15、Revcontent 6,扫 200 条的分布),**本来就是跨平台的**;
+  `search_competitor_ads` 会把 `素材来自这些原生平台` 报出来让用户看到覆盖面。
+
 ## 六之十三之二、生图关键词(拆解 → 关键词 → 出图 的中间一环)
 
 **老板要的那条链的关键**:拆解不是为了出份报告,是为了拿到**能直接驱动生图的专业关键词**。
@@ -727,7 +771,7 @@ NewsBreak 建议的 1200×628),原图拿不到;②这类广告画面上全是文
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 80 + 前端 22 + 大屏 9 + 平台 30 + 流式 13)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 82 + 前端 22 + 大屏 9 + 平台 30 + 流式 13)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -769,5 +813,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 80 / 前端 22 / 大屏 9 / 平台 30 / 流式 13)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 82 / 前端 22 / 大屏 9 / 平台 30 / 流式 13)
 → 更新本文件相关章节 → 提交 git。

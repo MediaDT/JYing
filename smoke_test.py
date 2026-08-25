@@ -327,9 +327,14 @@ def test_pure_logic():
         if p.index("绝对要求") > 40:
             bad.append("合规要求没有放在提示词最前面")
         d = lab._DECOMPOSE_PROMPT
-        for must in ("绝对不要编", "竞品标识", "原样照抄"):
-            if must not in d:
-                bad.append(f"拆解提示词里缺「{must}」")
+        # 查的是**意思**不是某句原话 —— 措辞改过好几轮,写死原话的话
+        # 改一次文案就误报一次。这三条底线本身不能丢:
+        if "竞品标识" not in d:
+            bad.append("拆解提示词里没让它列出竞品品牌(后面要靠它把别人的品牌剔干净)")
+        if not any(k in d for k in ("不许编造", "绝不许编", "绝对不要编", "不要编")):
+            bad.append("拆解提示词里没有「不许编」这条底线")
+        if not any(k in d for k in ("原样抄", "原样照抄", "原样列出")):
+            bad.append("拆解提示词里没要求原样照抄(钩子原话和品牌名不能被改写)")
         return bad or True
 
     check("文案查重能认出照抄的主标题", t_copy_detection)
@@ -712,6 +717,55 @@ def test_creative_render():
                     hits.append(f"{where} 还在说「{kw.strip()}」")
         return "默认已经不叠字了,但这些地方还在描述旧行为:" + ";".join(hits) if hits else None
     check("对用户的说法和代码实际行为一致(没有残留的旧话术)", t_copy_matches_behavior)
+
+    # 拆解要回答的是「它为什么跑得动」,不是「它长什么样」——
+    # 老板要的是亮点在哪、怎么发挥,不是一份摄影笔记。
+    def t_why_it_works():
+        import creative_lab as lab
+        need = ("为什么有展示", "为什么被点", "为什么有转化", "亮点",
+                "如何发挥这个亮点", "可迁移的公式")
+        miss = [k for k in need if k not in lab._DECOMPOSE_PROMPT]
+        if miss:
+            return f"拆解没问这些:{miss} —— 那就只是在描述长相,不是在分析为什么跑得动"
+        # 平台不给点击率/转化率,只有版位数和投放天数。让模型编数字是最危险的。
+        if "绝不许写出" not in lab._DECOMPOSE_PROMPT:
+            return "没禁止编造点击率/转化率 —— 平台根本不给这些数"
+        import inspect
+        if "perf" not in inspect.signature(lab.decompose).parameters:
+            return "拆解时没把投放实绩喂进去,模型只看一张图答不了「为什么跑得动」"
+        if "版位数" not in inspect.getsource(srv.decompose_creative):
+            return "工具没把版位数传给拆解"
+        pr = lab._summary_prompt([], "", "", 3)
+        for k in ("为什么这批能跑起来", "最该学的亮点", "亮点用在哪"):
+            if k not in pr:
+                return f"归纳里少了「{k}」"
+        return None
+    check("拆解回答的是「为什么跑得动」而不是「长什么样」", t_why_it_works)
+
+    # 素材池要跨平台:在 NewsBreak 上投,该学的是**所有原生平台**上的同品类广告,
+    # 不是只看 NewsBreak 自己的。同类型平台之间创意套路通用,池子大得多。
+    def t_cross_platform():
+        import ad_platform_kinds as _apk
+        if _apk.kind_of("NewsBreak") != "native":
+            return "没把 NewsBreak 判成原生广告平台"
+        if _apk.kind_of("Meta") != "walled" or _apk.kind_of("The Trade Desk") != "dsp":
+            return "大媒体/DSP 分类不对"
+        if _apk.kind_of("某某平台"):
+            return "认不出的平台居然猜了一个类型 —— 应当明说认不出并问用户"
+        if len(_apk.peers("NewsBreak")) < 4:
+            return "同类平台列得太少,素材池等于没扩大"
+        import inspect
+        if "素材来自这些原生平台" not in inspect.getsource(srv.search_competitor_ads):
+            return "查竞品时没报出素材来自哪些平台,用户看不到覆盖面"
+        for tbl, name in ((["f.__name__" for f in []], ""),):
+            pass
+        for tbl, name in (([f.__name__ for f in srv.NEWSBREAK_TOOLS], "Gemini 工具表"),
+                          (list(srv.OPENAI_TOOL_FUNCS), "OpenAI 函数表"),
+                          ([t["function"]["name"] for t in srv.OPENAI_TOOL_SCHEMAS], "OpenAI schema")):
+            if "platform_kind" not in tbl:
+                return f"platform_kind 没注册进{name}"
+        return None
+    check("跨平台取材(按平台类型决定素材池)", t_cross_platform)
 
     # 老板要的那条链:拆解 → **专业关键词** → 出图。关键在于生图提示词要用
     # **从素材里真拆出来的关键词**,不是代码里写死的模板 —— 否则拆解等于白做。
