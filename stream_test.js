@@ -139,6 +139,42 @@ console.log("\n【6】流式接口不可用(旧后端 404)→ 自动退回一次
   t("退回老接口后照常出答案", screen(app).indexOf("老接口的答案") >= 0, screen(app).slice(-60));
 }
 
+console.log("\n【9】两段对话同时流式:各回各家,后台那段收尾不许动屏幕上这段");
+{
+  // 线上走的就是这条流式路径。两段同时在跑时,后台那段收尾如果无条件
+  // clearLive(),会把当前开着的那段的「思考中」气泡一起抹掉,那段看着像卡死。
+  const store = {
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "第一段", messages: [{ role: "user", content: "第一段" }], updatedAt: 2 },
+      { id: "c2", title: "第二段", messages: [{ role: "user", content: "第二段" }], updatedAt: 1 }]),
+    "adbot-current-conv": "c1" };
+  let releaseC2 = null;
+  const app = boot(store, { platforms: BOUND, sse: (u, init) => {
+    const last = JSON.parse(init.body).messages.filter((m) => m.role === "user").pop().content;
+    if (last === "问题二") return new Promise((r) => {   // 第二段挂着不回
+      releaseC2 = () => r([{ type: "delta", text: "答二" }, { type: "done", reply: "答:问题二" }]);
+    });
+    return [{ type: "delta", text: "答一" }, { type: "done", reply: "答:问题一" }];
+  } });
+
+  const p1 = app.win.send("问题一");
+  app.registry["conv-list"].children[1].fire("click");    // 生成中切到 c2
+  const p2 = app.win.send("问题二");
+  t("c2 屏幕上有「思考中」气泡", !!app.win.live().typing);
+
+  await p1; await settle();
+  t("c1 在后台收尾,没抹掉 c2 的气泡", !!app.win.live().typing);
+  const c1 = app.convs().find((c) => c.id === "c1") || { messages: [] };
+  t("c1 的回复写回了 c1", (c1.messages[c1.messages.length - 1] || {}).content === "答:问题一",
+    JSON.stringify((c1.messages[c1.messages.length - 1] || {}).content));
+  t("屏幕上(c2)没被串进 c1 的回复", screen(app).indexOf("答:问题一") < 0);
+
+  releaseC2(); await p2; await settle();
+  const c2 = app.convs().find((c) => c.id === "c2") || { messages: [] };
+  t("c2 的回复写回了 c2", (c2.messages[c2.messages.length - 1] || {}).content === "答:问题二");
+  t("c2 收尾后气泡才收走", !app.win.live().typing);
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 

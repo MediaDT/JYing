@@ -87,6 +87,10 @@
     padding: 8px 10px; border-radius: 9px; cursor: pointer;
     font-size: 13px; color: var(--text); transition: background .12s ease;
   }
+  /* 左栏那颗小点:橙色闪 = 这段还在生成回复;蓝色 = 后台跑完了、你还没看 */
+  .conv-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent1); }
+  .conv-dot.run { background: #f59e0b; animation: convdot 1s ease-in-out infinite; }
+  @keyframes convdot { 50% { opacity: .25; } }
   .conv-item:hover { background: color-mix(in srgb, var(--accent1) 9%, transparent); }
   .conv-item.active { background: color-mix(in srgb, var(--accent1) 15%, transparent); font-weight: 600; }
   .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -506,7 +510,9 @@
         "我想投一个新广告",
       ],
       busy: "助手正在思考,请等它回完再发…",
-      busyLocked: "助手正在回答这一段,等它回完再切换 / 新建 / 删除对话 —— 现在动的话,这条回复会落到别的对话里。",
+      busyDelete: "这段对话还在生成回复,等它回完再删。",
+      bgDone: (title) => `「${title}」的回复已经好了,点左栏就能看`,
+      lostQ: (q) => `这句没能发出去,可以重发一次:${q}`,
       undelivered: "未送达 · 助手没收到这句,请重新发一次",
       restoreTip: (n) => `— 以上是上次的对话(共 ${n} 条),可以直接接着聊 —`,
       confirmClear: "确定要清空当前对话吗?清空后无法恢复。",
@@ -587,7 +593,9 @@
         "I want to create a new ad",
       ],
       busy: "The assistant is thinking — please wait for its reply…",
-      busyLocked: "The assistant is still replying. Wait for it to finish before switching, starting, or deleting a chat — otherwise its reply lands in the wrong one.",
+      busyDelete: "This chat is still generating a reply — wait for it to finish before deleting it.",
+      bgDone: (title) => `“${title}” has finished replying — open it from the left panel`,
+      lostQ: (q) => `This message wasn\u2019t sent, you can send it again: ${q}`,
       undelivered: "Not delivered · the assistant didn't receive this, please send it again",
       restoreTip: (n) => `— Above is your previous conversation (${n} messages). Just pick up where you left off —`,
       confirmClear: "Clear this conversation? This can't be undone.",
@@ -738,21 +746,9 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
-  /** 把当前 history 写回它所属的会话(每收发一条消息都会调) */
-  function saveHistory() {
-    if (history.length > MAX_KEEP) history.splice(0, history.length - MAX_KEEP);
-    let conv = conversations.find((c) => c.id === currentId);
-    if (!conv) {
-      if (history.length === 0) { saveConversations(); return; }   // 空的新对话先不落盘
-      conv = { id: currentId, title: "", messages: [], updatedAt: 0 };
-      conversations.unshift(conv);       // 新会话排最前
-    }
-    conv.messages = history.slice();
-    conv.title = titleOf(history);
-    conv.updatedAt = Date.now();
-    saveConversations();
-    renderConvList();
-  }
+  // (原来这里有个 saveHistory():把全局 history 写回**当前打开的**那段会话。
+  //  正是它让"切走之后回复落错地方"成为可能 —— 已换成 appendMsg(convId, ...),
+  //  按会话 id 写,见下面「每段对话各跑各的」那一节。)
 
   // 缓存里存过 uid,说明这台电脑登录过账号 —— 但现在还不知道**这次**是谁登录的
   // (要等 /api/me 回来)。在确认之前先不把旧记录摆出来,否则换个人登录会
@@ -892,21 +888,107 @@
     return e;
   }
 
-  /** 一轮问答收尾:用排好版的最终文本建气泡、记进历史、存盘。
-   *  流式过程中显示的是纯文本,这里才做 Markdown 排版(表格要完整才排得对),
-   *  而且 done 事件带的是**盖过钢印的**回复,和非流式接口完全一致。 */
-  function finishReply(reply) {
-    addBubble("bot", reply);
-    history.push({ role: "assistant", content: reply });
-    saveHistory();
+  // ===== 每段对话各跑各的(多线程) =====
+  // 以前只有一个全局 busy:一段在等回复,整个页面都锁住,切不了会话。
+  // 根子在于「回复写给谁」认的是**当前打开的那段**,你一切走它就落错地方。
+  // 现在改成认**当初提问的那段**(convId 在 send 一开始就定死),于是:
+  //   · 想切随时切,后台那段照样跑完,回复写回它自己
+  //   · 可以同时在几段对话里各问各的
+  //   · 屏幕上画不画,只取决于"它是不是正开着"
+  const running = new Map();     // convId -> {note, text}  正在生成回复的对话
+  const unread = new Set();      // convId  后台跑完了、用户还没看过
+  const convError = new Map();   // convId -> 出错信息(它当时没开着,等切回来再给他看)
+  let paintSeq = 0;              // 屏幕重画次数。用来判断"我当初拿到的那一行还在屏幕上吗"
+  let liveTyping = null;         // 屏幕上那个「思考中」气泡(只属于当前打开的这段)
+  let liveStream = null;         // 屏幕上承接流式文字的气泡
+
+  /** 找到某段对话;没有就现建一个(比如刚点了「新对话」还没落盘) */
+  function ensureConv(id) {
+    let conv = conversations.find((c) => c.id === id);
+    if (!conv) {
+      conv = { id: id, title: "", messages: [], updatedAt: 0 };
+      conversations.unshift(conv);
+    }
+    return conv;
   }
 
-  let busy = false;   // 正在等回复时为 true,挡住重复发送
+  /** 某段对话的内容变了:更新标题/时间、落盘、重画左栏 */
+  function persistConv(conv) {
+    if (conv.messages.length > MAX_KEEP) conv.messages.splice(0, conv.messages.length - MAX_KEEP);
+    conv.title = titleOf(conv.messages);
+    conv.updatedAt = Date.now();
+    saveConversations();
+    renderConvList();
+  }
+
+  /** 往**指定的那段**对话追加一条消息。它可能不是当前开着的那段 ——
+   *  那就只写数据、不画屏幕。这是整个"多线程"的关键一步。 */
+  function appendMsg(convId, role, content) {
+    const conv = ensureConv(convId);
+    conv.messages.push({ role: role, content: content });
+    let row = null;
+    if (convId === currentId) {
+      history.length = 0;
+      conv.messages.forEach((m) => history.push(m));
+      row = addBubble(role === "user" ? "user" : "bot", content);
+    }
+    persistConv(conv);
+    return row;
+  }
+
+  /** 撤掉某段对话的最后一条(发送失败时用,方便重发) */
+  function popMsg(convId) {
+    const conv = ensureConv(convId);
+    conv.messages.pop();
+    if (convId === currentId) history.pop();
+    persistConv(conv);
+  }
+
+  /** 把屏幕上的"进行中"气泡清掉(切换会话/收尾时) */
+  function clearLive() {
+    if (liveStream) { liveStream.remove(); liveStream = null; }
+    if (liveTyping) { liveTyping.remove(); liveTyping = null; }
+  }
+
+  /** 切回一段还在生成的对话时,照着它自己的状态把进度和已出的字重画出来 */
+  function paintRunning(convId) {
+    if (convId !== currentId) return;
+    const r = running.get(convId);
+    if (!r) return;
+    liveTyping = showTyping();
+    setTypingNote(liveTyping, r.note || "");
+    if (r.text) { liveStream = startStreamBubble(); liveStream.append(r.text); }
+  }
+
+  // 下面三个:状态一律记在 running 里(切走了也不丢),
+  // 只有它正开着才顺手更新屏幕
+  function runNote(convId, text) {
+    const r = running.get(convId); if (!r) return;
+    r.note = text || "";
+    if (convId === currentId && liveTyping) setTypingNote(liveTyping, r.note);
+  }
+  function runAppend(convId, piece) {
+    const r = running.get(convId); if (!r) return;
+    r.text += (piece || "");
+    if (convId === currentId) {
+      if (!liveStream) liveStream = startStreamBubble();
+      liveStream.append(piece || "");
+    }
+  }
+  function runReset(convId) {
+    const r = running.get(convId); if (!r) return;
+    r.text = "";       // 模型先说了句开场白又跑去调工具了,那段不是答案
+    if (convId === currentId && liveStream) { liveStream.remove(); liveStream = null; }
+  }
 
   async function send(presetText) {
-    // 上一条还没回来就别再发了——否则会同时发两个请求:
-    // 两份回复、两次消耗额度,而且第二个带的还是旧上下文
-    if (busy) {
+    // 这一轮属于**哪一段**对话,在这里就定死。后面不管用户切到哪儿,
+    // 回复都写回这一段 —— 这是"各聊各的"的全部秘密。
+    const convId = currentId;
+
+    // 同一段对话里上一条还没回来就别再发了(两份回复、两倍额度、旧上下文);
+    // 但**别的对话不受影响**,你可以切过去接着问。
+    if (running.has(convId)) {
       // 光改 placeholder 是不够的:**输入框里有字的时候 placeholder 根本不显示**,
       // 用户按了回车会得到零反馈。所以再补一条顶部提示。
       inputEl.placeholder = t().busy;
@@ -935,21 +1017,20 @@
 
     inputEl.value = "";
     inputEl.style.height = "auto";
-    const userRow = addBubble("user", text);   // 记住这一行,失败时要给它加标记
-    history.push({ role: "user", content: text });
-    saveHistory();
+    const userRow = appendMsg(convId, "user", text);   // 失败时要给这一行打标记
+    const rowSeq = paintSeq;                          // 记下它是第几次重画时画的
+    const msgs = ensureConv(convId).messages.slice();  // 发给后端的是**这一段**的上下文
 
-    busy = true;
-    sendBtn.disabled = true;
-    const typing = showTyping();
+    running.set(convId, { note: "", text: "" });
+    if (convId === currentId) { sendBtn.disabled = true; liveTyping = showTyping(); }
+    renderConvList();
 
     // 超时保护:后端卡死时不要让小点一直转下去
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 180000);   // 3 分钟
 
-    let stream = null;   // 承接流式文字的气泡(只有真出字了才建)
     try {
-      const body = JSON.stringify({ messages: history, lang: lang });
+      const body = JSON.stringify({ messages: msgs, lang: lang });
       const common = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -964,9 +1045,9 @@
       if (!res.ok && (res.status === 404 || res.status === 405)) {
         res = await fetch("/api/chat", common);
         const data = await res.json();
-        typing.remove();
         if (!res.ok) throw new ChatError(data.error || res.status);
-        finishReply(data.reply);
+        if (convId === currentId) clearLive();   // 只收自己的气泡!别把别人的抹了
+        appendMsg(convId, "assistant", data.reply);
         return;
       }
 
@@ -974,7 +1055,6 @@
       if (!ctype.includes("text/event-stream")) {
         // 后端直接回了 JSON(多半是出错了)
         const data = await res.json().catch(() => ({}));
-        typing.remove();
         throw new ChatError(data.error || ("HTTP " + res.status));
       }
 
@@ -998,13 +1078,11 @@
           try { ev = JSON.parse(line.slice(6)); } catch (e) { continue; }
 
           if (ev.type === "status") {
-            setTypingNote(typing, ev.text);
+            runNote(convId, ev.text);
           } else if (ev.type === "delta") {
-            if (!stream) stream = startStreamBubble();
-            stream.append(ev.text || "");
+            runAppend(convId, ev.text);
           } else if (ev.type === "reset") {
-            // 模型先说了句开场白又跑去调工具了 —— 那段不是答案,作废
-            if (stream) { stream.remove(); stream = null; }
+            runReset(convId);
           } else if (ev.type === "done") {
             finalReply = ev.reply;
           } else if (ev.type === "error") {
@@ -1013,28 +1091,44 @@
         }
       }
 
-      typing.remove();
-      if (stream) { stream.remove(); stream = null; }   // 换成排好版的最终气泡
       if (failed) throw new ChatError(failed);
       if (finalReply === null) throw new ChatError(t().streamBroken);
-      finishReply(finalReply);
+      if (convId === currentId) clearLive();   // 过程中的纯文本气泡换成排好版的最终气泡
+      appendMsg(convId, "assistant", finalReply);
     } catch (err) {
-      if (stream) stream.remove();
-      typing.remove();
+      if (convId === currentId) clearLive();
       // ChatError = 后端明确告诉我们的原因(钥匙不对、额度用完…),原样转给用户;
       // 其它异常才是"网络问题",别把后端的真实原因盖成"连不上"
       const msg = err.name === "AbortError" ? t().timeout
                 : err.name === "ChatError" ? t().errPrefix + err.message
                 : t().netErr + err.message;
-      addBubble("error", msg);
-      history.pop();          // 这轮没成功,撤掉刚才那句,方便重发
-      markUndelivered(userRow);
-      saveHistory();
+      popMsg(convId);         // 这轮没成功,撤掉刚才那句,方便重发
+      if (convId === currentId && paintSeq === rowSeq) {
+        // 那一行还在屏幕上,正常打标记
+        addBubble("error", msg);
+        markUndelivered(userRow);
+      } else if (convId === currentId) {
+        // 中途切走又切回来,屏幕重画过 —— userRow 已经掉线,打标记等于打给空气。
+        // 那就把原话写进错误里,别让它凭空消失。
+        addBubble("error", msg + "\n" + t().lostQ(text));
+      } else {
+        // 它当时没开着,错误气泡画出来用户也看不到 —— 存起来,等切回去再说。
+        convError.set(convId, msg + "\n" + t().lostQ(text));
+      }
     } finally {
       clearTimeout(timer);
-      busy = false;
-      sendBtn.disabled = false;
-      inputEl.focus();
+      running.delete(convId);
+      if (convId === currentId) {
+        clearLive();
+        sendBtn.disabled = false;
+        inputEl.focus();
+      } else {
+        // 后台那段跑完了,用户还在别的对话里 —— 左栏点个蓝点,再提示一句
+        unread.add(convId);
+        const conv = conversations.find((c) => c.id === convId);
+        showToast(t().bgDone((conv && conv.title) || t().untitled));
+      }
+      renderConvList();
     }
   }
 
@@ -1178,6 +1272,14 @@
       item.className = "conv-item" + (c.id === currentId ? " active" : "");
       item.title = c.title;
 
+      // 橙点闪 = 这段正在生成回复;蓝点 = 后台跑完了、你还没看过。
+      // 没有这个点的话,"切走之后它还在跑"完全看不出来,用户会以为切走就没了。
+      if (running.has(c.id) || unread.has(c.id)) {
+        const dot = document.createElement("span");
+        dot.className = "conv-dot" + (running.has(c.id) ? " run" : "");
+        item.appendChild(dot);
+      }
+
       const title = document.createElement("div");
       title.className = "conv-title";
       title.textContent = c.title || t().untitled;
@@ -1212,31 +1314,40 @@
 
   /** 把屏幕上的消息重画成某个会话的内容 */
   function paintCurrent() {
+    paintSeq++;                                // 屏幕重画过 → 之前拿到的行号都作废
     messagesEl.innerHTML = "";
+    liveTyping = null; liveStream = null;     // 上面那一下已经把它们从屏幕上抹掉了
     if (history.length > 0) restoreHistory();
     else showWelcome();
+    // 切回来的时候,它可能还在生成 —— 把进度和已经出的字照原样接上
+    paintRunning(currentId);
+    // 也可能是它在后台出错了(当时没开着,错误气泡没地方画)—— 现在补给用户看
+    const err = convError.get(currentId);
+    if (err) { convError.delete(currentId); addBubble("error", err); }
   }
 
+  /** 切到另一段对话。**随时可切**,哪怕这边还在生成 ——
+   *  那段会在后台跑完,回复写回它自己(见 send 里的 convId)。 */
   function switchConversation(id) {
     if (id === currentId) return;
-    // 正在等回复时先别切,免得回复落到别的会话里(history 是全局一份,
-    // 切走之后回复会被写进新打开的那段)。**必须给提示**,不能静默 return。
-    if (busy) { showToast(t().busyLocked); return; }
     const conv = conversations.find((c) => c.id === id);
     if (!conv) return;
+    clearLive();                 // 先把这一段的"进行中"气泡收走(它的状态在 running 里存着)
     currentId = id;
+    unread.delete(id);           // 看过了,左栏那个蓝点撤掉
     history.length = 0;
     conv.messages.forEach((m) => history.push(m));
     localStorage.setItem(CUR_KEY, currentId);
     paintCurrent();
     renderConvList();
+    sendBtn.disabled = running.has(currentId);   // 这一段自己在忙才禁用
     inputEl.focus();
   }
 
   function deleteConversation(id) {
-    // 删掉当前这段会把 currentId 挪到下一段 —— 思考中删的话,
-    // 这条回复会被追加进那段**毫不相干的老对话**里(实测复现过,比新建那条更糟)。
-    if (busy) { showToast(t().busyLocked); return; }
+    // 只挡**它自己**还在生成的那一段:删了的话回复回来会把它又建出来,
+    // 用户看着像"删不掉"。别的对话在跑不影响删这一段。
+    if (running.has(id)) { showToast(t().busyDelete); return; }
     if (!confirm(t().confirmDelete)) return;
     const idx = conversations.findIndex((c) => c.id === id);
     if (idx === -1) return;
@@ -1248,7 +1359,9 @@
       currentId = next ? next.id : newId();
       history.length = 0;
       if (next) next.messages.forEach((m) => history.push(m));
+      clearLive();
       paintCurrent();
+      sendBtn.disabled = running.has(currentId);
     }
     saveConversations();
     renderConvList();
@@ -1256,16 +1369,14 @@
 
   /** 开新对话:当前这段已经在 conversations 里了,只要新开一个空的即可(不删任何东西) */
   function startNewConversation() {
-    // 和 switchConversation 同一条理由:它也换 currentId、也清空 history。
-    // 这里漏了拦截的话,思考中点「新对话」→ 回复被写进刚开的空对话里,
-    // 原来那段只剩一句提问、没有答案(实测复现过)。
-    if (busy) { showToast(t().busyLocked); return; }
     if (history.length === 0) return;    // 已经是空白新对话了,别重复开
+    clearLive();                          // 那一段还在跑也没关系,它自己会跑完
     currentId = newId();
     history.length = 0;
     localStorage.setItem(CUR_KEY, currentId);
     paintCurrent();
     renderConvList();
+    sendBtn.disabled = false;             // 新的这段是空的,当然能发
     inputEl.focus();
   }
 
@@ -1282,7 +1393,7 @@
   // 🌐 中英文切换:界面文案立刻换;已有的对话内容保持原样(那是历史记录,
   // 不该改写),新的回复会用新语言 —— 后端会收到 lang 并切换 AI 的语言。
   document.getElementById("lang-toggle").addEventListener("click", () => {
-    const wasBusy = busy;   // 切换瞬间是否还有回复在路上?那条回复用的是旧语言
+    const wasBusy = running.has(currentId);   // 这一段还有回复在路上?那条用的是旧语言
     lang = lang === "zh" ? "en" : "zh";
     localStorage.setItem(LANG_KEY, lang);
     applyLang();

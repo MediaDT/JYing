@@ -196,39 +196,158 @@ console.log("\n【X】登录后必须能把服务器上的聊天记录读回来"
   t("确实往服务器推了一次", puts.length > before, `PUT ${puts.length - before} 次`);
 }
 
-console.log("\n【Y】助手思考中:切换 / 新建 / 删除对话都要被拦住,而且要有提示");
+console.log("\n【Y】每段对话各跑各的:回复认自己的会话,不认当前打开的那段");
 {
-  // 背景:history 是全局一份、绑在 currentId 上。思考中把 currentId 换掉的话,
-  // 回来的那条回复就会写进别的会话。switchConversation 本来拦了,
-  // 但「新对话」和「删除」两个口子当时是敞开的 —— 实测能复现丢答案 / 串会话。
+  // 这是"多线程"的核心。以前 history 全局只有一份、绑在当前会话上,
+  // 所以只能靠锁住界面来保证不落错地方(切不了、新建不了、删不了)。
+  // 现在 send() 一开始就把 convId 定死,回复写回**当初提问的那一段**。
   const store = {
     "adbot-conversations": JSON.stringify([
-      { id: "c1", title: "当前这段", messages: [{ role: "user", content: "当前这段" }], updatedAt: 2 },
-      { id: "c2", title: "老会话", messages: [{ role: "user", content: "老会话" }], updatedAt: 1 }]),
+      { id: "c1", title: "第一段", messages: [{ role: "user", content: "第一段" }], updatedAt: 2 },
+      { id: "c2", title: "第二段", messages: [{ role: "user", content: "第二段" }], updatedAt: 1 }]),
     "adbot-current-conv": "c1" };
-  const app = boot(store, {});
+  // 让后端"照着收到的问题回答",这样才验得出回复有没有配错对话
+  const app = boot(store, { fetchBody: (u, init) => {
+    if (u !== "/api/chat") return undefined;
+    const msgs = JSON.parse(init.body).messages;
+    const last = msgs.filter((m) => m.role === "user").pop();
+    return { reply: "答:" + last.content };
+  } });
 
-  const p = app.win.send("新问题");        // 不 await:此刻正"思考中"
-  const item = app.registry["conv-list"].children[0];
-  const del = item.querySelector("conv-del") || item.children[item.children.length - 1];
+  const p1 = app.win.send("问题一");                      // c1 跑起来,不 await
+  app.registry["conv-list"].children[1].fire("click");    // ← 生成中切到 c2
+  t("生成中可以切走(不再锁死界面)", app.curId() === "c2", app.curId());
 
-  app.registry["new-chat"].fire("click");  // ① 思考中点「新对话」
-  t("思考中点「新对话」不换会话", app.curId() === "c1", app.curId());
-  del.fire("click");                       // ② 思考中删掉当前这段
-  t("思考中点「删除」不删", app.convs().length === 2, `${app.convs().length} 段`);
-  app.registry["conv-list"].children[1].fire("click");   // ③ 思考中切到老会话
-  t("思考中切会话不生效", app.curId() === "c1", app.curId());
-  // 提示是"一闪而过"的东西,按时序去抓极不稳 —— 查 helper 的记账(每次 textContent 写入)
-  const hints = () => app.textLog().filter((x) => String(x.text).indexOf("等它回完") >= 0).length;
-  t("三次都给了提示(不是静默无反应)", hints() >= 3, `提示 ${hints()} 次`);
+  const p2 = app.win.send("问题二");                      // c2 同时也跑起来
+  t("另一段能同时提问", app.win.history().length === 2, `${app.win.history().length} 条`);
 
-  await p; await tick(); await tick(); await tick();
+  // 正在生成的那一段不许删(删了回复回来又会把它建出来,看着像删不掉)
+  const c2item = app.registry["conv-list"].children[1];
+  (c2item.querySelector("conv-del") || c2item.children[c2item.children.length - 1]).fire("click");
+  t("正在生成的那一段挡住删除", app.convs().length === 2, `${app.convs().length} 段`);
+
+  await Promise.all([p1, p2]);
+  for (let i = 0; i < 6; i++) await tick();
+
   const c1 = app.convs().find((c) => c.id === "c1") || { messages: [] };
   const c2 = app.convs().find((c) => c.id === "c2") || { messages: [] };
-  t("回复落回提问的那一段", c1.messages.length === 3 && c1.messages[2].role === "assistant",
-    JSON.stringify(c1.messages.map((m) => m.role)));
-  t("老会话没被串进回复", c2.messages.length === 1, `${c2.messages.length} 条`);
-  t("没有凭空多出一段只有答案的对话", app.convs().length === 2, `${app.convs().length} 段`);
+  const lastOf = (c) => (c.messages[c.messages.length - 1] || {}).content || "";
+  t("第一段拿到的是第一段的答案", lastOf(c1) === "答:问题一", lastOf(c1));
+  t("第二段拿到的是第二段的答案", lastOf(c2) === "答:问题二", lastOf(c2));
+  t("两段互不串", c1.messages.length === 3 && c2.messages.length === 3,
+    `${c1.messages.length} / ${c2.messages.length}`);
+  t("后台那段跑完会提示一句",
+    app.textLog().some((x) => String(x.text).indexOf("回复已经好了") >= 0));
+}
+
+console.log("\n【Y2】切回一段还在生成的对话:进度和已经出的字要接上");
+{
+  // 切走时屏幕上的气泡被收走了,但状态记在 running 里(不是记在 DOM 上)——
+  // 切回来照着它重画。少了这一步,用户切回去会看到一段"死掉的"对话,
+  // 以为回复丢了,然后重发一遍,白烧一次额度。
+  const store = {
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "第一段", messages: [{ role: "user", content: "第一段" }], updatedAt: 2 },
+      { id: "c2", title: "第二段", messages: [{ role: "user", content: "第二段" }], updatedAt: 1 }]),
+    "adbot-current-conv": "c2" };
+  const app = boot(store, {});
+  app.win.running().set("c1", { note: "正在查报表…", text: "已经出的这几个字" });
+
+  app.registry["conv-list"].children[0].fire("click");   // 切回 c1
+  const said = (kw) => app.textLog().some((x) => String(x.text).indexOf(kw) >= 0);
+  t("进度文字接上了", said("正在查报表…"));
+  t("已经出的字接上了", said("已经出的这几个字"));
+  t("这段在忙 → 发送键禁用", app.registry["send"].disabled === true);
+
+  app.registry["conv-list"].children[1].fire("click");   // 再切到不忙的 c2
+  t("换到不忙的那段 → 发送键放开", app.registry["send"].disabled === false);
+}
+
+console.log("\n【Z】后台那段出错:错误不能悄悄消失,那句话也要还给用户");
+{
+  // 它当时没开着,错误气泡画出来用户也看不到 —— 存起来,切回去补给他。
+  // 而且失败会把那句话从记录里撤掉,不带上的话它就凭空没了。
+  const store = {
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "第一段", messages: [{ role: "user", content: "第一段" }], updatedAt: 2 },
+      { id: "c2", title: "第二段", messages: [{ role: "user", content: "第二段" }], updatedAt: 1 }]),
+    "adbot-current-conv": "c1" };
+  const app = boot(store, { fetchBody: (u) => {
+    if (u === "/api/chat") throw new Error("网络断了");
+    return undefined;
+  } });
+
+  const p = app.win.send("会失败的问题");
+  app.registry["conv-list"].children[1].fire("click");   // 切走
+  await p; for (let i = 0; i < 4; i++) await tick();
+
+  const c1 = app.convs().find((c) => c.id === "c1") || { messages: [] };
+  t("失败的那句已撤回(方便重发)", c1.messages.length === 1, `${c1.messages.length} 条`);
+  t("切走时不乱画错误气泡",
+    !app.textLog().some((x) => String(x.text).indexOf("会失败的问题") >= 0 &&
+                               String(x.text).indexOf("没能发出去") >= 0));
+
+  app.registry["conv-list"].children[0].fire("click");   // 切回去
+  await tick();
+  t("切回来补上错误提示 + 原话",
+    app.textLog().some((x) => String(x.text).indexOf("没能发出去") >= 0 &&
+                              String(x.text).indexOf("会失败的问题") >= 0));
+}
+
+console.log("\n【Y3】两段同时在跑:后台那段收尾时,不许把屏幕上这段的气泡抹掉");
+{
+  // 真实 DOM 才犯的错:收尾时无条件 clearLive(),而屏幕上那个「思考中」
+  // 气泡属于**当前开着的另一段** —— 它会被连坐抹掉,那段看着就像卡死了。
+  const store = {
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "第一段", messages: [{ role: "user", content: "第一段" }], updatedAt: 2 },
+      { id: "c2", title: "第二段", messages: [{ role: "user", content: "第二段" }], updatedAt: 1 }]),
+    "adbot-current-conv": "c1" };
+  let releaseC2 = null;
+  const app = boot(store, { fetchBody: (u, init) => {
+    if (u !== "/api/chat") return undefined;
+    const last = JSON.parse(init.body).messages.filter((m) => m.role === "user").pop().content;
+    // 让第二段一直挂着不回,这样"第一段收尾"发生时它还在屏幕上转圈
+    if (last === "问题二") return new Promise((r) => { releaseC2 = () => r({ reply: "答:问题二" }); });
+    return { reply: "答:" + last };
+  } });
+
+  const p1 = app.win.send("问题一");
+  app.registry["conv-list"].children[1].fire("click");   // 切到 c2
+  const p2 = app.win.send("问题二");                     // c2 转圈中
+  t("c2 屏幕上有「思考中」气泡", !!app.win.live().typing);
+
+  await p1; for (let i = 0; i < 4; i++) await tick();    // c1 在后台收尾
+  t("c1 收尾没把 c2 的气泡抹掉", !!app.win.live().typing);
+  t("c1 的答案照样写回了 c1",
+    ((app.convs().find((c) => c.id === "c1") || { messages: [] }).messages.pop() || {}).content === "答:问题一");
+
+  releaseC2(); await p2; for (let i = 0; i < 4; i++) await tick();
+  t("c2 收尾后气泡才收走", !app.win.live().typing);
+}
+
+console.log("\n【Z2】切走又切回来之后才失败:那句话不能凭空消失");
+{
+  // 屏幕重画过,当初拿到的那一行已经"掉线",往它身上打「未送达」等于打给空气 ——
+  // 用户看到的是:问题不见了、只剩一句报错,不知道该重发什么。
+  const store = {
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "第一段", messages: [{ role: "user", content: "第一段" }], updatedAt: 2 },
+      { id: "c2", title: "第二段", messages: [{ role: "user", content: "第二段" }], updatedAt: 1 }]),
+    "adbot-current-conv": "c1" };
+  const app = boot(store, { fetchBody: (u) => {
+    if (u === "/api/chat") throw new Error("网络断了");
+    return undefined;
+  } });
+
+  const p = app.win.send("切来切去的问题");
+  app.registry["conv-list"].children[1].fire("click");   // 切走
+  app.registry["conv-list"].children[0].fire("click");   // 又切回来(屏幕重画了两次)
+  await p; for (let i = 0; i < 4; i++) await tick();
+
+  t("报错里带上了原话,可以照着重发",
+    app.textLog().some((x) => String(x.text).indexOf("没能发出去") >= 0 &&
+                              String(x.text).indexOf("切来切去的问题") >= 0));
 }
 
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);

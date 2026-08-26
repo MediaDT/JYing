@@ -113,14 +113,20 @@ module.exports = function boot(store, opts) {
     // 流式接口:opts.sse 给一串事件,这里做成"一块一块读"的 ReadableStream,
     // 跟真实 SSE 一样分片到达,才能测出前端的分片拼接逻辑
     if (u.indexOf("/api/chat/stream") === 0) {
-      if (!opts.sse) return Promise.resolve({ ok: false, status: 404, headers: { get: () => "application/json" }, json: async () => ({}) });
-      const frames = opts.sse.map((e) => "data: " + JSON.stringify(e) + "\n\n");
-      let i = 0;
-      return Promise.resolve({
-        ok: true, status: 200,
-        headers: { get: (k) => (String(k).toLowerCase() === "content-type" ? "text/event-stream" : null) },
-        body: { getReader: () => ({ read: () => Promise.resolve(
-          i < frames.length ? { done: false, value: frames[i++] } : { done: true, value: undefined }) }) },
+      // opts.sse 也可以是个**函数**:(url, init) => 事件数组 | Promise。
+      // 这样测试就能"按会话给不同的流",甚至让某一段挂着不回 ——
+      // 多段对话同时在跑的场景,非这样不能测。
+      let spec = typeof opts.sse === "function" ? opts.sse(u, init) : opts.sse;
+      if (!spec) return Promise.resolve({ ok: false, status: 404, headers: { get: () => "application/json" }, json: async () => ({}) });
+      return Promise.resolve(spec).then((events) => {
+        const frames = events.map((e) => "data: " + JSON.stringify(e) + "\n\n");
+        let i = 0;
+        return {
+          ok: true, status: 200,
+          headers: { get: (k) => (String(k).toLowerCase() === "content-type" ? "text/event-stream" : null) },
+          body: { getReader: () => ({ read: () => Promise.resolve(
+            i < frames.length ? { done: false, value: frames[i++] } : { done: true, value: undefined }) }) },
+        };
       });
     }
     if (body === undefined || body === null) {
@@ -138,7 +144,7 @@ module.exports = function boot(store, opts) {
   // 把页面脚本里的函数捞出来,好让测试能直接调(模拟"用户点了某个按钮之后")
   const exposed = {};
   new Function("__expose", js + "\n;try{__expose.refreshPlatformBinding=refreshPlatformBinding;"
-               + "__expose.clearNotBound=clearNotBound;__expose.send=send;__expose.convs=()=>conversations;__expose.cached=()=>cachedConvs;__expose.push=pushToServer;__expose.history=()=>history;}catch(e){}")(exposed);
+               + "__expose.clearNotBound=clearNotBound;__expose.send=send;__expose.convs=()=>conversations;__expose.cached=()=>cachedConvs;__expose.push=pushToServer;__expose.history=()=>history;__expose.running=()=>running;__expose.unread=()=>unread;__expose.live=()=>({typing:liveTyping,stream:liveStream});}catch(e){}")(exposed);
   return { registry, win: exposed, textLog: () => textLog, convs: () => JSON.parse(store["adbot-conversations"] || "[]"),
            curId: () => store["adbot-current-conv"] };
 };
