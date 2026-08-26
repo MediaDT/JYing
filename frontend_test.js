@@ -196,6 +196,41 @@ console.log("\n【X】登录后必须能把服务器上的聊天记录读回来"
   t("确实往服务器推了一次", puts.length > before, `PUT ${puts.length - before} 次`);
 }
 
+console.log("\n【Y】助手思考中:切换 / 新建 / 删除对话都要被拦住,而且要有提示");
+{
+  // 背景:history 是全局一份、绑在 currentId 上。思考中把 currentId 换掉的话,
+  // 回来的那条回复就会写进别的会话。switchConversation 本来拦了,
+  // 但「新对话」和「删除」两个口子当时是敞开的 —— 实测能复现丢答案 / 串会话。
+  const store = {
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "当前这段", messages: [{ role: "user", content: "当前这段" }], updatedAt: 2 },
+      { id: "c2", title: "老会话", messages: [{ role: "user", content: "老会话" }], updatedAt: 1 }]),
+    "adbot-current-conv": "c1" };
+  const app = boot(store, {});
+
+  const p = app.win.send("新问题");        // 不 await:此刻正"思考中"
+  const item = app.registry["conv-list"].children[0];
+  const del = item.querySelector("conv-del") || item.children[item.children.length - 1];
+
+  app.registry["new-chat"].fire("click");  // ① 思考中点「新对话」
+  t("思考中点「新对话」不换会话", app.curId() === "c1", app.curId());
+  del.fire("click");                       // ② 思考中删掉当前这段
+  t("思考中点「删除」不删", app.convs().length === 2, `${app.convs().length} 段`);
+  app.registry["conv-list"].children[1].fire("click");   // ③ 思考中切到老会话
+  t("思考中切会话不生效", app.curId() === "c1", app.curId());
+  // 提示是"一闪而过"的东西,按时序去抓极不稳 —— 查 helper 的记账(每次 textContent 写入)
+  const hints = () => app.textLog().filter((x) => String(x.text).indexOf("等它回完") >= 0).length;
+  t("三次都给了提示(不是静默无反应)", hints() >= 3, `提示 ${hints()} 次`);
+
+  await p; await tick(); await tick(); await tick();
+  const c1 = app.convs().find((c) => c.id === "c1") || { messages: [] };
+  const c2 = app.convs().find((c) => c.id === "c2") || { messages: [] };
+  t("回复落回提问的那一段", c1.messages.length === 3 && c1.messages[2].role === "assistant",
+    JSON.stringify(c1.messages.map((m) => m.role)));
+  t("老会话没被串进回复", c2.messages.length === 1, `${c2.messages.length} 条`);
+  t("没有凭空多出一段只有答案的对话", app.convs().length === 2, `${app.convs().length} 段`);
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 

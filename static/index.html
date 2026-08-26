@@ -216,6 +216,16 @@
     background: rgba(255,255,255,.14); color: #fff;
   }
   .lightbox-close:hover { background: rgba(255,255,255,.26); }
+  /* 顶部一闪即逝的提示条。**存在的理由**:侧栏里那几个按钮在助手思考时是
+     暂时不能点的,静默无反应会让人以为页面卡死了 —— 挡住可以,但必须说为什么 */
+  .toast {
+    position: fixed; left: 50%; top: 78px; transform: translateX(-50%);
+    z-index: 60; max-width: min(560px, 92vw);
+    background: #1f2937; color: #fff; padding: 10px 16px; border-radius: 10px;
+    font-size: 14px; line-height: 1.5; box-shadow: 0 8px 24px rgba(0,0,0,.2);
+    opacity: 0; pointer-events: none; transition: opacity .18s;
+  }
+  .toast.show { opacity: 1; }
   .typing-note {
     margin-left: 8px; font-size: 12.5px; color: var(--muted);
     align-self: center; white-space: nowrap;
@@ -382,6 +392,8 @@
     </div>
   </div>
 
+  <div class="toast" id="toast"></div>
+
   <div class="main">
     <aside id="sidebar">
       <div class="sidebar-head" id="sidebar-head">对话记录</div>
@@ -494,6 +506,7 @@
         "我想投一个新广告",
       ],
       busy: "助手正在思考,请等它回完再发…",
+      busyLocked: "助手正在回答这一段,等它回完再切换 / 新建 / 删除对话 —— 现在动的话,这条回复会落到别的对话里。",
       undelivered: "未送达 · 助手没收到这句,请重新发一次",
       restoreTip: (n) => `— 以上是上次的对话(共 ${n} 条),可以直接接着聊 —`,
       confirmClear: "确定要清空当前对话吗?清空后无法恢复。",
@@ -574,6 +587,7 @@
         "I want to create a new ad",
       ],
       busy: "The assistant is thinking — please wait for its reply…",
+      busyLocked: "The assistant is still replying. Wait for it to finish before switching, starting, or deleting a chat — otherwise its reply lands in the wrong one.",
       undelivered: "Not delivered · the assistant didn't receive this, please send it again",
       restoreTip: (n) => `— Above is your previous conversation (${n} messages). Just pick up where you left off —`,
       confirmClear: "Clear this conversation? This can't be undone.",
@@ -893,8 +907,11 @@
     // 上一条还没回来就别再发了——否则会同时发两个请求:
     // 两份回复、两次消耗额度,而且第二个带的还是旧上下文
     if (busy) {
+      // 光改 placeholder 是不够的:**输入框里有字的时候 placeholder 根本不显示**,
+      // 用户按了回车会得到零反馈。所以再补一条顶部提示。
       inputEl.placeholder = t().busy;
       setTimeout(() => { inputEl.placeholder = t().placeholder; }, 1800);
+      showToast(t().busy);
       return;
     }
 
@@ -1181,6 +1198,18 @@
     });
   }
 
+  /** 顶部一闪即逝的提示。用在"这个按钮现在点不了"这类地方 ——
+   *  静默 return 是最糟的做法:用户看不出是被拦了还是页面死了。 */
+  let toastTimer = null;
+  function showToast(msg) {
+    const el = document.getElementById("toast");
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+  }
+
   /** 把屏幕上的消息重画成某个会话的内容 */
   function paintCurrent() {
     messagesEl.innerHTML = "";
@@ -1189,7 +1218,10 @@
   }
 
   function switchConversation(id) {
-    if (id === currentId || busy) return;    // 正在等回复时先别切,免得回复落到别的会话里
+    if (id === currentId) return;
+    // 正在等回复时先别切,免得回复落到别的会话里(history 是全局一份,
+    // 切走之后回复会被写进新打开的那段)。**必须给提示**,不能静默 return。
+    if (busy) { showToast(t().busyLocked); return; }
     const conv = conversations.find((c) => c.id === id);
     if (!conv) return;
     currentId = id;
@@ -1202,6 +1234,9 @@
   }
 
   function deleteConversation(id) {
+    // 删掉当前这段会把 currentId 挪到下一段 —— 思考中删的话,
+    // 这条回复会被追加进那段**毫不相干的老对话**里(实测复现过,比新建那条更糟)。
+    if (busy) { showToast(t().busyLocked); return; }
     if (!confirm(t().confirmDelete)) return;
     const idx = conversations.findIndex((c) => c.id === id);
     if (idx === -1) return;
@@ -1221,6 +1256,10 @@
 
   /** 开新对话:当前这段已经在 conversations 里了,只要新开一个空的即可(不删任何东西) */
   function startNewConversation() {
+    // 和 switchConversation 同一条理由:它也换 currentId、也清空 history。
+    // 这里漏了拦截的话,思考中点「新对话」→ 回复被写进刚开的空对话里,
+    // 原来那段只剩一句提问、没有答案(实测复现过)。
+    if (busy) { showToast(t().busyLocked); return; }
     if (history.length === 0) return;    // 已经是空白新对话了,别重复开
     currentId = newId();
     history.length = 0;
