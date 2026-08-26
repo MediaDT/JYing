@@ -705,18 +705,64 @@ def test_creative_render():
         import inspect
         if inspect.signature(cr.render).parameters["overlay"].default is not False:
             return None      # 哪天默认改回叠字了,这条自然不适用
-        stale = ("代码精确排版", "代码把标题", "composited\n     by code", "代码叠字")
+        # 关键词按"意思"列全一点:上次就是换了个说法(「代码把文案精确排上去」)
+        # 从 summarize 那步漏出去的 —— 而 summarize 原本根本没在检查名单里。
+        stale = ("代码精确排版", "代码把标题", "代码把文案", "文案精确排", "精确排上去",
+                 "composited\n     by code", "代码叠字", "把标题排上", "把文字排上")
         hits = []
         for text, where in ((srv.SYSTEM_PROMPT, "中文提示词"),
                             (srv.SYSTEM_PROMPT_EN, "英文提示词"),
                             (inspect.getdoc(srv.propose_make_creatives) or "", "propose docstring"),
                             (inspect.getdoc(srv._execute_make_creatives) or "", "执行 docstring"),
-                            (inspect.getsource(srv.propose_make_creatives), "提议话术/schema")):
+                            (inspect.getsource(srv.propose_make_creatives), "提议话术/schema"),
+                            (inspect.getsource(srv.summarize_creative_patterns), "归纳话术"),
+                            (inspect.getsource(srv._execute_make_creatives), "执行话术")):
             for kw in stale:
                 if kw.replace("\n     ", " ") in text.replace("\n", " "):
                     hits.append(f"{where} 还在说「{kw.strip()}」")
         return "默认已经不叠字了,但这些地方还在描述旧行为:" + ";".join(hits) if hits else None
     check("对用户的说法和代码实际行为一致(没有残留的旧话术)", t_copy_matches_behavior)
+
+    # 报价给用户看的是哪几版,真做出来的就必须是哪几版。
+    # 只存编号的话:用户还没点头就又归纳了一次 → 方案列表整个换掉 →
+    # 同样的编号指到别的方案 → **花着钱做出他没同意过的东西**。
+    def t_plan_snapshot():
+        srv._new_turn()
+        srv._plans().clear()
+        srv._plans().extend([{"命名": "planA", "主标题": "A", "画面怎么拍": "aaa"},
+                             {"命名": "planB", "主标题": "B", "画面怎么拍": "bbb"}])
+        r = srv.propose_make_creatives(variants="1")
+        aid = r.get("action_id", "")
+        if not aid:
+            return f"登记失败:{r}"
+        try:
+            snap = srv.PENDING_ACTIONS[aid].get("plans")
+            if not isinstance(snap, list) or not snap:
+                return "待办里没有方案快照,只有编号 —— 中途重新归纳过就会做错东西"
+            if snap[0].get("命名") != "planA":
+                return f"快照存错了:{snap[0].get('命名')}"
+            # 模拟"用户还没确认,又重新归纳了一次"
+            srv._plans().clear()
+            srv._plans().extend([{"命名": "换成别的了", "主标题": "X", "画面怎么拍": "xxx"}])
+            still = srv.PENDING_ACTIONS[aid]["plans"][0].get("命名")
+            if still != "planA":
+                return f"重新归纳之后待办跟着变了:{still}"
+            return True
+        finally:
+            srv.cancel_action(aid)
+            srv._plans().clear()
+    check("待办里存的是方案快照(报价什么就做什么)", t_plan_snapshot)
+
+    # 上一版生成成功后 local 指着它的文件;这一版若在生图**之前**就失败,
+    # 报错会说"图已存在 <上一版的文件>" —— 用户以为这版的钱也花了,其实没花
+    def t_local_not_leaked():
+        import inspect
+        src = "\n".join(ln for ln in inspect.getsource(srv._execute_make_creatives).splitlines()
+                         if not ln.strip().startswith("#"))
+        if "local = None" not in src:
+            return "循环里没有把 local 清空,失败时会报出上一版的文件路径"
+        return None
+    check("失败时不会报出上一版的文件路径", t_local_not_leaked)
 
     # 拆解要回答的是「它为什么跑得动」,不是「它长什么样」——
     # 老板要的是亮点在哪、怎么发挥,不是一份摄影笔记。

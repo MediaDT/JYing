@@ -1057,7 +1057,8 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
                  "②里面不含任何竞品品牌名和具体价格承诺;"
                  "③**现在只有方案还没有图**,拿到图有三条路,一并告诉用户:"
                  "**(a) 让系统直接做出来** —— 调 propose_make_creatives,"
-                 "AI 画没有文字的画面、代码把文案精确排上去,做完直接能投(要花一点钱,会先问过他);"
+                 "出的是**干净的实拍图,图上没有任何文字**(标题和按钮由 NewsBreak 自己渲染,"
+                 "建广告时填进去就行),每版换一种镜头(要花一点钱,会先问过他);"
                  "(b) 用 search_stock_creatives 去授权图库找一张对得上的;"
                  "(c) 按「画面怎么拍」自己拍。"
                  "用户选定某一版后,可以直接用那版的主标题和描述去建广告。"),
@@ -1109,6 +1110,10 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
     cost = len(plans) * cr.COST_PER_IMAGE_USD
     action = {
         "type": "make_creatives", "seq": _seq(),
+        # **把方案原样快照进待办**,不能只存编号:编号指向的是"当前这份方案列表",
+        # 用户还没点头就又归纳了一次的话,列表整个换掉,同样的编号指到别的方案 ——
+        # 报价时给他看的是 A,真做出来、真花钱的是 B。快照之后"看到什么就做什么"。
+        "plans": plans,
         "indexes": picked, "ad_account_id": ad_account_id or "",
         "summary": f"生成 {len(plans)} 张广告图(第 {'、'.join(str(i + 1) for i in picked)} 版)",
     }
@@ -1140,9 +1145,13 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
 
 def _execute_make_creatives(a: dict) -> dict:
     """真生成:逐版画一张干净的实拍图 → 传进 NewsBreak 换 assetUrl。"""
-    plans = [_plans()[i] for i in a.get("indexes", []) if i < len(_plans())]
+    # 优先用待办里的快照 —— 那才是当初报价给用户看的东西。
+    # 没有快照的是**旧待办**(升级前登记的),回落到按编号取,并如实说明风险。
+    plans = a.get("plans")
+    if not isinstance(plans, list) or not plans:
+        plans = [_plans()[i] for i in a.get("indexes", []) if i < len(_plans())]
     if not plans:
-        return {"error": "方案已经不在了(可能中途重新归纳过)。请重新登记一次。"}
+        return {"error": "方案已经不在了(可能中途重新归纳过,或服务重启过)。请重新登记一次。"}
     try:
         acct = a.get("ad_account_id") or _default_ad_account_id()
     except Exception as e:
@@ -1161,6 +1170,7 @@ def _execute_make_creatives(a: dict) -> dict:
     made, failed = [], []
     for idx, plan in zip(a.get("indexes", []), plans):
         tag = f"第{idx + 1}版「{plan.get('命名') or ''}」"
+        local = None      # 每轮清一次:不清的话这一版失败时会报出**上一版**的文件路径
         try:
             # **所有不花钱、但可能失败的准备工作都放在生图之前。**
             # 血泪:第一版把文件名放在 cr.render() 之后算,结果图已经生成、钱已经付了,
@@ -1213,7 +1223,7 @@ def _execute_make_creatives(a: dict) -> dict:
             print(f"[write-op] 生成素材 {tag} → {url}", flush=True)
         except Exception as e:
             # 图已经生成(钱已花)但后续出错时,把本地副本的位置说出来 —— 别让钱白花
-            saved = f"(图已存在 {local})" if 'local' in dir() and local.exists() else ""
+            saved = f"(图已存在 {local})" if local is not None and local.exists() else ""
             failed.append(f"{tag}:{str(e)[:150]}{saved}")
 
     if not made:
