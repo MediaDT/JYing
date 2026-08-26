@@ -302,16 +302,16 @@ def test_pure_logic():
         if "error" not in r or "搜索结果" not in r["error"]:
             bad.append(f"编造的素材地址没被挡:{r}")
         # 归纳至少要 2 条,1 条归纳不出"共同点"
-        old = dict(srv._CREATIVE_MODELS)
+        old = dict(srv._models())
         try:
-            srv._CREATIVE_MODELS.clear()
-            srv._CREATIVE_MODELS["only-one"] = {"版式": "x"}
+            srv._models().clear()
+            srv._models()["only-one"] = {"版式": "x"}
             r = srv.summarize_creative_patterns()
             if "error" not in r or "2 条" not in r["error"]:
                 bad.append(f"只有 1 条时没拒绝归纳:{r}")
         finally:
-            srv._CREATIVE_MODELS.clear()
-            srv._CREATIVE_MODELS.update(old)
+            srv._models().clear()
+            srv._models().update(old)
         return bad or True
 
     # 合规是这个模块的立身之本:产出里不许有竞品品牌、不许照抄具体承诺和原句。
@@ -447,7 +447,7 @@ def test_validation():
     def t_default_budget():
         no_budget = {k: v for k, v in base.items() if k != "budget_dollars"}
         no_budget["keyword"] = "smokedefault"
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_create_campaign(**no_budget)
         if "error" in r:
             return f"不传预算居然被拒:{r['error']}"
@@ -468,7 +468,7 @@ def test_validation():
 
     def t_user_budget_wins():
         mine = {**base, "keyword": "smokemine", "budget_dollars": 50}
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_create_campaign(**mine)
         if "error" in r:
             return f"用户指定预算被拒:{r['error']}"
@@ -526,7 +526,7 @@ def test_validation():
 
     def t_naming_end_to_end():
         """真走一遍登记,确认三个名字都按规范生成(不执行,只登记后撤掉)。"""
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_create_campaign(
             ad_account_id=srv._default_ad_account_id(), keyword="smoketype",
             landing_url="https://example.com/x", headline="Smoke Headline",
@@ -560,7 +560,7 @@ def test_validation():
         from datetime import datetime
         real = srv.sched.now_beijing
         srv.sched.now_beijing = lambda: datetime(2030, 1, 2, 3, 0, tzinfo=srv.sched.BEIJING)
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = None
         try:
             r = srv.propose_create_campaign(
@@ -906,7 +906,7 @@ def test_creative_render():
     # 只能照着**真归纳出来的**方案做图,不许 AI 现编文案去渲染
     # (和 use_found_creative 只认搜索结果里的地址是同一个思路)
     def t_needs_plan():
-        srv._CREATIVE_PLANS.clear()
+        srv._plans().clear()
         return None if srv.propose_make_creatives().get("error") else "没方案时居然让做图了"
     check("没归纳过方案就不许生图(防AI现编)", t_needs_plan)
 
@@ -917,8 +917,8 @@ def test_creative_render():
         for k in [k for k, v in srv.PENDING_ACTIONS.items()
                   if v.get("type") == "make_creatives"]:
             srv.PENDING_ACTIONS.pop(k, None)
-        srv._CREATIVE_PLANS.clear()
-        srv._CREATIVE_PLANS.extend(
+        srv._plans().clear()
+        srv._plans().extend(
             {"命名": f"方案{i}", "主标题": f"Headline {i}", "描述": "Desc.",
              "画面怎么拍": "a roof", "CTA": "Learn More"} for i in (1, 2, 3))
         r = srv.propose_make_creatives()
@@ -940,7 +940,7 @@ def test_creative_render():
                   if v.get("type") == "make_creatives"]:
             srv.PENDING_ACTIONS.pop(k, None)
         srv._save_actions()
-        srv._CREATIVE_PLANS.clear()
+        srv._plans().clear()
         return None
     check("生图走确认关卡:先报价、能挑版、查重、保险丝", t_propose)
 
@@ -1039,7 +1039,7 @@ def test_guardrail():
 
     print("\n【3】写操作护栏(假 id,不会动真广告)")
 
-    srv._REQUEST_SEQ = 10_000
+    srv._new_turn()
     r1 = srv.propose_status_change("campaign", "0", "OFF", name="冒烟测试用")
     aid = r1.get("action_id", "")
 
@@ -1066,9 +1066,9 @@ def test_guardrail():
         return True if "幻觉" in reply else "谎报没有被拆穿"
 
     def t_stamp_real():
-        srv._EXECUTED_THIS_REQUEST.append({"id": "xxx", "ok": True, "detail": "{}"})
+        srv._executed().append({"id": "xxx", "ok": True, "detail": "{}"})
         reply = srv._finalize("搞定")["reply"]
-        srv._EXECUTED_THIS_REQUEST.clear()
+        srv._executed().clear()
         return True if "系统核验" in reply else "真执行没有盖钢印"
 
     def t_cancel():
@@ -1086,7 +1086,7 @@ def test_guardrail():
     # 开启广告必须三层一起开 —— 只开 campaign 等于没开,用户会白等几天。
     # 这条是领域知识,代码层要守住,不能只靠提示词。
     def t_turn_on_needs_children():
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_status_change("campaign", "999", "ON", name="只开一层")
         try:
             if "warning" not in r:
@@ -1098,7 +1098,7 @@ def test_guardrail():
         return True
 
     def t_batch_targets():
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_status_change(
             "campaign", "c1", "ON", name="计划",
             extra_targets=[{"level": "ad_set", "id": "s1", "name": "组"},
@@ -1119,7 +1119,7 @@ def test_guardrail():
         return bad or True
 
     def t_bad_target_rejected():
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_status_change("campaign", "c9", "ON", name="x",
                                       extra_targets=[{"level": "怪层级", "id": "1"}])
         if "error" not in r:
@@ -1128,7 +1128,7 @@ def test_guardrail():
         return True
 
     def t_pause_no_warning():
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_status_change("campaign", "888", "OFF", name="暂停一层")
         try:
             return True if "warning" not in r else "暂停单独一层不该警告(关计划底下自然都停)"
@@ -1143,7 +1143,7 @@ def test_guardrail():
     # 定时开启同样要三层一起开 —— 而且更要紧:到点没人盯着,
     # 只翻了一层的话第二天才发现一条都没跑
     def t_schedule_needs_children():
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_schedule("daily", "09:00", "campaign", "777", "ON", name="只定一层")
         try:
             if "warning" not in r:
@@ -1155,7 +1155,7 @@ def test_guardrail():
         return True
 
     def t_schedule_batch():
-        srv._REQUEST_SEQ += 1
+        srv._new_turn()          # 模拟「下一条用户消息」
         r = srv.propose_schedule("daily", "09:30", "campaign", "c2", "ON", name="计划",
                                  extra_targets=[{"level": "ad_set", "id": "s2", "name": "组"},
                                                 {"level": "ad", "id": "a2", "name": "广告"}])
@@ -1197,6 +1197,125 @@ def test_guardrail():
     check("定时只开 campaign 一层会警告", t_schedule_needs_children)
     check("定时任务能一次开三层", t_schedule_batch)
     check("老定时任务(没 targets)仍能执行", t_old_task_still_runs)
+
+
+# ============ 3.4 并发:两段对话同时提问时,护栏不能串 ============
+
+
+def test_concurrent_turns():
+    print("\n【3.4】两段对话同时提问:保险丝和执行台账不许串")
+    import contextvars
+    import agent_server as srv
+
+    def in_own_request(fn):
+        """在一份**独立的上下文**里跑,模拟另一个请求 —— FastAPI 就是这么隔离的。"""
+        return contextvars.copy_context().run(fn)
+
+    def seq_is_per_request():
+        # 保险丝比的是"登记时的号"和"这一轮的号"。号要是全局的,
+        # B 一来把号推高,A 同一条消息里再 confirm 就拦不住了 → 两阶段确认失效
+        before = srv._seq()
+        a_seq = in_own_request(lambda: (srv._new_turn(), srv._seq())[1])
+        b_seq = in_own_request(lambda: (srv._new_turn(), srv._seq())[1])
+        if a_seq == b_seq:
+            return f"两个请求拿到同一个号({a_seq}),保险丝会误判"
+        if srv._seq() != before:
+            return "请求里开的新一轮泄漏回了外面 —— 说明根本没隔离"
+        return True
+    check("每个请求有自己的序号", seq_is_per_request)
+
+    def fuse_still_bites_after_another_request():
+        # 真场景:A 登记 → B 插进来发了条消息 → A 同一条消息里想直接执行。
+        # 必须照样被拦住。
+        box = {}
+
+        def a_register():
+            srv._new_turn()
+            r = srv.propose_status_change("campaign", "0", "OFF", name="并发冒烟-A")
+            box["aid"] = r.get("action_id", "")
+            box["ctx"] = None
+            return r
+
+        ctx_a = contextvars.copy_context()
+        ctx_a.run(a_register)
+        in_own_request(lambda: (srv._new_turn(), None)[1])     # B 发了一条消息,全局发号器 +1
+        err = ctx_a.run(lambda: srv.confirm_action(box["aid"])).get("error", "")
+        srv.cancel_action(box["aid"])
+        if "保险丝" not in str(err):
+            return f"别的请求插进来之后,保险丝就拦不住了:{err}"
+        return True
+    check("别的对话插队也拦得住自问自答", fuse_still_bites_after_another_request)
+
+    def executed_ledger_is_per_request():
+        # 台账要是全局的:B 开个头就把 A 的执行记录清空 → A 的回复盖不上 🔒,
+        # 甚至被误判成谎报当众自我拆穿;反过来 B 会盖上 A 的记录,声称做了没做的事
+        # 顺序要按真实交错来:A 执行完 → **B 插进来开新一轮** → A 才收尾。
+        # 台账要是全局的,B 那一下就把 A 的记录清空了。
+        ctx_a = contextvars.copy_context()
+        ctx_a.run(lambda: (srv._new_turn(), srv._executed().append({"id": "A1", "ok": True, "detail": "{}"})))
+        reply_b = in_own_request(lambda: (srv._new_turn(), srv._finalize("搞定")["reply"])[1])
+        reply_a = ctx_a.run(lambda: srv._finalize("搞定")["reply"])
+        if "系统核验" not in reply_a:
+            return "真执行的那一轮没盖上核验章"
+        if "系统核验" in reply_b or "A1" in reply_b:
+            return "另一个请求的回复盖上了别人的执行记录(会声称做了没做的事)"
+        return True
+    check("执行台账每个请求一份", executed_ledger_is_per_request)
+
+
+# ============ 3.45 按人隔离:别人的东西不能串过来 ============
+
+
+def test_per_user_isolation():
+    print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
+    import agent_server as srv
+
+    def plans_are_per_user():
+        # 生图是花钱的($0.20/张)。方案要是全局一份,B 一归纳就把 A 的冲掉,
+        # A 接着生图就照着 B 的方案画 —— 花了钱还画错东西
+        tok = srv.CURRENT_USER_ID.set("userA")
+        try:
+            srv._plans().clear()
+            srv._plans().append({"主标题": "A 的方案"})
+        finally:
+            srv.CURRENT_USER_ID.reset(tok)
+        tok = srv.CURRENT_USER_ID.set("userB")
+        try:
+            b_sees = list(srv._plans())
+        finally:
+            srv.CURRENT_USER_ID.reset(tok)
+        tok = srv.CURRENT_USER_ID.set("userA")
+        try:
+            a_still = list(srv._plans())
+        finally:
+            srv.CURRENT_USER_ID.reset(tok)
+        if b_sees:
+            return f"B 看到了 A 的方案:{b_sees}"
+        if not a_still:
+            return "A 自己的方案反而没了"
+        return True
+    check("创意方案按人分开(生图照着自己的画)", plans_are_per_user)
+
+    def cats_cache_keyed_by_user():
+        # 踩过:键写成 ad_account_id or "_default",网页上的人一般不指定账户,
+        # 于是所有人都落在同一个桶里,B 登录后直接读到 A 的品类
+        import inspect
+        src = inspect.getsource(srv._account_categories)
+        if "CURRENT_USER_ID" not in src:
+            return "品类缓存的键没带上是谁"
+        return True
+    check("账户品类缓存的键带了用户", cats_cache_keyed_by_user)
+
+    def brain_client_has_timeout():
+        # SDK 默认 600 秒 + 重试 2 次 = 最坏 30 分钟,而前端 180 秒就放弃了:
+        # 用户看到"等太久了",后端还在跑(中转商可能照样计费)
+        if srv.BRAIN_TIMEOUT_S >= 180:
+            return f"大脑超时 {srv.BRAIN_TIMEOUT_S}s 不小于前端的 180s,后端会白跑"
+        worst = srv.BRAIN_TIMEOUT_S * (srv.BRAIN_RETRIES + 1)
+        if worst > 180:
+            return f"算上重试最坏 {worst}s,超过前端的 180s"
+        return True
+    check("大脑客户端超时小于前端等待上限", brain_client_has_timeout)
 
 
 # ============ 3.5 大脑接力:超时、切换、冷却(纯逻辑,不联网) ============
@@ -1570,6 +1689,8 @@ if __name__ == "__main__":
     test_pure_logic()
     test_validation()
     test_guardrail()
+    test_concurrent_turns()
+    test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()
     test_creative_render()

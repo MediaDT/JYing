@@ -694,7 +694,7 @@ def recommend_creatives(ad_account_id: str = "", days: int = 90, top_n: int = 5)
         out.sort(key=lambda x: (-(x["转化"] or 0), -(x["CTR"] or 0), -(x["花费"] or 0)))
         out = out[:max(1, min(top_n, 10))]
         for item in out:                       # 记住类型,复用时才不会判错图片/视频
-            _ASSET_TYPES[item["asset_url"]] = item["type"]
+            _remember_asset_type(item["asset_url"], item["type"])
 
         return {
             "creatives": out,
@@ -961,7 +961,14 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
 # 拆解过的素材模型,按 image_url 存着。summarize 那步要一次看多条,
 # 靠 AI 把几百行 JSON 在工具参数里传来传去不现实,也容易被截断 ——
 # 和 _SEARCHED_ASSETS 一个路数,存在这边,只传编号。
-_CREATIVE_MODELS: dict[str, dict] = {}
+# **按人分开**:B 归纳"共同点"时混进 A 拆过的素材,得出的结论就是错的
+# (和 _CREATIVE_PLANS_BY_USER 同理)。
+_CREATIVE_MODELS_BY_USER: dict[str, dict[str, dict]] = {}
+
+
+def _models() -> dict:
+    """当前这个人拆解过的素材模型。不在用户上下文时用 "-" 这个桶。"""
+    return _CREATIVE_MODELS_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", {})
 
 
 def decompose_creative(image_url: str) -> dict:
@@ -1006,13 +1013,13 @@ def decompose_creative(image_url: str) -> dict:
         "预估曝光": info.get("预估曝光"), "落地页域名": info.get("落地页域名"),
         "尺寸": f"{info.get('width')}×{info.get('height')}",
     }
-    _CREATIVE_MODELS[info["image_url"]] = model
-    while len(_CREATIVE_MODELS) > 60:
-        _CREATIVE_MODELS.pop(next(iter(_CREATIVE_MODELS)))
+    _models()[info["image_url"]] = model
+    while len(_models()) > 60:
+        _models().pop(next(iter(_models())))
 
     return {
         "素材模型": model,
-        "已拆解总数": len(_CREATIVE_MODELS),
+        "已拆解总数": len(_models()),
         "note": ("把「版式/画面主体/文字层/文案角度」讲给用户听,重点说**它为什么有效**。"
                  "「竞品标识」里如果有品牌名,提醒用户那是别人的品牌,我们的方案里不会用。"
                  "拆完两三条之后,可以问用户要不要调 summarize_creative_patterns 出方案。"),
@@ -1029,7 +1036,7 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
     brand:我们自己的品牌名;landing_url:我们的落地页;n_variants:出几版方案(默认3,最多5)。
     产出的方案里不会出现竞品品牌,也不会照抄竞品的具体价格/时效承诺。
     """
-    models = list(_CREATIVE_MODELS.values())
+    models = list(_models().values())
     if len(models) < 2:
         return {"error": f"目前只拆解了 {len(models)} 条,至少要 2 条才归纳得出规律。"
                          "请先多用 decompose_creative 拆几条竞品素材。"}
@@ -1039,8 +1046,8 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
         return {"error": f"归纳失败:{str(e)[:200]}"}
     if out.get("error"):
         return out
-    _CREATIVE_PLANS.clear()
-    _CREATIVE_PLANS.extend(out.get("方案") or [])
+    _plans().clear()
+    _plans().extend(out.get("方案") or [])
     return {
         **out,
         "依据条数": len(models),
@@ -1057,7 +1064,15 @@ def summarize_creative_patterns(brand: str = "", landing_url: str = "",
     }
 
 
-_CREATIVE_PLANS: list[dict] = []   # 最近一次 summarize 出的方案(供生图工具照做)
+# 最近一次 summarize 出的方案(供生图工具照做)。**按人分开存** ——
+# 全局一份的话,B 一归纳就把 A 的方案冲掉,A 接着生图就照着 B 的方案画了,
+# 而生图是要花钱的($0.20/张)。和 _MY_CATS_CACHE 那次串号是同一类问题。
+_CREATIVE_PLANS_BY_USER: dict[str, list[dict]] = {}
+
+
+def _plans() -> list[dict]:
+    """当前这个人的创意方案。不在用户上下文(命令行/测试)时用 "-" 这个桶。"""
+    return _CREATIVE_PLANS_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", [])
 
 # 生成好的图先存这儿再上传。生图是花过钱的,上传万一失败也不能把图弄丢。
 # data/ 已被 .gitignore 排除。
@@ -1074,26 +1089,26 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
     variants:要做哪几版,如 "1,3";留空=全做。
     **生图要花钱**,所以走确认关卡:先登记,用户同意后才真的生成。
     """
-    if not _CREATIVE_PLANS:
+    if not _plans():
         return {"error": "还没有可用的方案。请先用 decompose_creative 拆几条竞品素材,"
                          "再用 summarize_creative_patterns 归纳出方案,然后才能做图。"}
 
-    picked = list(range(len(_CREATIVE_PLANS)))
+    picked = list(range(len(_plans())))
     if (variants or "").strip():
         picked = []
         for chunk in str(variants).replace(",", ",").split(","):
             chunk = chunk.strip()
-            if chunk.isdigit() and 1 <= int(chunk) <= len(_CREATIVE_PLANS):
+            if chunk.isdigit() and 1 <= int(chunk) <= len(_plans()):
                 picked.append(int(chunk) - 1)
         picked = sorted(set(picked))
         if not picked:
-            return {"error": f"没看懂要做哪几版。现在有 {len(_CREATIVE_PLANS)} 版,"
+            return {"error": f"没看懂要做哪几版。现在有 {len(_plans())} 版,"
                              f"请用编号,比如 variants='1,3'。"}
 
-    plans = [_CREATIVE_PLANS[i] for i in picked]
+    plans = [_plans()[i] for i in picked]
     cost = len(plans) * cr.COST_PER_IMAGE_USD
     action = {
-        "type": "make_creatives", "seq": _REQUEST_SEQ,
+        "type": "make_creatives", "seq": _seq(),
         "indexes": picked, "ad_account_id": ad_account_id or "",
         "summary": f"生成 {len(plans)} 张广告图(第 {'、'.join(str(i + 1) for i in picked)} 版)",
     }
@@ -1125,7 +1140,7 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
 
 def _execute_make_creatives(a: dict) -> dict:
     """真生成:逐版画一张干净的实拍图 → 传进 NewsBreak 换 assetUrl。"""
-    plans = [_CREATIVE_PLANS[i] for i in a.get("indexes", []) if i < len(_CREATIVE_PLANS)]
+    plans = [_plans()[i] for i in a.get("indexes", []) if i < len(_plans())]
     if not plans:
         return {"error": "方案已经不在了(可能中途重新归纳过)。请重新登记一次。"}
     try:
@@ -1191,7 +1206,7 @@ def _execute_make_creatives(a: dict) -> dict:
             url = data.get("assetUrl") or data.get("url") or ""
             if not url:
                 raise RuntimeError("平台没返回素材地址")
-            _ASSET_TYPES[url] = "IMAGE"
+            _remember_asset_type(url, "IMAGE")
             made.append({"第几版": idx + 1, "命名": plan.get("命名", ""),
                          "主标题": plan.get("主标题", ""), "描述": plan.get("描述", ""),
                          "asset_url": url})
@@ -1240,7 +1255,7 @@ def use_found_creative(image_url: str, ad_account_id: str = "") -> dict:
         asset_url = str(data.get("assetUrl") or data.get("url") or "")
         if not asset_url:
             return {"error": "平台没有返回素材地址,请让用户改用 📎 手动上传"}
-        _ASSET_TYPES[asset_url] = nb.creative_type_of(filename, ctype)
+        _remember_asset_type(asset_url, nb.creative_type_of(filename, ctype))
         print(f"[stock] 转存素材 {info['source']} → {asset_url}", flush=True)
         return {"asset_url": asset_url, "asset_filename": filename,
                 "来自": info["source"], "许可证": info["license"],
@@ -1290,8 +1305,36 @@ def _save_actions() -> None:
 
 PENDING_ACTIONS: dict[str, dict] = _load_actions()  # 保险箱:登记好、还没执行的动作
 # 计数器从"已存待办的最大序号"续起,避免服务器重启后序号归零和旧待办撞车
+# `_REQUEST_SEQ` 只是**发号器**(单调递增,重启后从保险箱里已有的最大号续起)。
+# 真正"这一轮是第几号"和"这一轮执行了什么",**必须按请求隔离** ——
+# 页面现在允许几段对话同时提问(见 static/index.html 的多线程改造),
+# 两个请求同时在飞时,模块级全局会互相踩:
+#   · A 刚记下"我执行了待办 X",B 一开头就把台账清空 → A 的回复盖不上 🔒 核验章,
+#     甚至因为"有待办没执行 + 回复里有'已创建'"被误判成谎报,当着用户面自我拆穿;
+#   · 反过来,B 的回复可能盖上 A 的执行记录,**声称做了它根本没做的事**;
+#   · 保险丝更要命:A 登记时是 5 号,B 一来全局变成 6 号,A 同一条消息里再调
+#     confirm_action 就**拦不住了** —— 两阶段确认整个失效。
+# 所以用 contextvars(和 CURRENT_USER_ID / CURRENT_CREDS 一个路数):
+# 每个请求一份,线程里 copy_context() 带得过去,互不干扰。
 _REQUEST_SEQ = max((a.get("seq", 0) for a in PENDING_ACTIONS.values()), default=0)
-_EXECUTED_THIS_REQUEST: list[str] = []  # 本轮真实执行记录(代码层事实,AI 无法伪造)
+_SEQ_LOCK = threading.Lock()
+CURRENT_SEQ: contextvars.ContextVar = contextvars.ContextVar("adbot_seq", default=0)
+CURRENT_EXECUTED: contextvars.ContextVar = contextvars.ContextVar("adbot_executed", default=None)
+
+
+def _seq() -> int:
+    """这一轮用户消息的序号(保险丝比对用)。"""
+    return CURRENT_SEQ.get()
+
+
+def _executed() -> list:
+    """这一轮的真实执行台账。**不能用可变对象当 ContextVar 的默认值**
+    ——那样所有请求会共用同一个 list,等于没隔离。"""
+    lst = CURRENT_EXECUTED.get()
+    if lst is None:
+        lst = []
+        CURRENT_EXECUTED.set(lst)
+    return lst
 
 
 def _find_duplicate(candidate: dict) -> str:
@@ -1347,7 +1390,7 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
     candidate = {
         "type": "update_status",
         "level": level, "object_id": str(object_id), "status": status,
-        "name": name, "targets": targets, "seq": _REQUEST_SEQ,
+        "name": name, "targets": targets, "seq": _seq(),
     }
     dup = _find_duplicate(candidate)
     if dup:
@@ -1521,7 +1564,7 @@ def propose_create_campaign(
         "call_to_action": call_to_action or "Learn More",
         "asset_url": asset_url,
         "asset_filename": asset_filename,
-        "seq": _REQUEST_SEQ,
+        "seq": _seq(),
     }
     dup = _find_duplicate(candidate)
     if dup:
@@ -1645,7 +1688,7 @@ def confirm_action(action_id: str) -> dict:
     action = PENDING_ACTIONS.get(action_id)
     if not action:
         return {"error": f"找不到待办 {action_id}(可能已执行/已取消,或 id 有误)"}
-    if action["seq"] == _REQUEST_SEQ:
+    if action["seq"] == _seq():
         # 保险丝:登记和执行发生在同一条用户消息里 → 物理拦截
         return {"error": f"保险丝拦截:登记和执行不能在同一条用户消息里完成。待办 {action_id} 已登记好,"
                          f"不要重新登记!请向用户复述内容并附上编号 {action_id},"
@@ -1683,15 +1726,15 @@ def confirm_action(action_id: str) -> dict:
         # 把"真实发生了什么"记入代码层台账(聊天回复会盖'系统核验'钢印)
         if result.get("done"):
             detail = json.dumps(result.get("created") or result.get("detail") or "", ensure_ascii=False)[:220]
-            _EXECUTED_THIS_REQUEST.append({"id": action_id, "ok": True, "detail": detail})
+            _executed().append({"id": action_id, "ok": True, "detail": detail})
             PENDING_ACTIONS.pop(action_id, None)
             _save_actions()
         else:
-            _EXECUTED_THIS_REQUEST.append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
+            _executed().append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
         return {"executed": {k: v for k, v in action.items() if k != "seq"}, **(result if isinstance(result, dict) else {"detail": result})}
     except Exception as e:
         print(f"[write-op] 待办 {action_id} 异常: {e}", flush=True)
-        _EXECUTED_THIS_REQUEST.append({"id": action_id, "ok": False, "detail": str(e)[:220]})
+        _executed().append({"id": action_id, "ok": False, "detail": str(e)[:220]})
         return {"error": str(e)}
 
 
@@ -1735,7 +1778,7 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
         "targets": targets,
         # 记下是谁定的:到点时看表线程要用他自己的凭据去执行
         "user_id": CURRENT_USER_ID.get(),
-        "seq": _REQUEST_SEQ,
+        "seq": _seq(),
     }
     dup = _find_duplicate(candidate)
     if dup:
@@ -1826,7 +1869,15 @@ from fastapi import File, UploadFile  # noqa: E402
 
 _CACHED_ACCOUNT_ID: dict = {}    # {token前12位: 账户id} —— 按 token 分桶,不同用户不串号
 # 素材地址 → 素材类型(IMAGE/GIF/VIDEO),上传时记下,建广告时查回
+# 素材地址 → 类型。和 _SEARCHED_ASSETS / 拆解结果一样要有上限,
+# 否则进程活得越久它越大(长驻服务是按月算的)。
 _ASSET_TYPES: dict[str, str] = {}
+
+
+def _remember_asset_type(url: str, kind: str) -> None:
+    _ASSET_TYPES[url] = kind
+    while len(_ASSET_TYPES) > 500:
+        _ASSET_TYPES.pop(next(iter(_ASSET_TYPES)))
 
 
 def _all_ad_accounts() -> list[dict]:
@@ -2355,7 +2406,7 @@ async def upload(file: UploadFile = File(...)):
 
         # 记下这个素材的真实类型(浏览器给的 MIME 最权威)。
         # 建广告时按 assetUrl 查回来,不用指望 AI 把类型传对,也不怕文件名没后缀。
-        _ASSET_TYPES[asset_url] = nb.creative_type_of(filename, file.content_type or "")
+        _remember_asset_type(asset_url, nb.creative_type_of(filename, file.content_type or ""))
         return {"asset_url": asset_url, "filename": filename}
 
     except nb.NewsBreakError as e:
@@ -2411,6 +2462,13 @@ def _system_prompt_now(lang: str = "zh") -> str:
 # 血泪:原来只认 429,结果 Gemini 一报 503(服务繁忙)整条链就断了,
 # 明明有 ofox 兜底也不去用,用户只看到一句"稍后再试"。
 _RETRYABLE_CODES = (429, 500, 502, 503, 504)
+
+# openai / anthropic 这两个 SDK 的**默认超时是 600 秒、还自动重试 2 次** ——
+# 最坏情况一个请求能挂 30 分钟。而前端 180 秒就 abort 了:用户早看到
+# 「等太久了」,后端还在那儿跑(中转商那边可能照样计费)。
+# 所以显式设一个**小于前端 180 秒**的值,让后端先失败、把真实原因说出来。
+BRAIN_TIMEOUT_S = float(os.environ.get("BRAIN_TIMEOUT_S", "75"))
+BRAIN_RETRIES = int(os.environ.get("BRAIN_RETRIES", "1"))
 
 # ===== Gemini 的超时与熔断 =====
 # 实测(2026-08-26,开发机):`generativelanguage.googleapis.com` 的 TLS 握手 16ms、
@@ -2748,7 +2806,7 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
 
 def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
     """大脑 B:ChatGPT。钥匙从 OPENAI_API_KEY 读取(转发服务再加 OPENAI_BASE_URL)。"""
-    client = openai.OpenAI()
+    client = openai.OpenAI(timeout=BRAIN_TIMEOUT_S, max_retries=BRAIN_RETRIES)
     msgs = [{"role": "system", "content": _system_prompt_now(lang)}] + [
         {"role": m.role, "content": m.content} for m in messages
     ]
@@ -2836,7 +2894,7 @@ def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, 
 
 def ask_claude(messages: list[ChatMessage], lang: str = "zh") -> str:
     """大脑 B:Claude。钥匙从环境变量 ANTHROPIC_API_KEY 自动读取。"""
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=BRAIN_TIMEOUT_S, max_retries=BRAIN_RETRIES)
     response = client.messages.create(
         model="claude-opus-4-8",           # 当前推荐的主力模型
         max_tokens=16000,                  # 单次回答的长度上限
@@ -2866,9 +2924,10 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
     """
     english = str(lang).lower().startswith("en")
 
-    if _EXECUTED_THIS_REQUEST:
+    executed = _executed()
+    if executed:
         parts = []
-        for rec in _EXECUTED_THIS_REQUEST:
+        for rec in executed:
             if isinstance(rec, dict):
                 if english:
                     verb = "succeeded" if rec.get("ok") else "FAILED"
@@ -2920,7 +2979,7 @@ def _plain_completion(prompt: str, lang: str = "zh") -> str:
         raise last
 
     def _openai() -> str:
-        client = openai.OpenAI()
+        client = openai.OpenAI(timeout=BRAIN_TIMEOUT_S, max_retries=BRAIN_RETRIES)
         models = ["gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini"]
         custom = os.environ.get("OPENAI_MODEL", "").strip()
         if custom:
@@ -3059,10 +3118,16 @@ def _brain_error(e: Exception) -> tuple[int, str]:
 
 
 def _new_turn() -> None:
-    """每条用户消息开始时要做的两件事(两个接口共用)。"""
+    """每条用户消息开始时要做的三件事(两个接口共用)。
+
+    **必须在起线程 / copy_context() 之前调**,否则设的上下文带不进线程。
+    """
     global _REQUEST_SEQ
-    _REQUEST_SEQ += 1               # 保险丝计数:区分"登记"和"确认"是不是同一条消息
-    _EXECUTED_THIS_REQUEST.clear()  # 本轮"真实执行台账"清零
+    with _SEQ_LOCK:                 # 几段对话可能同时发消息,发号要串行
+        _REQUEST_SEQ += 1
+        seq = _REQUEST_SEQ
+    CURRENT_SEQ.set(seq)            # 保险丝:区分"登记"和"确认"是不是同一条消息
+    CURRENT_EXECUTED.set([])        # 本轮"真实执行台账",一轮一份
     load_env_file()                 # 现读 .env:刚填的钥匙不用重启就生效
 
 

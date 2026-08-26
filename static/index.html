@@ -657,7 +657,9 @@
   // 这份本地缓存属于哪个账号。同一台电脑换人登录时靠它认出"缓存不是我的"。
   const UID_KEY = "adbot-cache-uid";
   const MAX_KEEP = 200;    // 单个会话最多留 200 条
-  const MAX_CONVS = 30;    // 左栏最多留 30 个会话,超了丢最旧的
+  // **必须和服务端 accounts.py 的 MAX_CONVS 一致**:前端是按这个数裁完之后
+  // 把**整份**列表 PUT 上去的,这边小一截 = 每次打开页面都在悄悄删服务器上的旧对话。
+  const MAX_CONVS = 50;    // 左栏最多留 50 个会话,超了丢最旧的
 
   /** 读出所有会话。顺手把老版本的单条历史迁移成第一个会话,不丢用户数据。 */
   function loadConversations() {
