@@ -83,6 +83,16 @@ console.log("\n【4】删除会话");
   t("被删的会话消失", !c.some((x) => x.id === "c1"), `剩 ${c.length} 个`);
   t("另一个还在", c.some((x) => x.id === "c2"));
   t("自动切到剩下那个", app.curId() === "c2", app.curId());
+
+  // 按钮**不能默认隐身**。原来是 opacity:0、悬停才显形 —— 对小白等于
+  // "没有这个功能",触屏设备上更是永远点不到(没有悬停这回事)。
+  const css = require("fs").readFileSync("/root/workspace/my-agent/static/index.html", "utf8")
+    .match(/\.conv-del\s*\{[^}]*\}/)[0];
+  const base = (css.match(/opacity:\s*([\d.]+)/) || [])[1];
+  t("删除按钮默认就看得见", base !== undefined && parseFloat(base) >= 0.4, `默认 opacity=${base}`);
+  t("每段历史对话都带删除按钮",
+    app.registry["conv-list"].children.every((it) =>
+      (it.children || []).some((x) => x.className === "conv-del")));
 }
 
 // 下面两条要等 fetch 的回调跑完,所以放在 async 块里
