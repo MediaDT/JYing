@@ -69,6 +69,13 @@ console.log("\n【3】点「新对话」:旧的留在列表,不删除");
   t("当前已切到新会话", app.curId() !== "c1");
 }
 
+
+// 下面两条要等 fetch 的回调跑完,所以放在 async 块里
+const tick = () => new Promise((r) => setImmediate(r));
+const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
+
+(async () => {
+
 console.log("\n【4】删除会话");
 {
   const store = {
@@ -78,9 +85,29 @@ console.log("\n【4】删除会话");
     "adbot-current-conv": "c1" };
   const app = boot(store);
   const delBtn = app.registry["conv-list"].children[0].children.find((x) => x.className === "conv-del");
+
+  // 删除现在是两步:点垃圾桶 → 页面内弹框里再点一次「删除」。
+  // 先验"只点垃圾桶不会删" —— 少了这一步,误触就是不可逆的数据丢失。
   delBtn.fire("click");
+  await tick();
+  t("点垃圾桶只是弹框,还没真删", app.convs().length === 2, `剩 ${app.convs().length} 个`);
+  t("弹框弹出来了", app.registry["confirm-overlay"].classList.contains("show"));
+  t("弹框里写清了后果",
+    String(app.registry["confirm-text"]._text || "").indexOf("找不回来") >= 0,
+    String(app.registry["confirm-text"]._text || ""));
+
+  // 先点「再想想」,确认取消是真的不删
+  app.registry["confirm-cancel"].fire("click");
+  await tick();
+  t("点「再想想」不删", app.convs().length === 2, `剩 ${app.convs().length} 个`);
+  t("取消后弹框收起", !app.registry["confirm-overlay"].classList.contains("show"));
+
+  delBtn.fire("click");
+  await tick();
+  app.registry["confirm-ok"].fire("click");
+  await tick();
   const c = app.convs();
-  t("被删的会话消失", !c.some((x) => x.id === "c1"), `剩 ${c.length} 个`);
+  t("确认后才真删", !c.some((x) => x.id === "c1"), `剩 ${c.length} 个`);
   t("另一个还在", c.some((x) => x.id === "c2"));
   t("自动切到剩下那个", app.curId() === "c2", app.curId());
 
@@ -98,13 +125,19 @@ console.log("\n【4】删除会话");
   t("按钮里是垃圾桶图标(不是空白/不是 undefined)",
     /<svg[\s\S]*<\/svg>/.test(String(delBtn.innerHTML || "")),
     String(delBtn.innerHTML || "").slice(0, 30));
+
+  // 浏览器原生 confirm() 不能再出现:它是系统级弹条,样式不受控,
+  // 而且有些浏览器允许用户勾"不再显示" —— 一勾这道确认就彻底没了,
+  // 而删对话是不可逆的。
+  // **先剥注释再查**:注释里正当地写着"不用浏览器自带的 confirm()",
+  // 直接搜会把它算进去(这坑项目里踩过好几次)。
+  const page = require("fs").readFileSync("/root/workspace/my-agent/static/index.html", "utf8")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").map((ln) => ln.replace(/\s\/\/.*$/, "").replace(/^\s*\/\/.*$/, "")).join("\n");
+  const native = page.match(/(?<![A-Za-z0-9_$.])confirm\s*\(/g) || [];
+  t("没有再用浏览器原生 confirm()", native.length === 0, `还有 ${native.length} 处`);
 }
-
-// 下面两条要等 fetch 的回调跑完,所以放在 async 块里
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
-
-(async () => {
 
 console.log("\n【5】同一个人重新登录:自己的记录不能被误删");
 {

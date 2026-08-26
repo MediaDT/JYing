@@ -113,6 +113,28 @@
   }
   .conv-empty { padding: 10px; font-size: 12px; color: var(--muted); line-height: 1.6; }
 
+  /* 页面内确认框。**为什么不用浏览器自带的 confirm()**:它是系统级弹条,
+     贴在浏览器最上面、样式完全不受我们控制,和页面像两个东西;有些浏览器
+     还允许用户勾"不再显示",一勾这个确认就彻底没了 —— 删对话是不可逆的,
+     确认这一步不能交给浏览器决定。 */
+  .confirm-modal { max-width: 400px; text-align: center; }
+  .confirm-icon {
+    width: 46px; height: 46px; margin: 2px auto 12px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, #ef4444 12%, transparent); color: #dc2626;
+  }
+  .confirm-modal h2 { margin-bottom: 8px; }
+  .confirm-text { font-size: 13px; color: var(--muted); line-height: 1.7; margin-bottom: 20px; }
+  .confirm-actions { display: flex; gap: 10px; }
+  .confirm-actions button {
+    flex: 1; padding: 11px 14px; font: inherit; font-size: 13.5px; font-weight: 600;
+    border-radius: 11px; cursor: pointer; border: 1.5px solid var(--border);
+    background: var(--bg); color: var(--text); transition: all .12s ease;
+  }
+  .confirm-actions button:hover { border-color: var(--muted); }
+  .confirm-actions .danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+  .confirm-actions .danger:hover { background: #b91c1c; border-color: #b91c1c; }
+
   .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
   /* 窄屏:左栏默认收起,用 ☰ 打开时浮在上层 */
@@ -408,6 +430,26 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- 页面内确认框(替代浏览器的 confirm())。默认焦点给「取消」——
+       删除是不可逆的,回车不该正好落在危险按钮上。 -->
+  <div class="overlay" id="confirm-overlay">
+    <div class="modal confirm-modal">
+      <div class="confirm-icon">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>
+        </svg>
+      </div>
+      <h2 id="confirm-title"></h2>
+      <div class="confirm-text" id="confirm-text"></div>
+      <div class="confirm-actions">
+        <button id="confirm-cancel"></button>
+        <button class="danger" id="confirm-ok"></button>
+      </div>
+    </div>
+  </div>
+
   <div class="main">
     <aside id="sidebar">
       <div class="sidebar-head" id="sidebar-head">对话记录</div>
@@ -504,7 +546,13 @@
       noConvs: "还没有对话记录。聊几句之后,点「✚ 新对话」就会把这段存到这里。",
       untitled: "新对话",
       deleteConv: "删除这个对话",
-      confirmDelete: "删除这个对话?删了就找不回来了。",
+      confirmDelete: "删了就找不回来了,确定吗?",
+      confirmDeleteTitle: "删除这个对话?",
+      confirmLogoutTitle: "退出登录?",
+      confirmLogout: "聊天记录存在你的账号里,下次登录还能看到。",
+      btnCancel: "再想想",
+      btnDelete: "删除",
+      btnLogout: "退出",
       attachTitle: "上传广告素材(图片/视频)",
       sendTitle: "发送",
       placeholder: "输入消息,回车发送(Shift+回车换行)…",
@@ -587,7 +635,13 @@
       noConvs: "No saved chats yet. Once you've talked a bit, hit \"✚ New chat\" and this one gets saved here.",
       untitled: "New chat",
       deleteConv: "Delete this chat",
-      confirmDelete: "Delete this chat? This can't be undone.",
+      confirmDelete: "This can't be undone. Are you sure?",
+      confirmDeleteTitle: "Delete this chat?",
+      confirmLogoutTitle: "Log out?",
+      confirmLogout: "Your chats are saved to your account - they'll be here next time you log in.",
+      btnCancel: "Never mind",
+      btnDelete: "Delete",
+      btnLogout: "Log out",
       attachTitle: "Upload creative (image / video)",
       sendTitle: "Send",
       placeholder: "Type a message. Enter to send, Shift+Enter for a new line…",
@@ -1337,6 +1391,43 @@
     toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
   }
 
+  // ===== 页面内确认框 =====
+  // 监听**只挂一次**(挂在每次弹出时会越积越多,真实 DOM 里一次点击会触发好几遍);
+  // 待回应的那个 resolve 存在这儿。
+  let confirmResolve = null;
+
+  function closeConfirm(ok) {
+    document.getElementById("confirm-overlay").classList.remove("show");
+    const r = confirmResolve;
+    confirmResolve = null;
+    if (r) r(ok);
+  }
+
+  /** 弹一个确认框,返回 Promise<boolean>。用法:askConfirm({...}).then(ok => ...) */
+  function askConfirm(opts) {
+    return new Promise(function (resolve) {
+      closeConfirm(false);            // 上一个还开着就先当"取消"关掉,别叠罗汉
+      confirmResolve = resolve;
+      document.getElementById("confirm-title").textContent = opts.title || "";
+      document.getElementById("confirm-text").textContent = opts.text || "";
+      document.getElementById("confirm-ok").textContent = opts.ok || t().btnDelete;
+      document.getElementById("confirm-cancel").textContent = t().btnCancel;
+      document.getElementById("confirm-overlay").classList.add("show");
+      // 焦点给「取消」:删除不可逆,回车不该正好落在危险按钮上
+      const c = document.getElementById("confirm-cancel");
+      if (c.focus) c.focus();
+    });
+  }
+
+  document.getElementById("confirm-ok").addEventListener("click", () => closeConfirm(true));
+  document.getElementById("confirm-cancel").addEventListener("click", () => closeConfirm(false));
+  document.getElementById("confirm-overlay").addEventListener("click", (e) => {
+    if (e.target === document.getElementById("confirm-overlay")) closeConfirm(false);   // 点空白 = 取消
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && confirmResolve) closeConfirm(false);
+  });
+
   /** 把屏幕上的消息重画成某个会话的内容 */
   function paintCurrent() {
     paintSeq++;                                // 屏幕重画过 → 之前拿到的行号都作废
@@ -1373,7 +1464,12 @@
     // 只挡**它自己**还在生成的那一段:删了的话回复回来会把它又建出来,
     // 用户看着像"删不掉"。别的对话在跑不影响删这一段。
     if (running.has(id)) { showToast(t().busyDelete); return; }
-    if (!confirm(t().confirmDelete)) return;
+    askConfirm({ title: t().confirmDeleteTitle, text: t().confirmDelete, ok: t().btnDelete })
+      .then((yes) => { if (yes) doDeleteConversation(id); });
+  }
+
+  /** 真正动手删(确认之后才走到这儿) */
+  function doDeleteConversation(id) {
     const idx = conversations.findIndex((c) => c.id === id);
     if (idx === -1) return;
     conversations.splice(idx, 1);
@@ -1744,8 +1840,11 @@
     chip.title = "点击退出登录";
     chip.style.cursor = "pointer";
     chip.onclick = function () {
-      if (!confirm("确定退出登录吗?(记录已存在账号里,下次登录还能看到)")) return;
-      fetch("/api/logout", { method: "POST" }).finally(function () { location.href = "/login"; });
+      askConfirm({ title: t().confirmLogoutTitle, text: t().confirmLogout, ok: t().btnLogout })
+        .then(function (yes) {
+          if (!yes) return;
+          fetch("/api/logout", { method: "POST" }).finally(function () { location.href = "/login"; });
+        });
     };
   }
 
