@@ -144,6 +144,58 @@ console.log("\n【6】同一台电脑换账号登录:绝不能看到/上传别�
   t("缓存归属改成了当前账号", store["adbot-cache-uid"] === "uid-demon", store["adbot-cache-uid"]);
 }
 
+console.log("\n【X】登录后必须能把服务器上的聊天记录读回来");
+{
+  // 线上真实故障:服务器上明明有记录,左栏却显示"还没有对话记录";
+  // 一发新消息,服务器那份就被覆盖成本地这份 —— 老记录就此消失。
+  // 根因是 `conversations = remote` 给 const 赋值抛 TypeError,
+  // 又正好被最外层 .catch 吞掉,整个"以服务器为准"的分支静默失效。
+  const remote = [
+    { id: "s1", title: "查看广告账户余额", updatedAt: 200,
+      messages: [{ role: "user", content: "余额还有多少?" },
+                 { role: "assistant", content: "还有 $100" }] },
+    { id: "s2", title: "同行都在投什么", updatedAt: 100,
+      messages: [{ role: "user", content: "同行都在投什么?" }] },
+  ];
+  const puts = [];
+  const app = boot({ "adbot-uid": "u-demo" }, {
+    me: { username: "demo", id: "u-demo" },
+    fetchBody: (u, init) => {
+      if (u.indexOf("/api/chats") === 0) {
+        if (init && init.method === "PUT") {
+          puts.push(JSON.parse(init.body).conversations);
+          return { ok: true };
+        }
+        return { conversations: remote };
+      }
+      return null;
+    },
+  });
+  await tick(); await tick(); await tick(); await tick();
+
+  t("服务器上的记录读回来了", app.win.convs().length === 2,
+    `拿到 ${app.win.convs().length} 段`);
+  t("标题对得上", (app.win.convs()[0] || {}).title === "查看广告账户余额",
+    String((app.win.convs()[0] || {}).title));
+  t("左栏真的画出来了(不是空的)",
+    app.registry["conv-list"].children.length === 2,
+    `左栏 ${app.registry["conv-list"].children.length} 项`);
+  t("当前这段的消息也恢复了", app.win.history().length === 2, `${app.win.history().length} 条`);
+
+  // 最要命的一条:读不回来的话,第一条新消息会把服务器那份覆盖掉
+  const before = puts.length;
+  app.registry["input"].value = "新问题";
+  app.registry["send"].fire("click");
+  await tick(); await tick(); await tick();
+  const last = puts[puts.length - 1] || app.win.convs();
+  // 按 id 判,不按标题 —— 标题是从第一条消息现算的,发了新消息可能会变
+  const ids = last.map((c) => c.id);
+  t("发新消息不会把老记录冲掉",
+    ids.indexOf("s1") >= 0 && ids.indexOf("s2") >= 0,
+    `上传了 ${last.length} 段:${ids.join("/")}`);
+  t("确实往服务器推了一次", puts.length > before, `PUT ${puts.length - before} 次`);
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 

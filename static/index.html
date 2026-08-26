@@ -446,6 +446,7 @@
       storageFull: "⚠️ 浏览器存储空间已满,这段对话可能存不下了。请点「✚ 新对话」或删掉几段旧对话再继续。",
       dashBtn: "📊 大屏",
       dashBtnTitle: "打开数据大屏(KPI / 趋势 / AI 诊断)",
+      syncFailed: "⚠️ 没能读回你账号里的聊天记录(网络或服务出了问题)。**先别发新消息**,刷新一下页面再试 —— 现在发的话可能会覆盖掉服务器上的旧记录。",
       imgZoomHint: "点图片可以放大看",
       imgOpenNew: "在新标签页打开原图 ↗",
       imgLoading: "加载中…",
@@ -525,6 +526,7 @@
       storageFull: "⚠️ Browser storage is full; this chat may not be saved. Start a new chat or delete some old ones to continue.",
       dashBtn: "📊 Dashboard",
       dashBtnTitle: "Open the data dashboard (KPIs / trends / AI review)",
+      syncFailed: "⚠️ Could not load your saved conversations (network or server issue). **Do not send a new message yet** — refresh the page first, or you may overwrite the history stored on the server.",
       imgZoomHint: "Click an image to enlarge",
       imgOpenNew: "Open original in a new tab ↗",
       imgLoading: "Loading…",
@@ -1511,13 +1513,20 @@
           // 确认就是本人 → 把刚才按住没显示的缓存放回去(服务器要是挂了还能看历史)
           Array.prototype.push.apply(conversations, cachedConvs);
           currentId = localStorage.getItem(CUR_KEY) || (conversations[0] || {}).id || "";
+          renderConvList();   // 放回去要重画,否则左栏一直显示"还没有对话记录"
         }
         try { localStorage.setItem(UID_KEY, uid); } catch (e) {}
         return fetch("/api/chats").then(function (r) { return r.json(); }).then(function (data) {
           var remote = (data && data.conversations) || [];
           if (remote.length > 0) {
-            // 服务器上有 → 以服务器为准(这样换电脑登录也能看到)
-            conversations = remote;
+            // 服务器上有 → 以服务器为准(这样换电脑登录也能看到)。
+            // **必须原地替换,不能 `conversations = remote`** —— 它是 const,
+            // 赋值会抛 TypeError,而这个异常正好被最外层 .catch 吞掉,
+            // 表现为:左栏空着、服务器上的历史永远读不回来,接着第一条新消息
+            // 一发就把服务器那份覆盖成本地这份。数据就是这么丢的。
+            // 而且别处(pushToServer 等)持有的是这个数组对象本身,换个对象也接不上。
+            conversations.length = 0;
+            Array.prototype.push.apply(conversations, remote);
             currentId = (conversations[0] && conversations[0].id) || "";
             history.length = 0;
             var cur = conversations.find(function (c) { return c.id === currentId; });
@@ -1535,7 +1544,21 @@
           }
         });
       })
-      .catch(function (e) { console.warn("读取账号信息失败:", e); });
+      .catch(function (e) {
+        // **不能只 console.warn**:同步失败时用户看到的是"记录空了",
+        // 而接下来他一发消息就会把服务器那份覆盖掉。必须让他看见,并且
+        // 明确告诉他先别发消息。(这个 catch 曾经吞掉了一个 const 赋值的
+        // TypeError,导致服务器历史读不回来又被悄悄覆盖。)
+        console.warn("读取账号信息失败:", e);
+        try {
+          var warn = document.createElement("div");
+          warn.className = "restore-tip";
+          warn.style.color = "#b42318";
+          warn.textContent = t().syncFailed;
+          messagesEl.appendChild(warn);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        } catch (_) { /* 连提示都建不出来就算了,别再抛一次 */ }
+      });
   }
 
   function renderUserChip() {
