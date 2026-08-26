@@ -1199,6 +1199,98 @@ def test_guardrail():
     check("老定时任务(没 targets)仍能执行", t_old_task_still_runs)
 
 
+# ============ 3.5 大脑接力:超时、切换、冷却(纯逻辑,不联网) ============
+
+
+def test_brain_relay():
+    print("\n【3.5】大脑接力(超时 / 切换 / 冷却)")
+    import httpx
+    import agent_server as srv
+    from google.genai import errors as genai_errors
+
+    def _api_err(code):
+        """造一个指定状态码的 genai APIError,不联网。"""
+        class _R:
+            status_code = code
+            headers = {}
+            def json(self):
+                return {"error": {"code": code, "message": "x"}}
+            text = "x"
+        return genai_errors.APIError(code, _R().json(), _R())
+
+    def gemini_has_timeout():
+        # 没有超时的话,对方不回音就干等到 TCP 自己放弃 —— 用户看到的是"很慢"
+        c = srv._gemini_client()
+        ms = getattr(getattr(c, "_api_client", None), "_http_options", None)
+        ms = getattr(ms, "timeout", None)
+        if not ms:
+            return "Gemini 客户端没设超时"
+        return True
+    check("Gemini 客户端带超时", gemini_has_timeout)
+
+    def timeout_triggers_fallback():
+        # 血泪:原来只捕 genai APIError,而超时抛的是 httpx.ReadTimeout →
+        # 明明配了 ofox 也不切,直接把错甩给用户
+        if not srv._should_fallback(httpx.ReadTimeout("x")):
+            return "超时没被算进接力条件"
+        return True
+    check("超时也会切备用通道", timeout_triggers_fallback)
+
+    def key_error_never_falls_back():
+        # 401/403 绝不接力:切了只会把配置错误盖过去,用户永远看不到真实原因
+        if srv._should_fallback(_api_err(403)):
+            return "403 竟然会接力,会掩盖钥匙问题"
+        if not srv._should_fallback(_api_err(503)):
+            return "503 应该接力"
+        return True
+    check("钥匙问题(403)绝不接力,503 才接力", key_error_never_falls_back)
+
+    def cooldown_only_for_slow_fails():
+        # 冷却是为了"别让用户再白等一次",所以只对**干等型**失败生效;
+        # 429 是秒回的,压五分钟没道理
+        if srv._slow_fail(_api_err(429)):
+            return "429 秒回,不该进冷却"
+        if not srv._slow_fail(_api_err(504)):
+            return "504 干等型,应该进冷却"
+        if not srv._slow_fail(httpx.ReadTimeout("x")):
+            return "网络超时应该进冷却"
+        return True
+    check("只有「干等型」失败才进冷却", cooldown_only_for_slow_fails)
+
+    def cooldown_after_fallback_works():
+        # **顺序**:必须等备用通道真的返回了才记冷却。备用通道也坏的话
+        # 跳过 Gemini = 一个能用的都不剩(实测撞上过:Gemini 504 + ofox 402)
+        import pathlib as _pl
+        # 注释里也会正当地写到这些名字,直接 find 会先命中注释(踩过两次)
+        src = "\n".join(ln for ln in _pl.Path("agent_server.py").read_text().splitlines()
+                        if not ln.strip().startswith("#"))
+        seg = src[src.index("def _route_brain"):]
+        seg = seg[:seg.index("class _NoBrainKey")]
+        i_call, i_mark = seg.find("ask_openai(req.messages"), seg.find("_mark_gemini_down(")
+        if i_call < 0 or i_mark < 0:
+            return "没找到接力那段代码"
+        if i_mark < i_call:
+            return "先记了冷却才去调备用通道 —— 备用通道也坏时会把 Gemini 也跳过"
+        return True
+    check("备用通道成功之后才记冷却(顺序)", cooldown_after_fallback_works)
+
+    def balance_402_is_its_own_message():
+        # 402 是"要充值",和"稍后再试"是两回事。混着报会让人跑去改配置
+        import openai as _oa
+        class _Resp:
+            status_code = 402
+            headers = {}
+            request = None
+            def json(self):
+                return {"error": {"message": "Insufficient credits. Current balance: $-0.09"}}
+        e = _oa.APIStatusError("402", response=_Resp(), body=None)
+        code, msg = srv._brain_error(e)
+        if code != 402 or "充值" not in msg:
+            return f"402 没被单独翻译:{code} / {msg[:60]}"
+        return True
+    check("余额不足(402)单独说清要充值", balance_402_is_its_own_message)
+
+
 # ============ 4. 真连 NewsBreak(只读) ============
 
 def test_newsbreak_readonly():
@@ -1478,6 +1570,7 @@ if __name__ == "__main__":
     test_pure_logic()
     test_validation()
     test_guardrail()
+    test_brain_relay()
     test_newsbreak_readonly()
     test_creative_render()
     test_http()

@@ -65,7 +65,9 @@ def _ask_vision(image: bytes, mime: str, prompt: str) -> dict:
     key = srv._read_env_value("GEMINI_API_KEY")
     if not key:
         return {"error": "没有配置 GEMINI_API_KEY,看不了图"}
-    client = genai.Client(api_key=key)
+    # **必须带超时**:下面是逐个模型接力,没有超时的话一旦对方不回音,
+    # 每个模型都要干等一次,拆一张图能卡好几分钟(见 agent_server 的 _gemini_client)
+    client = srv._gemini_client(key)
     small, smime = shrink(image, mime)
 
     last = ""

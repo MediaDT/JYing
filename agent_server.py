@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import anthropic
+import httpx
 import openai
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
@@ -2411,6 +2412,71 @@ def _system_prompt_now(lang: str = "zh") -> str:
 # 明明有 ofox 兜底也不去用,用户只看到一句"稍后再试"。
 _RETRYABLE_CODES = (429, 500, 502, 503, 504)
 
+# ===== Gemini 的超时与熔断 =====
+# 实测(2026-08-26,开发机):`generativelanguage.googleapis.com` 的 TLS 握手 16ms、
+# GET 根路径 0.13s 就回 404 —— **网络是通的**。但 `generateContent` 这个 POST
+# 发出去**没有回音**(httpx ReadTimeout,20s / 60s 各试一次都一样)。
+# 三件事叠在一起,表现就是"回答很慢、最后还报错":
+#   ① SDK 默认不设超时 → 干等到 TCP 自己放弃;
+#   ② 抛出来的是 httpx.ReadTimeout,**不是 genai APIError** → 下面的接力捕不到,
+#      明明配了 ofox 也不切,直接把错误甩给用户;
+#   ③ 就算切了,下一条消息又从 Gemini 重来一遍,每条都白等一次。
+# 所以:给它超时、把超时也算进接力条件、并且**记住它刚才没回应**,
+# 冷却期内直接走备用通道(有备用通道才跳过,没有的话还是要试)。
+GEMINI_TIMEOUT_MS = int(os.environ.get("GEMINI_TIMEOUT_MS", "30000"))
+GEMINI_COOLDOWN_S = int(os.environ.get("GEMINI_COOLDOWN_S", "300"))
+_GEMINI_DOWN_UNTIL = 0.0
+
+
+def _gemini_client(api_key: str | None = None) -> genai.Client:
+    """建 Gemini 客户端。**一定要带超时**,理由见上面那段。"""
+    opts = genai_types.HttpOptions(timeout=GEMINI_TIMEOUT_MS)   # 单位是毫秒
+    return genai.Client(api_key=api_key, http_options=opts) if api_key else genai.Client(http_options=opts)
+
+
+def _is_network_fail(e: Exception) -> bool:
+    """是"连不上/没回音"这类网络故障吗?(区别于平台明确回的错误码)"""
+    return isinstance(e, (httpx.TimeoutException, httpx.TransportError))
+
+
+def _should_fallback(e: Exception) -> bool:
+    """这个错该不该切备用通道。**401/403 这类钥匙问题绝不切** ——
+    切了只会用别的通道把配置错误盖过去,用户永远看不到真实原因。"""
+    if isinstance(e, genai_errors.APIError):
+        return e.code in _RETRYABLE_CODES
+    return _is_network_fail(e)
+
+
+def _gemini_ready() -> bool:
+    """现在该不该走 Gemini。刚超时过、而且有备用通道 → 先跳过,别让用户白等。"""
+    if not os.environ.get("GEMINI_API_KEY"):
+        return False
+    if time.time() < _GEMINI_DOWN_UNTIL and os.environ.get("OPENAI_API_KEY"):
+        return False
+    return True
+
+
+def _slow_fail(e: Exception) -> bool:
+    """这次失败是"干等了半天"型的吗?——网络没回音,或平台的 503/504(超时/过载)。
+    429 那种是**秒回**的,不浪费时间,不算。"""
+    if _is_network_fail(e):
+        return True
+    return isinstance(e, genai_errors.APIError) and e.code in (503, 504)
+
+
+def _mark_gemini_down(e: Exception) -> None:
+    """记下 Gemini 刚才干等了半天,冷却一段时间,别让下一条消息再等一遍。
+
+    **只在备用通道确实顶上了之后才调**:备用通道也坏的话跳过 Gemini,
+    等于一个能用的都不剩(实测撞上过 —— Gemini 504 + ofox 余额为负全 402)。
+    """
+    global _GEMINI_DOWN_UNTIL
+    if _slow_fail(e):
+        _GEMINI_DOWN_UNTIL = time.time() + GEMINI_COOLDOWN_S
+        print(f"[brain] Gemini 等了 {GEMINI_TIMEOUT_MS/1000:.0f}s 还没结果,"
+              f"接下来 {GEMINI_COOLDOWN_S//60} 分钟直接走备用通道", flush=True)
+
+
 
 def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
     """大脑 A:Gemini。钥匙从环境变量 GEMINI_API_KEY 自动读取。
@@ -2420,7 +2486,7 @@ def ask_gemini(messages: list[ChatMessage], lang: str = "zh") -> str:
     只回一个 text='' 的空块就 STOP,工具循环根本没跑)。自己跑循环之后,
     既能边收边吐字,也能在每次调工具时播报"正在查什么"。
     """
-    client = genai.Client()
+    client = _gemini_client()
     # 把聊天记录翻译成 Gemini 的格式:它管助手叫 "model",不叫 "assistant"
     contents = [
         genai_types.Content(
@@ -2842,14 +2908,14 @@ def _plain_completion(prompt: str, lang: str = "zh") -> str:
     brain = os.environ.get("BRAIN", "auto").strip().lower()
 
     def _gemini() -> str:
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        client = _gemini_client(os.environ["GEMINI_API_KEY"])
         last = None
         for model in ("gemini-flash-latest", "gemini-flash-lite-latest"):
             try:
                 return client.models.generate_content(model=model, contents=prompt).text or ""
-            except genai_errors.APIError as e:
+            except Exception as e:
                 last = e
-                if e.code not in _RETRYABLE_CODES:
+                if not _should_fallback(e):
                     raise
         raise last
 
@@ -2870,12 +2936,14 @@ def _plain_completion(prompt: str, lang: str = "zh") -> str:
 
     if brain == "openai" and os.environ.get("OPENAI_API_KEY"):
         return _openai()
-    if os.environ.get("GEMINI_API_KEY"):
+    if _gemini_ready():
         try:
             return _gemini()
-        except genai_errors.APIError as e:
-            if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
-                return _openai()
+        except Exception as e:
+            if _should_fallback(e) and os.environ.get("OPENAI_API_KEY"):
+                out = _openai()
+                _mark_gemini_down(e)      # 同上:备用通道成了才记
+                return out
             raise
     if os.environ.get("OPENAI_API_KEY"):
         return _openai()
@@ -2892,15 +2960,20 @@ def _route_brain(req: ChatRequest) -> str:
     if brain == "claude" and (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         return ask_claude(req.messages, req.lang)
 
-    # 三级火箭:Gemini(免费)→ 额度尽了切 ChatGPT/ofox → 都没有再看 Claude
-    if os.environ.get("GEMINI_API_KEY"):
+    # 三级火箭:Gemini(免费)→ 不行就切 ChatGPT/ofox → 都没有再看 Claude
+    if _gemini_ready():
         try:
             return ask_gemini(req.messages, req.lang)
-        except genai_errors.APIError as e:
-            if e.code in _RETRYABLE_CODES and os.environ.get("OPENAI_API_KEY"):
-                print(f"[brain] Gemini 报错 {e.code},切换到 OPENAI 通道", flush=True)
+        except Exception as e:
+            # 注意:这里**不能只捕 APIError** —— 超时抛的是 httpx.ReadTimeout,
+            # 只捕 APIError 的话,明明有 ofox 也不切,直接把错误甩给用户。
+            if _should_fallback(e) and os.environ.get("OPENAI_API_KEY"):
+                why = "没有响应(超时)" if _is_network_fail(e) else f"报错 {getattr(e, 'code', '?')}"
+                print(f"[brain] Gemini {why},切换到 OPENAI 通道", flush=True)
                 _emit("status", text="正在切换到备用通道…")
-                return ask_openai(req.messages, req.lang)
+                reply = ask_openai(req.messages, req.lang)
+                _mark_gemini_down(e)      # 备用通道真顶上了,才敢记冷却
+                return reply
             raise
     if os.environ.get("OPENAI_API_KEY"):
         return ask_openai(req.messages, req.lang)
@@ -2919,6 +2992,13 @@ def _brain_error(e: Exception) -> tuple[int, str]:
     这份翻译也是两个接口共用的。原则:**钥匙/配置错误绝不掩盖**,
     要让用户看到真实原因,而不是笼统的"稍后再试"。
     """
+    # 网络超时:平台没回话。**要和"钥匙不对"分开说** ——
+    # 说成钥匙问题会让人跑去反复检查配置,而真正的原因是网络到不了。
+    if _is_network_fail(e):
+        return 504, ("AI 服务没有回应(网络超时)。可能是这台机器出不去 Google,"
+                     "或对方暂时不可用。已自动尝试备用通道;老是这样就把 .env 里的 "
+                     "BRAIN 改成 openai,直接走 ofox 通道。")
+
     if isinstance(e, _NoBrainKey):
         return 500, ("还没配置 AI 大脑的钥匙:打开 .env,填 GEMINI_API_KEY(免费)/ "
                      "OPENAI_API_KEY / ANTHROPIC_API_KEY 任意一把,填完直接重发消息即可。")
@@ -2950,6 +3030,14 @@ def _brain_error(e: Exception) -> tuple[int, str]:
         return 502, "ChatGPT 候选型号都不可用(key 可能没开通这些模型)"
     if isinstance(e, openai.APIConnectionError):
         return 502, "连不上 ChatGPT 服务(如用转发服务,检查 OPENAI_BASE_URL)"
+    if isinstance(e, openai.APIStatusError) and e.status_code == 402:
+        detail = ""
+        try:
+            detail = (e.response.json().get("error", {}) or {}).get("message", "")
+        except Exception:
+            pass
+        return 402, ("ofox 通道余额不足,需要充值才能继续(这不是钥匙问题,别去改配置)。"
+                     + (f"平台原话:{detail[:160]}" if detail else ""))
     if isinstance(e, openai.APIStatusError):
         return 502, f"ChatGPT 服务返回错误({e.status_code}),稍后再试"
 
