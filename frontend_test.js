@@ -93,6 +93,11 @@ console.log("\n【4】删除会话");
   t("每段历史对话都带删除按钮",
     app.registry["conv-list"].children.every((it) =>
       (it.children || []).some((x) => x.className === "conv-del")));
+  // 图标要真画出来。TRASH_ICON 是 const(不提升),万一被挪到 renderConvList
+  // 之后声明,这里拿到的就是 undefined —— 表现是按钮空白一片
+  t("按钮里是垃圾桶图标(不是空白/不是 undefined)",
+    /<svg[\s\S]*<\/svg>/.test(String(delBtn.innerHTML || "")),
+    String(delBtn.innerHTML || "").slice(0, 30));
 }
 
 // 下面两条要等 fetch 的回调跑完,所以放在 async 块里

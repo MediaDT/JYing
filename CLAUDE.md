@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(95)、`node frontend_test.js`(49)、`node dashboard_test.js`(9)、`node platform_test.js`(30)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(95)、`node frontend_test.js`(50)、`node dashboard_test.js`(9)、`node platform_test.js`(30)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(95)+ `frontend_test.js` 多会话(49)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(30)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(95)+ `frontend_test.js` 多会话(50)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(30)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -846,7 +846,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 95 + 前端 49 + 大屏 9 + 平台 30 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 95 + 前端 50 + 大屏 9 + 平台 30 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -888,5 +888,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 95 / 前端 49 / 大屏 9 / 平台 30 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 95 / 前端 50 / 大屏 9 / 平台 30 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

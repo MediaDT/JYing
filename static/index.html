@@ -99,7 +99,8 @@
      所以默认就露出来(淡一点,不喧宾夺主),悬停时加深、变红。 */
   .conv-del {
     flex-shrink: 0; border: 0; background: transparent; color: var(--muted);
-    cursor: pointer; font-size: 16px; line-height: 1; padding: 4px 7px; border-radius: 6px;
+    cursor: pointer; line-height: 0; padding: 5px; border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
     opacity: .5; transition: opacity .12s ease, color .12s ease, background .12s ease;
   }
   .conv-item:hover .conv-del { opacity: .9; }
@@ -108,7 +109,7 @@
   }
   /* 触屏(没有悬停这回事):直接全亮,点击区域也给足 */
   @media (hover: none) {
-    .conv-del { opacity: .85; padding: 6px 9px; }
+    .conv-del { opacity: .85; padding: 7px; }
   }
   .conv-empty { padding: 10px; font-size: 12px; color: var(--muted); line-height: 1.6; }
 
@@ -1266,6 +1267,16 @@
   }
 
   // ===== 左侧会话栏 =====
+  // 垃圾桶图标(线性风格,和界面其它地方一致)。aria-hidden:图标本身不念给
+  // 读屏软件听 —— 按钮的 title 已经写了"删除这个对话"。
+  const TRASH_ICON =
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M3 6h18"/>' +
+    '<path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>' +
+    '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>' +
+    '<path d="M10 11v6M14 11v6"/></svg>';
+
   const convListEl = document.getElementById("conv-list");
 
   /** 重画左栏列表 */
@@ -1298,7 +1309,10 @@
 
       const del = document.createElement("button");
       del.className = "conv-del";
-      del.textContent = "×";
+      // 垃圾桶图标。**用内联 SVG 不用 emoji 🗑️**:emoji 在 Win/Mac/安卓上
+      // 长得都不一样,而且颜色写死改不了 —— 悬停变红这种反馈就做不出来。
+      // SVG 用 stroke="currentColor",颜色跟着按钮走,自动变红。
+      del.innerHTML = TRASH_ICON;
       del.title = t().deleteConv;
       del.addEventListener("click", (e) => {
         e.stopPropagation();          // 别触发"切换到这个会话"
