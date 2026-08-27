@@ -1859,9 +1859,32 @@
         PLATFORM_BOUND = !!p.bound;
         applyLang();                       // 副标题里的 {p} 换成真实平台名
         document.getElementById("platform-btn").title = t().switchPlatform;
-        if (!PLATFORM_BOUND || WANT_BIND) showNotBound(p);
+        // `bind=1` 表达的是「带我去绑定」这个**意图**,不代表真的没绑。
+        // 这两件事以前混在一起(`!PLATFORM_BOUND || WANT_BIND` 一起走 showNotBound),
+        // 而 showNotBound 里是**无条件停用输入框**的 —— 于是已经绑好的用户,
+        // 只要地址里带着 bind=1(平台页点「先绑定账号」进来,或把这个地址刷新/收藏了),
+        // 就被**永久锁住**:顶栏明明显示着账户名,输入框却说"还没绑定"。线上实测到的。
+        if (!PLATFORM_BOUND) {
+          showNotBound(p);                     // 真没绑:提示 + 停用输入
+        } else if (WANT_BIND && acctReady) {
+          // 已经绑了、只是想改:直接把账户弹窗打开,什么都不锁,也不弹"还没绑定"
+          // (对一个绑好的人说"你还没绑",本身就是错的)
+          var ab = document.getElementById("acct-btn");
+          if (ab && ab.click) ab.click();
+        }
+        if (WANT_BIND) { WANT_BIND = false; stripBindParam(); }
       })
       .catch(function (e) { console.warn("读取平台信息失败:", e); });
+  }
+
+  /** 把地址里的 bind=1 去掉。不去掉的话,用户每刷新一次都要再走一遍引导 ——
+   *  而这个地址很容易被收藏或留在标签页里。 */
+  function stripBindParam() {
+    try {
+      var u = new URL(location.href);
+      u.searchParams.delete("bind");
+      history.replaceState(null, "", u.pathname + u.search + u.hash);
+    } catch (e) { /* 测试环境或老浏览器没有 history,忽略 */ }
   }
 
   /** 没绑定账号:在聊天区顶部贴一条醒目提示,并把输入框停用 */

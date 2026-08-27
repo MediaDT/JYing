@@ -34,6 +34,9 @@ function makeEl(tag) {
     querySelectorAll(){ return []; },
     addEventListener(ev, fn){ (this._h ||= {})[ev] = fn; },
     fire(ev, arg){ this._h && this._h[ev] && this._h[ev](arg || {stopPropagation(){}}); },
+    // 真实 DOM 元素有 .click():页面代码里「点一下另一个按钮」是很常见的写法。
+    // 模拟里缺了它,那段代码就静默不执行,测试会得出"这个功能没做"的错误结论。
+    click(){ this.fire("click"); },
     focus(){},
     // 真实 DOM 有这两个,模拟里缺了的话页面代码一调就崩,
     // 而崩在事件回调里往往只表现为"点了没反应",很难查

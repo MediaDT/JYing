@@ -111,12 +111,26 @@ console.log("\n【3.5】绑好账号后:界面要自动解锁,不用用户手动
     app.registry["input"].placeholder);
 }
 
-console.log("\n【4】带 &bind=1 进来(从平台页点「先绑定账号」)");
+console.log("\n【4】带 &bind=1 进来:「想去绑定」不等于「真的没绑」");
 {
+  // 线上踩到的:已经绑好的人,只要地址里带着 bind=1(平台页点「先绑定账号」进来,
+  // 或者把这个地址刷新/收藏了),就被**永久锁住** —— 顶栏明明显示着账户名,
+  // 输入框却说"还没绑定"。根子是 showNotBound 里无条件停用了输入框。
   const app = boot({}, { search: "?platform=newsbreak&bind=1", platforms: FAKE(true) });
   await tick(); await tick();
-  const bubble = app.registry["messages"].children.map((c) => c.innerHTML || "").join("");
-  t("即使后端说已绑定,也照样弹绑定引导", bubble.indexOf("⚠️") >= 0);
+  const bubble = app.registry["messages"].children.map(allText).join("");
+  t("已绑定的人不会被告知「还没绑定」", bubble.indexOf("⚠️") < 0, bubble.slice(0, 36));
+  t("输入框照样能用", app.registry["input"].disabled !== true);
+  t("发送键照样能用", app.registry["send"].disabled !== true);
+  t("而是直接把账户弹窗打开(那才是他想做的事)",
+    app.registry["acct-overlay"].classList.contains("show"));
+
+  // 反过来:真没绑的人带 bind=1 进来,该挡的一样要挡
+  const app2 = boot({}, { search: "?platform=newsbreak&bind=1", platforms: FAKE(false) });
+  await tick(); await tick();
+  const b2 = app2.registry["messages"].children.map(allText).join("");
+  t("真没绑的人照样挡住并引导", b2.indexOf("⚠️") >= 0);
+  t("真没绑时输入框要停用", app2.registry["input"].disabled === true);
 }
 
 console.log("\n【5】英文模式:提示也要是英文");
