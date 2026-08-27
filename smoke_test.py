@@ -1309,6 +1309,63 @@ def test_concurrent_turns():
     check("执行台账每个请求一份", executed_ledger_is_per_request)
 
 
+# ============ 3.41 大屏的时间范围(含自定义起止日期) ============
+
+
+def test_dash_range():
+    print("\n【3.41】大屏时间范围")
+    import agent_server as srv
+    import scheduler as sched
+
+    def beijing_not_utc():
+        # 用 UTC 的话,北京时间 00:00~08:00 这 8 小时里 UTC 还停在昨天,
+        # 大屏会少一天数据(和建广告命名那条是同一个坑)
+        _, end, _ = srv._resolve_range(7, "", "")
+        if end != sched.now_beijing().date():
+            return f"结尾不是北京时间的今天:{end}"
+        return True
+    check("按北京时间算今天", beijing_not_utc)
+
+    def custom_wins():
+        a, b, n = srv._resolve_range(30, "2026-08-01", "2026-08-10")
+        return True if (str(a), str(b), n) == ("2026-08-01", "2026-08-10", 10) else f"{a}~{b} {n}天"
+    check("给了起止日期就按它算", custom_wins)
+
+    def swapped_is_fixed():
+        # 用户把起止填反了,替他调过来就行,不用报错烦他
+        a, b, _ = srv._resolve_range(30, "2026-08-10", "2026-08-01")
+        return True if str(a) < str(b) else "填反了没被纠正"
+    check("起止填反了自动纠正", swapped_is_fixed)
+
+    def future_end_clamped():
+        _, b, _ = srv._resolve_range(30, "2026-08-01", "2099-01-01")
+        return True if b == sched.now_beijing().date() else f"没截到今天:{b}"
+    check("结束日期在未来会截到今天", future_end_clamped)
+
+    def bad_input_says_why():
+        # 直接把这些甩给平台的话,用户看到的是一句英文的 Invalid parameters
+        for args, kw in ((("2026/08/01", "2026-08-10"), "格式"),
+                         (("2025-01-01", "2026-08-10"), "180")):
+            try:
+                srv._resolve_range(30, *args)
+                return f"{kw} 这种情况没被拦住"
+            except ValueError as e:
+                if kw not in str(e):
+                    return f"报错没说清原因:{e}"
+        return True
+    check("非法范围拦住并说人话", bad_input_says_why)
+
+    def analyze_follows_dashboard():
+        # 诊断必须和大屏看的是同一段时间,否则 AI 说的和用户看到的对不上
+        import inspect
+        if "start" not in inspect.getsource(srv.AnalyzeIn):
+            return "AnalyzeIn 不接受自定义范围"
+        if "body.start" not in inspect.getsource(srv.analyze_data):
+            return "诊断没把自定义范围传下去"
+        return True
+    check("AI 诊断跟着大屏的时间范围走", analyze_follows_dashboard)
+
+
 # ============ 3.42 模型空回复:要重试、要说清原因 ============
 
 
@@ -1800,6 +1857,7 @@ if __name__ == "__main__":
     test_validation()
     test_guardrail()
     test_concurrent_turns()
+    test_dash_range()
     test_empty_reply()
     test_per_user_isolation()
     test_brain_relay()

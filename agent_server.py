@@ -2017,16 +2017,53 @@ def _sum_kpi(rows: list[dict]) -> dict:
     }
 
 
+def _resolve_range(days: int, start_s: str, end_s: str):
+    """把「近 N 天」或「自定义起止日期」统一算成 (start, end, days)。
+
+    **日期按北京时间取**:用户说的"今天"是他那边的今天。用 UTC 的话,
+    北京时间 00:00~08:00 这 8 小时里 UTC 还停在昨天,大屏会少一天数据
+    (和建广告命名那条是同一个坑)。
+
+    自定义范围要在这里把所有不合法的情况挡住并**说人话** ——
+    直接甩给平台的话,用户看到的是一句英文的 Invalid parameters。
+    """
+    from datetime import date, timedelta
+    today = sched.now_beijing().date()
+    if (start_s or "").strip() and (end_s or "").strip():
+        try:
+            start = date.fromisoformat(start_s.strip())
+            end = date.fromisoformat(end_s.strip())
+        except ValueError:
+            raise ValueError("日期格式不对,要写成 2026-08-27 这样")
+        if start > end:
+            start, end = end, start          # 反了就替他调过来,不用报错烦他
+        if end > today:
+            end = today                      # 未来的数据不存在,截到今天
+        if start > today:
+            raise ValueError("开始日期比今天还晚,平台上不会有数据")
+        n = (end - start).days + 1
+        if n > 180:
+            raise ValueError(f"这段跨了 {n} 天,平台报表最多只能查 180 天,请把范围缩小一点")
+        return start, end, n
+    n = max(1, min(int(days or 30), 180))    # 平台报表上限 180 天
+    return today - timedelta(days=n - 1), today, n
+
+
 @app.get("/api/dashboard")
-def dashboard_data(days: int = 30):
-    """仪表盘用的全部数据:总计 KPI、环比、按天趋势、三个层级的明细。"""
+def dashboard_data(days: int = 30, start: str = "", end: str = ""):
+    """仪表盘用的全部数据:总计 KPI、环比、按天趋势、三个层级的明细。
+
+    时间范围两种给法:`days=N`(近 N 天),或 `start`/`end` 自定义起止日期。
+    """
     load_env_file()
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
 
     try:
-        days = max(1, min(int(days), 180))         # 平台报表上限 180 天
-        today = datetime.now(timezone.utc).date()
-        start = today - timedelta(days=days - 1)
+        try:
+            start_d, end_d, days = _resolve_range(days, start, end)
+        except ValueError as ve:
+            return JSONResponse(status_code=400, content={"error": str(ve)})
+        start = start_d
         prev_start = start - timedelta(days=days)   # 上一个等长周期,用来算环比
         prev_end = start - timedelta(days=1)
         fmt = "%Y-%m-%d"
@@ -2036,29 +2073,31 @@ def dashboard_data(days: int = 30):
         except Exception:
             pass                                    # 多账户没选时不阻塞,报表按 token 全量查
 
-        campaigns = nb.get_report_raw("campaign", start.strftime(fmt), today.strftime(fmt), account_id)
+        campaigns = nb.get_report_raw("campaign", start.strftime(fmt), end_d.strftime(fmt), account_id)
         prev_rows = nb.get_report_raw("campaign", prev_start.strftime(fmt), prev_end.strftime(fmt), account_id)
 
         # 趋势:DATE 维度平台限 31 天,超了就只取最近 31 天(并如实告诉前端)
         trend_days = min(days, 31)
-        trend_start = today - timedelta(days=trend_days - 1)
+        # 从**这段区间的结尾**往回数,不是从"今天"往回数 ——
+        # 自定义了一段历史区间时,从今天往回数会取到区间外面去
+        trend_start = end_d - timedelta(days=trend_days - 1)
         try:
-            trend = nb.get_daily_raw(trend_start.strftime(fmt), today.strftime(fmt), account_id)
+            trend = nb.get_daily_raw(trend_start.strftime(fmt), end_d.strftime(fmt), account_id)
         except Exception as e:
             trend, trend_days = [], 0
             print(f"[dashboard] 趋势数据获取失败: {e}", flush=True)
 
         return {
-            "range": {"start": start.strftime(fmt), "end": today.strftime(fmt), "days": days},
+            "range": {"start": start.strftime(fmt), "end": end_d.strftime(fmt), "days": days},
             "kpi": _sum_kpi(campaigns),
             "kpi_prev": _sum_kpi(prev_rows),
             "trend": sorted(trend, key=lambda r: r["name"]),
             "trend_days": trend_days,
             "trend_capped": days > 31,              # 前端据此说明"趋势只显示最近31天"
             "campaigns": sorted(campaigns, key=lambda r: r["cost"], reverse=True),
-            "ad_sets": sorted(nb.get_report_raw("ad_set", start.strftime(fmt), today.strftime(fmt), account_id),
+            "ad_sets": sorted(nb.get_report_raw("ad_set", start.strftime(fmt), end_d.strftime(fmt), account_id),
                               key=lambda r: r["cost"], reverse=True),
-            "ads": sorted(nb.get_report_raw("ad", start.strftime(fmt), today.strftime(fmt), account_id),
+            "ads": sorted(nb.get_report_raw("ad", start.strftime(fmt), end_d.strftime(fmt), account_id),
                           key=lambda r: r["cost"], reverse=True),
         }
     except Exception as e:
@@ -2067,6 +2106,8 @@ def dashboard_data(days: int = 30):
 
 class AnalyzeIn(BaseModel):
     days: int = 30
+    start: str = ""      # 自定义范围(和大屏保持一致,否则诊断的是另一段时间)
+    end: str = ""
     lang: str = "zh"
 
 
@@ -2074,7 +2115,7 @@ class AnalyzeIn(BaseModel):
 def analyze_data(body: AnalyzeIn):
     """把仪表盘上的真实数据交给 AI,让它做诊断并给优化建议。"""
     load_env_file()
-    data = dashboard_data(body.days)
+    data = dashboard_data(body.days, body.start, body.end)
     if isinstance(data, JSONResponse):
         return data
     if not data["campaigns"]:

@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(101)、`node frontend_test.js`(56)、`node dashboard_test.js`(9)、`node platform_test.js`(35)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(107)、`node frontend_test.js`(56)、`node dashboard_test.js`(15)、`node platform_test.js`(35)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(101)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(35)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(107)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(15)+ `platform_test.js` 多平台(35)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -92,6 +92,11 @@ cd ~/workspace/my-agent && ./start.sh     # 端口 18100(可用 PORT= 改),uvico
 
 ## 六、数据大屏(static/dashboard.html + /api/dashboard、/api/analyze)
 
+- **时间范围两种给法**:`days=N`(近 N 天,顶栏四个快捷键)或 `start`/`end` 自定义起止日期(顶栏「自定义」)。
+  统一走 `_resolve_range()`:**按北京时间算今天**(用 UTC 的话北京 00:00~08:00 会少一天);
+  起止填反了替他调过来、结束日期在未来截到今天、格式错和跨度超 180 天**拦住并说人话**
+  (直接甩给平台的话用户看到的是一句英文 `Invalid parameters`)。
+  **`/api/analyze` 必须跟着同一个范围走**,否则 AI 诊断的是另一段时间,和用户看到的对不上。
 - `GET /api/dashboard?days=N`:一次返回 KPI 总计 + **上一等长周期(算环比)** + 按天趋势
   + campaign/ad_set/ad 三层明细。`days` 夹在 1~180;趋势自动缩到 ≤31 天并回 `trend_capped=true`
   让前端如实说明"趋势只显示最近 31 天"。
@@ -852,7 +857,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 101 + 前端 56 + 大屏 9 + 平台 35 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 107 + 前端 56 + 大屏 15 + 平台 35 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -894,5 +899,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 101 / 前端 56 / 大屏 9 / 平台 35 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 107 / 前端 56 / 大屏 15 / 平台 35 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

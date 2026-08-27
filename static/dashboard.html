@@ -75,6 +75,30 @@
   }
   .btn:hover { border-color: var(--accent1); color: var(--accent1); }
   .btn.active { background: var(--accent1); border-color: var(--accent1); color: #fff; }
+
+  /* 自定义时间范围。**快捷键不撤掉** —— 小白最常用的就是那四个,一步到位;
+     自定义是进阶需求,藏在一个按钮后面即可,不该让所有人先填两个日期。 */
+  .range-wrap { position: relative; }
+  .date-pop {
+    position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; display: none;
+    background: var(--surface-0); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 16px 40px -12px rgba(0,0,0,.28); padding: 14px; min-width: 250px;
+  }
+  .date-pop.show { display: block; }
+  .date-pop label { display: block; font-size: 11.5px; color: var(--text-secondary); margin: 8px 0 4px; }
+  .date-pop label:first-child { margin-top: 0; }
+  .date-pop input[type="date"] {
+    width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: var(--surface-1); color: var(--text); outline: none;
+  }
+  .date-pop input:focus { border-color: var(--accent1); }
+  .date-pop .row { display: flex; gap: 8px; margin-top: 12px; }
+  .date-pop .row .btn { flex: 1; text-align: center; }
+  .date-pop .err {
+    font-size: 11.5px; color: #dc2626; margin-top: 8px; line-height: 1.5; display: none;
+  }
+  .date-pop .err.show { display: block; }
   .btn-primary {
     background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
     border: 0; border-radius: 999px; padding: 8px 18px; font-size: 13px; cursor: pointer;
@@ -158,7 +182,20 @@
       <div class="sub" id="range-sub">加载中…</div>
     </div>
     <div class="spacer"></div>
-    <div class="range-group" id="range-btns"></div>
+    <div class="range-wrap">
+      <div class="range-group" id="range-btns"></div>
+      <div class="date-pop" id="date-pop">
+        <label id="lb-from"></label>
+        <input type="date" id="date-from">
+        <label id="lb-to"></label>
+        <input type="date" id="date-to">
+        <div class="err" id="date-err"></div>
+        <div class="row">
+          <button class="btn" id="date-cancel"></button>
+          <button class="btn active" id="date-ok"></button>
+        </div>
+      </div>
+    </div>
     <button class="btn" id="lang-toggle">🌐 EN</button>
     <button class="btn" id="back-btn" onclick="location.href='/'">💬 回到聊天</button>
   </header>
@@ -219,6 +256,10 @@
       title: "数据大屏", back: "💬 回到聊天", langBtn: "🌐 EN", langTitle: "Switch to English",
       loading: "加载中…", rangeFmt: function (a, b, d) { return a + " ~ " + b + " · 共 " + d + " 天"; },
       days: function (d) { return "近 " + d + " 天"; },
+      custom: "自定义", from: "开始日期", to: "结束日期",
+      ok: "确定", cancel: "取消",
+      dateNeedBoth: "两个日期都要填",
+      customFmt: function (a, b, d) { return a + " ~ " + b + " · 共 " + d + " 天"; },
       loadFail: "加载失败:",
       kpi: { cost: "花费", impressions: "展示", clicks: "点击", ctr: "点击率 CTR",
              conversions: "转化", cpc: "单次点击 CPC", cpa: "转化成本 CPA", roas: "投产比 ROAS" },
@@ -242,6 +283,10 @@
       title: "Dashboard", back: "💬 Back to chat", langBtn: "🌐 中文", langTitle: "切换为中文",
       loading: "Loading…", rangeFmt: function (a, b, d) { return a + " ~ " + b + " · " + d + " days"; },
       days: function (d) { return "Last " + d + "d"; },
+      custom: "Custom", from: "From", to: "To",
+      ok: "Apply", cancel: "Cancel",
+      dateNeedBoth: "Please pick both dates",
+      customFmt: function (a, b, d) { return a + " ~ " + b + " · " + d + " days"; },
       loadFail: "Failed to load: ",
       kpi: { cost: "Spend", impressions: "Impressions", clicks: "Clicks", ctr: "CTR",
              conversions: "Conversions", cpc: "CPC", cpa: "CPA", roas: "ROAS" },
@@ -265,7 +310,10 @@
   function t() { return I18N[lang]; }
 
   // ===== 状态 =====
-  var DAYS = 30;                 // 当前时间范围
+  var DAYS = 30;                 // 当前时间范围(近 N 天)
+  // 自定义范围。**两者只有一个生效**:CUSTOM 有值就按它查,否则按 DAYS。
+  // 不合成一个变量,是因为快捷键要能高亮"当前选的是哪一档"。
+  var CUSTOM = null;             // {start: "2026-08-01", end: "2026-08-10"}
   var METRIC = "cost";           // 趋势图当前指标(一次只看一个,不用双轴)
   var LEVEL = "campaigns";       // 明细表当前层级
   var DATA = null;
@@ -286,20 +334,78 @@
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  // ===== 顶栏按钮 =====
+  // ===== 顶栏时间范围 =====
+  // 快捷键留着(小白最常用的就是这四档,一步到位),旁边再给一个「自定义」。
   [7, 30, 90, 180].forEach(function (d) {
     var b = document.createElement("button");
     b.className = "btn" + (d === DAYS ? " active" : "");
     b.textContent = t().days(d);
-    b.onclick = function () { DAYS = d; renderRangeBtns(); load(); };
+    b.onclick = function () { CUSTOM = null; DAYS = d; closeDatePop(); renderRangeBtns(); load(); };
     b.dataset.days = d;
     document.getElementById("range-btns").appendChild(b);
   });
+
+  var customBtn = document.createElement("button");
+  customBtn.className = "btn";
+  customBtn.id = "custom-btn";
+  customBtn.textContent = t().custom;
+  customBtn.onclick = function () { toggleDatePop(); };
+  document.getElementById("range-btns").appendChild(customBtn);
+
   function renderRangeBtns() {
     document.querySelectorAll("#range-btns .btn").forEach(function (b) {
-      b.classList.toggle("active", Number(b.dataset.days) === DAYS);
+      if (b.id === "custom-btn") {
+        b.classList.toggle("active", !!CUSTOM);   // 自定义生效时高亮它,快捷键全灭
+        return;
+      }
+      b.classList.toggle("active", !CUSTOM && Number(b.dataset.days) === DAYS);
     });
   }
+
+  // ===== 自定义日期弹层 =====
+  function closeDatePop() {
+    var el = document.getElementById("date-pop");
+    if (el) el.classList.remove("show");
+  }
+  function showDateErr(msg) {
+    var e = document.getElementById("date-err");
+    if (!e) return;
+    e.textContent = msg || "";
+    e.classList.toggle("show", !!msg);
+  }
+  function toggleDatePop() {
+    var el = document.getElementById("date-pop");
+    if (!el) return;
+    if (el.classList.contains("show")) { closeDatePop(); return; }
+    showDateErr("");
+    // 打开时把当前范围填进去,用户在已知的基础上改,不用从空白开始猜
+    if (DATA && DATA.range) {
+      document.getElementById("date-from").value = (CUSTOM && CUSTOM.start) || DATA.range.start;
+      document.getElementById("date-to").value = (CUSTOM && CUSTOM.end) || DATA.range.end;
+    }
+    el.classList.add("show");
+  }
+  document.getElementById("date-cancel").onclick = function () { closeDatePop(); };
+  document.getElementById("date-ok").onclick = function () {
+    var a = document.getElementById("date-from").value;
+    var b = document.getElementById("date-to").value;
+    if (!a || !b) { showDateErr(t().dateNeedBoth); return; }   // 缺一个就说清楚,别静默不动
+    CUSTOM = { start: a, end: b };
+    closeDatePop();
+    renderRangeBtns();
+    load();
+  };
+  // 点弹层外面就收起来(点弹层里面不能收,否则选日期时会被关掉)
+  document.addEventListener("click", function (e) {
+    var pop = document.getElementById("date-pop");
+    if (!pop || !pop.classList.contains("show")) return;
+    var n = e.target;
+    while (n) {
+      if (n === pop || n.id === "custom-btn") return;
+      n = n.parentNode;
+    }
+    closeDatePop();
+  });
 
   Object.keys(METRICS).forEach(function (k) {
     var b = document.createElement("button");
@@ -486,10 +592,18 @@
       }).join("") + "</tbody></table>";
   }
 
+  /** 当前时间范围的查询串。自定义优先,没有就按"近 N 天"。 */
+  function rangeQuery() {
+    if (CUSTOM) {
+      return "start=" + encodeURIComponent(CUSTOM.start) + "&end=" + encodeURIComponent(CUSTOM.end);
+    }
+    return "days=" + DAYS;
+  }
+
   // ===== 拉数据 =====
   function load() {
     document.getElementById("range-sub").textContent = t().loading;
-    fetch("/api/dashboard?days=" + DAYS)
+    fetch("/api/dashboard?" + rangeQuery())
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (d.error) {
@@ -515,7 +629,10 @@
                     '<div style="margin-top:10px">' + t().aiWorking + '</div></div>';
     fetch("/api/analyze", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ days: DAYS, lang: lang }),
+      // 诊断必须和大屏看的是**同一段时间**,否则 AI 说的和你看到的对不上
+      body: JSON.stringify(CUSTOM
+        ? { start: CUSTOM.start, end: CUSTOM.end, lang: lang }
+        : { days: DAYS, lang: lang }),
     })
       .then(function (r) { return r.json(); })
       .then(function (d) {
@@ -558,7 +675,14 @@
     lb.textContent = d.langBtn; lb.title = d.langTitle;
 
     // 三组按钮的文字
-    document.querySelectorAll("#range-btns .btn").forEach(function (b) { b.textContent = d.days(Number(b.dataset.days)); });
+    document.querySelectorAll("#range-btns .btn").forEach(function (b) {
+      if (b.id === "custom-btn") { b.textContent = d.custom; return; }
+      b.textContent = d.days(Number(b.dataset.days));
+    });
+    document.getElementById("lb-from").textContent = d.from;
+    document.getElementById("lb-to").textContent = d.to;
+    document.getElementById("date-ok").textContent = d.ok;
+    document.getElementById("date-cancel").textContent = d.cancel;
     document.querySelectorAll("#metric-btns .btn").forEach(function (b) { b.textContent = d.metrics[b.dataset.metric]; });
     document.querySelectorAll("#level-btns .btn").forEach(function (b) { b.textContent = d.levels[b.dataset.level]; });
 
