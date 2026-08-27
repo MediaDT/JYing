@@ -87,7 +87,31 @@
   .date-pop.show { display: block; }
   .date-pop label { display: block; font-size: 11.5px; color: var(--text-secondary); margin: 8px 0 4px; }
   .date-pop label:first-child { margin-top: 0; }
-  .date-pop input[type="date"] {
+  /* 自己画的日历。**为什么不用 <input type="date"> 的原生弹层**:
+     Chrome 那个弹层只认**浏览器自身的语言**,不认页面的 lang 属性 ——
+     页面切成英文了,日历里还是"2026年07月 / 日一二三四五六 / 清除 / 今天"。
+     从页面这边改不了,只能自己画。顺带样式也能和页面统一。 */
+  .cal { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .cal-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .cal-title { flex: 1; text-align: center; font-size: 13px; font-weight: 600; }
+  .cal-nav {
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 8px; width: 26px; height: 26px; cursor: pointer; font-size: 13px;
+    line-height: 1; font-family: inherit;
+  }
+  .cal-nav:hover { border-color: var(--accent1); color: var(--accent1); }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+  .cal-wd { text-align: center; font-size: 10.5px; color: var(--text-secondary); padding: 3px 0; }
+  .cal-day {
+    border: 0; background: transparent; color: var(--text); font-family: inherit;
+    font-size: 12px; padding: 6px 0; border-radius: 7px; cursor: pointer;
+  }
+  .cal-day:hover { background: color-mix(in srgb, var(--accent1) 14%, transparent); }
+  .cal-day.out { color: var(--text-secondary); opacity: .45; }
+  .cal-day.sel { background: var(--accent1); color: #fff; font-weight: 600; }
+  .cal-day.today { box-shadow: inset 0 0 0 1px var(--accent1); }
+  .date-pop input[type="text"] { cursor: pointer; }
+  .date-pop input[type="text"] {
     width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;
     border: 1px solid var(--border); border-radius: 9px;
     background: var(--surface-1); color: var(--text); outline: none;
@@ -186,9 +210,10 @@
       <div class="range-group" id="range-btns"></div>
       <div class="date-pop" id="date-pop">
         <label id="lb-from"></label>
-        <input type="date" id="date-from">
+        <input type="text" id="date-from" readonly>
         <label id="lb-to"></label>
-        <input type="date" id="date-to">
+        <input type="text" id="date-to" readonly>
+        <div class="cal" id="cal"></div>
         <div class="err" id="date-err"></div>
         <div class="row">
           <button class="btn" id="date-cancel"></button>
@@ -258,6 +283,9 @@
       days: function (d) { return "近 " + d + " 天"; },
       custom: "自定义", from: "开始日期", to: "结束日期",
       ok: "确定", cancel: "取消",
+      weekdays: ["日", "一", "二", "三", "四", "五", "六"],
+      calTitle: function (y, m) { return y + "年" + (m + 1) + "月"; },
+      pickHint: "点上面的日期框选日期",
       dateNeedBoth: "两个日期都要填",
       customFmt: function (a, b, d) { return a + " ~ " + b + " · 共 " + d + " 天"; },
       loadFail: "加载失败:",
@@ -285,6 +313,12 @@
       days: function (d) { return "Last " + d + "d"; },
       custom: "Custom", from: "From", to: "To",
       ok: "Apply", cancel: "Cancel",
+      weekdays: ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"],
+      calTitle: function (y, m) {
+        return ["January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December"][m] + " " + y;
+      },
+      pickHint: "Click a date field above to pick a date",
       dateNeedBoth: "Please pick both dates",
       customFmt: function (a, b, d) { return a + " ~ " + b + " · " + d + " days"; },
       loadFail: "Failed to load: ",
@@ -384,7 +418,94 @@
       document.getElementById("date-to").value = (CUSTOM && CUSTOM.end) || DATA.range.end;
     }
     el.classList.add("show");
+    CAL_TARGET = CAL_TARGET || "date-from";   // 默认先给「开始日期」选
+    var cur = parseYmd(document.getElementById(CAL_TARGET).value) || new Date();
+    CAL_VIEW = new Date(cur.getFullYear(), cur.getMonth(), 1);
+    renderCal();
   }
+  // ===== 自己画的日历 =====
+  // 原生 <input type="date"> 的弹层只认**浏览器自身的语言**,页面切成英文了
+  // 它还是中文的(2026年07月 / 日一二三四五六 / 清除 / 今天),从页面这边改不了。
+  var CAL_TARGET = null;   // 正在给哪个输入框选日期
+  var CAL_VIEW = null;     // 日历当前翻到哪个月
+
+  function ymd(d) {
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) +
+           "-" + ("0" + d.getDate()).slice(-2);
+  }
+  function parseYmd(v) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ""));
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  }
+
+  function openCal(id) {
+    CAL_TARGET = id;
+    var cur = parseYmd(document.getElementById(id).value) || new Date();
+    CAL_VIEW = new Date(cur.getFullYear(), cur.getMonth(), 1);
+    renderCal();
+  }
+  document.getElementById("date-from").onclick = function () { openCal("date-from"); };
+  document.getElementById("date-to").onclick = function () { openCal("date-to"); };
+
+  function renderCal() {
+    var box = document.getElementById("cal");
+    box.innerHTML = "";
+    var d = t();
+    if (!CAL_TARGET || !CAL_VIEW) {
+      var hint = document.createElement("div");
+      hint.className = "cal-wd";
+      hint.textContent = d.pickHint;
+      box.appendChild(hint);
+      return;
+    }
+    var y = CAL_VIEW.getFullYear(), m = CAL_VIEW.getMonth();
+
+    var head = document.createElement("div");
+    head.className = "cal-head";
+    var prev = document.createElement("button");
+    prev.className = "cal-nav"; prev.textContent = "‹";
+    prev.onclick = function () { CAL_VIEW = new Date(y, m - 1, 1); renderCal(); };
+    var title = document.createElement("div");
+    title.className = "cal-title"; title.id = "cal-title";
+    title.textContent = d.calTitle(y, m);
+    var next = document.createElement("button");
+    next.className = "cal-nav"; next.textContent = "›";
+    next.onclick = function () { CAL_VIEW = new Date(y, m + 1, 1); renderCal(); };
+    head.appendChild(prev); head.appendChild(title); head.appendChild(next);
+    box.appendChild(head);
+
+    var grid = document.createElement("div");
+    grid.className = "cal-grid";
+    d.weekdays.forEach(function (w) {
+      var c = document.createElement("div");
+      c.className = "cal-wd"; c.textContent = w;
+      grid.appendChild(c);
+    });
+
+    var first = new Date(y, m, 1);
+    var start = new Date(y, m, 1 - first.getDay());   // 从这一格开始画(补上月末尾几天)
+    var selected = document.getElementById(CAL_TARGET).value;
+    var todayStr = ymd(new Date());
+    for (var i = 0; i < 42; i++) {
+      var day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      var str = ymd(day);
+      var b = document.createElement("button");
+      b.className = "cal-day" + (day.getMonth() !== m ? " out" : "") +
+                    (str === selected ? " sel" : "") + (str === todayStr ? " today" : "");
+      b.textContent = day.getDate();
+      b.dataset.d = str;
+      b.onclick = (function (v) {
+        return function () {
+          document.getElementById(CAL_TARGET).value = v;
+          showDateErr("");
+          renderCal();          // 重画一下,让选中态跟着走
+        };
+      })(str);
+      grid.appendChild(b);
+    }
+    box.appendChild(grid);
+  }
+
   document.getElementById("date-cancel").onclick = function () { closeDatePop(); };
   document.getElementById("date-ok").onclick = function () {
     var a = document.getElementById("date-from").value;
@@ -683,6 +804,7 @@
     document.getElementById("lb-to").textContent = d.to;
     document.getElementById("date-ok").textContent = d.ok;
     document.getElementById("date-cancel").textContent = d.cancel;
+    renderCal();   // 星期名、月份标题都要跟着切 —— 这正是自己画日历的意义
     document.querySelectorAll("#metric-btns .btn").forEach(function (b) { b.textContent = d.metrics[b.dataset.metric]; });
     document.querySelectorAll("#level-btns .btn").forEach(function (b) { b.textContent = d.levels[b.dataset.level]; });
 

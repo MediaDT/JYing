@@ -10,7 +10,7 @@ function makeEl(id0) {
   // 这类判断永远测不出来,是假通过。这里给它一个真的实现。
   const set = new Set();
   const el = {
-    innerHTML: "", textContent: "", className: "", style: {}, dataset: {}, title: "",
+    textContent: "", className: "", style: {}, dataset: {}, title: "",
     value: "", children: [], _h: {},
     classList: {
       add(c){ set.add(c); }, remove(c){ set.delete(c); },
@@ -26,6 +26,14 @@ function makeEl(id0) {
   };
   // 真实 DOM 里 `x.id = "foo"` 之后 getElementById("foo") 就找得到它。
   // 模拟里少了这一步,动态创建的按钮在测试里永远查不到,只能得出"没这个按钮"的假结论。
+  // 真实 DOM 里 `el.innerHTML = ""` 会把子节点全部清掉。模拟里只当普通属性的话,
+  // 重画过的内容会一层层叠在 children 里,测出来的是"新旧混在一起"的假结果。
+  let _html = "";
+  Object.defineProperty(el, "innerHTML", {
+    get(){ return _html; },
+    set(v){ _html = String(v); el.children.length = 0; },
+  });
+
   let _id = id0;
   Object.defineProperty(el, "id", {
     get(){ return _id; },
@@ -69,7 +77,8 @@ const sandboxPrelude = `
 `;
 const calls = [];      // 记下每次 fetch 的地址,用来验"查的是哪一段时间"
 const runner = new Function("__doc", "__data", "__calls", sandboxPrelude + script + `
-  ; return { drawKPIs, drawTrend, drawBars, drawTable, rangeQuery, load,
+  ; return { drawKPIs, drawTrend, drawBars, drawTable, rangeQuery, load, applyLang, renderCal,
+             setLang: function(v){ lang = v; },
              setData: function(d){ DATA = d; },
              setCustom: function(c){ CUSTOM = c; },
              getCustom: function(){ return CUSTOM; } };
@@ -151,6 +160,53 @@ check("点回快捷键会清掉自定义(否则两个条件打架)", () => {
   quick.fire("click");
   assert(api.getCustom() === null, "自定义没被清掉,查出来的还是老范围");
   assert(api.rangeQuery().indexOf("days=") === 0, "实际:" + api.rangeQuery());
+});
+
+// ===== 日历要跟着语言切 =====
+// 原生 <input type="date"> 的弹层只认浏览器自身的语言,页面切成英文了它还是中文
+// (2026年07月 / 日一二三四五六)。所以日历是我们自己画的 —— 这几条守着它真的会跟着切。
+const calText = () => {
+  const walk = (el) => (el.textContent || "") + (el.children || []).map(walk).join(" ");
+  return walk(els["cal"]);
+};
+
+check("中文下日历是中文", () => {
+  api.setLang("zh");
+  els["custom-btn"].fire("click");           // 打开弹层会初始化日历
+  const txt = calText();
+  assert(txt.indexOf("年") >= 0, "月份标题不是中文:" + txt.slice(0, 40));
+  assert(txt.indexOf("日") >= 0 && txt.indexOf("六") >= 0, "星期名不是中文");
+});
+
+check("切成英文后,日历里的中文全部消失", () => {
+  api.setLang("en");
+  api.applyLang();
+  const txt = calText();
+  assert(!/[\u4e00-\u9fa5]/.test(txt), "日历里还有中文:" + txt.replace(/\s+/g, " ").slice(0, 60));
+  assert(/January|February|March|April|May|June|July|August|September|October|November|December/.test(txt),
+         "没有英文月份名:" + txt.slice(0, 60));
+  assert(txt.indexOf("Su") >= 0 && txt.indexOf("Sa") >= 0, "星期名没换成英文");
+});
+
+check("点日历上的某一天会填进输入框", () => {
+  api.setLang("zh"); api.applyLang();
+  const days = els["cal"].children.filter((c) => c.className === "cal-grid")[0]
+                 .children.filter((c) => String(c.className).indexOf("cal-day") === 0);
+  assert(days.length === 42, "日历格子数不对:" + days.length);
+  const target = days.find((d) => String(d.className).indexOf("out") < 0);
+  target.fire("click");
+  assert(els["date-from"].value === target.dataset.d,
+         "点了没填进去:" + els["date-from"].value + " vs " + target.dataset.d);
+});
+
+check("不再用浏览器原生的 date 输入框(那个换不了语言)", () => {
+  // **先剥掉注释再查**:注释里正当地写着"为什么不用 <input type=date>",
+  // 直接搜会把说明文字也算进去(这坑项目里踩过好几次:docstring、CSS 注释、JS 注释)
+  const html = fs.readFileSync("static/dashboard.html", "utf8")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").filter((ln) => !ln.trim().startsWith("//")).join("\n");
+  assert(html.indexOf('type="date"') < 0, "还留着 <input type=\"date\">,它的弹层永远跟着浏览器语言走");
 });
 
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
