@@ -4,6 +4,7 @@ const html = fs.readFileSync("static/dashboard.html", "utf8");
 const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(s => s.trim()).pop();
 
 const els = {};
+const docHandlers = {};   // document 上挂的监听,按事件名分组
 
 function makeEl(id0) {
   // classList 原来是空壳(toggle/contains 什么都不做)—— 那样"弹层开没开"
@@ -31,7 +32,14 @@ function makeEl(id0) {
   let _html = "";
   Object.defineProperty(el, "innerHTML", {
     get(){ return _html; },
-    set(v){ _html = String(v); el.children.length = 0; },
+    set(v){
+      _html = String(v);
+      // 真实 DOM 清空内容时,原来的子节点会被**摘出文档**,parentNode 变成 null。
+      // 模拟里不断开的话,"重画之后原来那个节点还连着"就成了假象,
+      // 而"选不了日期"那个 bug 恰恰就死在这上面。
+      el.children.forEach(function (c) { c.parentNode = null; });
+      el.children.length = 0;
+    },
   });
 
   let _id = id0;
@@ -46,7 +54,11 @@ const doc = {
   getElementById: (id) => els[id] || makeEl(id),
   createElement: (tag) => makeEl("<" + tag + ">"),
   querySelectorAll: () => [],
-  addEventListener: () => {},
+  // 原来是空函数 —— 挂在 document 上的监听(比如"点外面关弹层")完全测不到。
+  // 而且要**区分捕获和冒泡**:这两者跑的时机不同,正是那个"选不了日期"的 bug 的关键。
+  addEventListener: (ev, fn, capture) => {
+    (docHandlers[ev] || (docHandlers[ev] = [])).push({ fn: fn, capture: !!capture });
+  },
   documentElement: { lang: "", dataset: {} },
 };
 const fakeData = {
@@ -207,6 +219,64 @@ check("不再用浏览器原生的 date 输入框(那个换不了语言)", () =>
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split("\n").filter((ln) => !ln.trim().startsWith("//")).join("\n");
   assert(html.indexOf('type="date"') < 0, "还留着 <input type=\"date\">,它的弹层永远跟着浏览器语言走");
+});
+
+// ===== 点日历上的某一天,弹层不能被关掉 =====
+// 线上实测:「根本选不了时间,一点日历就关了」。成因是点某天时它自己的 onclick
+// 会 renderCal() 重画,重画第一步就把刚点的按钮从 DOM 上摘掉;等事件冒泡到
+// document 时它的 parentNode 已是 null,"点外面就关闭"那段顺着往上找不到弹层,
+// 于是判成点了外面。解法是把那段挂到**捕获阶段**(在目标自己的 onclick 之前跑)。
+// 模拟不解析 HTML,所以 getElementById 拿到的都是彼此无关的孤立节点。
+// 而"点的是不是弹层里面"正是靠 parentNode 一路往上找判断的 —— 
+// 这里得把 markup 里的真实层级补上:#cal 在 #date-pop 里面。
+function wireMarkup() {
+  els["cal"].parentNode = els["date-pop"];
+  els["date-from"].parentNode = els["date-pop"];
+  els["date-to"].parentNode = els["date-pop"];
+}
+
+function realClick(el) {
+  const hs = docHandlers["click"] || [];
+  hs.filter((h) => h.capture).forEach((h) => h.fn({ target: el }));   // 捕获:先跑
+  el.fire("click");                                                   // 目标自己
+  hs.filter((h) => !h.capture).forEach((h) => h.fn({ target: el }));  // 冒泡:后跑
+}
+const dayCells = () =>
+  els["cal"].children.filter((c) => c.className === "cal-grid")[0]
+    .children.filter((c) => String(c.className).indexOf("cal-day") === 0);
+
+check("点日历上的某一天,弹层还开着(不是一点就关)", () => {
+  api.setLang("zh"); api.setCustom(null);
+  api.setData(fakeData);
+  els["date-pop"].classList.remove("show");   // 它是 toggle,先确保是关着的
+  els["custom-btn"].fire("click");
+  wireMarkup();
+  assert(els["date-pop"].classList.contains("show"), "前置:弹层没打开");
+  const cell = dayCells().find((d) => String(d.className).indexOf("out") < 0);
+  const want = cell.dataset.d;
+  realClick(cell);
+  assert(els["date-pop"].classList.contains("show"), "点了一天就把弹层关了 —— 等于选不了日期");
+  assert(els["date-from"].value === want, "日期没填进去:" + els["date-from"].value);
+});
+
+check("连点两天(改主意)也不会被关掉", () => {
+  const cells = dayCells().filter((d) => String(d.className).indexOf("out") < 0);
+  realClick(cells[5]);
+  assert(els["date-pop"].classList.contains("show"), "第二次点就关了");
+  assert(els["date-from"].value === cells[5].dataset.d, "第二次没改成新日期");
+});
+
+check("翻月份也不会被关掉", () => {
+  const nav = els["cal"].children.filter((c) => c.className === "cal-head")[0]
+                .children.filter((c) => c.className === "cal-nav");
+  realClick(nav[1]);          // 下一月
+  assert(els["date-pop"].classList.contains("show"), "翻个月就把弹层关了");
+});
+
+check("点弹层外面才关", () => {
+  const outside = doc.getElementById("kpis");
+  realClick(outside);
+  assert(!els["date-pop"].classList.contains("show"), "点外面没关掉");
 });
 
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);

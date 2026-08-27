@@ -519,7 +519,13 @@
     renderRangeBtns();
     load();
   };
-  // 点弹层外面就收起来(点弹层里面不能收,否则选日期时会被关掉)
+  // 点弹层外面才收起来。
+  // **必须挂在捕获阶段(第三个参数 true)**,这是这段代码的关键:
+  // 点日历上的某一天时,那个按钮自己的 onclick 会调 renderCal() 重画整个日历,
+  // 而重画的第一步 `box.innerHTML = ""` 就把**刚点的那个按钮从 DOM 上摘掉了**。
+  // 等事件冒泡到 document 时,它的 parentNode 已经是 null —— 顺着往上找永远找不到
+  // 弹层,于是被判成"点了外面",弹层当场关掉,用户表现是「根本选不了日期」。
+  // 捕获阶段在目标自己的 onclick **之前**跑,那时候它还好端端挂在弹层里。
   document.addEventListener("click", function (e) {
     var pop = document.getElementById("date-pop");
     if (!pop || !pop.classList.contains("show")) return;
@@ -529,7 +535,7 @@
       n = n.parentNode;
     }
     closeDatePop();
-  });
+  }, true);
 
   Object.keys(METRICS).forEach(function (k) {
     var b = document.createElement("button");
