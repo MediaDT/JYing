@@ -81,7 +81,10 @@
   .range-wrap { position: relative; }
   .date-pop {
     position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; display: none;
-    background: var(--surface-0); border: 1px solid var(--border); border-radius: 14px;
+    /* 这层浮在 KPI 卡和图表上面,**底色必须是实色** ——
+       变量名写错(比如 --surface-0 这种根本不存在的)时 CSS 拿不到值,
+       表现就是整个弹层"透视",后面的数字全透出来。 */
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
     box-shadow: 0 16px 40px -12px rgba(0,0,0,.28); padding: 14px; min-width: 250px;
   }
   .date-pop.show { display: block; }
@@ -103,7 +106,7 @@
   .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
   .cal-wd { text-align: center; font-size: 10.5px; color: var(--text-secondary); padding: 3px 0; }
   .cal-day {
-    border: 0; background: transparent; color: var(--text); font-family: inherit;
+    border: 0; background: transparent; color: var(--text-primary); font-family: inherit;
     font-size: 12px; padding: 6px 0; border-radius: 7px; cursor: pointer;
   }
   .cal-day:hover { background: color-mix(in srgb, var(--accent1) 14%, transparent); }
@@ -114,7 +117,7 @@
   .date-pop input[type="text"] {
     width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;
     border: 1px solid var(--border); border-radius: 9px;
-    background: var(--surface-1); color: var(--text); outline: none;
+    background: var(--surface-1); color: var(--text-primary); outline: none;
   }
   .date-pop input:focus { border-color: var(--accent1); }
   .date-pop .row { display: flex; gap: 8px; margin-top: 12px; }

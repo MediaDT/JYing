@@ -1309,6 +1309,50 @@ def test_concurrent_turns():
     check("执行台账每个请求一份", executed_ledger_is_per_request)
 
 
+# ============ 3.40 CSS 变量名不许编 ============
+
+
+def test_css_vars():
+    print("\n【3.40】CSS 变量:用到的必须真的定义过")
+    import pathlib
+    import re
+
+    # 血泪:日期弹层写了 `background: var(--surface-0)`,而这个变量**根本不存在**
+    # (真名是 --surface-1)。CSS 遇到取不到值的变量**不报错**,那条声明直接作废 →
+    # 弹层没有底色,浮在图表上是"透视"的,后面的数字全透出来。
+    # 这类错误浏览器不吭声、node --check 也管不着,只能这样扫。
+    def scan(f):
+        src = pathlib.Path(f).read_text()
+        css = "\n".join(re.findall(r"<style>([\s\S]*?)</style>", src))
+        defined = set(re.findall(r"(--[a-zA-Z0-9-]+)\s*:", css))
+        used = set(re.findall(r"var\((--[a-zA-Z0-9-]+)", src))
+        return sorted(used - defined)
+
+    bad = {}
+    for f in ("static/dashboard.html", "static/index.html",
+              "static/platforms.html", "static/login.html"):
+        miss = scan(f)
+        if miss:
+            bad[f] = miss
+    check("四个页面用到的 CSS 变量都定义过",
+          lambda: True if not bad else f"用了没定义的变量(会静默失效):{bad}")
+
+    def popup_is_opaque():
+        # 浮层压在图表上面,底色必须是实色,而且必须是真存在的变量
+        src = pathlib.Path("static/dashboard.html").read_text()
+        m = re.search(r"\.date-pop\s*\{([^}]*)\}", src)
+        if not m:
+            return "找不到 .date-pop 的样式"
+        body = re.sub(r"/\*[\s\S]*?\*/", "", m.group(1))
+        bg = re.search(r"background:\s*([^;]+);", body)
+        if not bg:
+            return "日期弹层没有设底色 —— 浮在图表上会透视"
+        if "transparent" in bg.group(1):
+            return f"日期弹层底色是透明的:{bg.group(1).strip()}"
+        return True
+    check("日期弹层有实色底(不会透出后面的图表)", popup_is_opaque)
+
+
 # ============ 3.41 大屏的时间范围(含自定义起止日期) ============
 
 
@@ -1857,6 +1901,7 @@ if __name__ == "__main__":
     test_validation()
     test_guardrail()
     test_concurrent_turns()
+    test_css_vars()
     test_dash_range()
     test_empty_reply()
     test_per_user_isolation()
