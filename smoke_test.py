@@ -1309,6 +1309,70 @@ def test_concurrent_turns():
     check("执行台账每个请求一份", executed_ledger_is_per_request)
 
 
+# ============ 3.42 模型空回复:要重试、要说清原因 ============
+
+
+def test_empty_reply():
+    print("\n【3.42】模型一个字都没返回时的处理")
+    import inspect
+    import agent_server as srv
+
+    def once_returns_finish_reason():
+        # 上游只有 finish_reason 能说明"为什么空"(截断?被安全策略拦了?)。
+        # 原来完全没读它,于是那种情况只能甩一句"没有返回文字",日志里也查不到线索
+        src = inspect.getsource(srv._openai_once)
+        if "finish_reason" not in src:
+            return "_openai_once 没把 finish_reason 带回来"
+        if src.count("return") < 2:
+            return "返回值没改全"
+        return True
+    check("拿得到 finish_reason(否则查不出为什么空)", once_returns_finish_reason)
+
+    def retries_once():
+        # 实测同样的问题连发三次都正常 —— 空回复是偶发,重试一次基本就好了。
+        # 但只重试**一次**:真坏了的话反复重试只是白烧额度
+        for fn, name in ((srv.ask_openai, "ask_openai"), (srv._gemini_loop, "_gemini_loop")):
+            src = "\n".join(ln for ln in inspect.getsource(fn).splitlines()
+                             if not ln.strip().startswith("#"))
+            if "retried_empty" not in src:
+                return f"{name} 空回复时不会重试"
+        return True
+    check("空回复会自动重试一次(两条大脑路径都要)", retries_once)
+
+    def message_is_actionable():
+        # "(ChatGPT 没有返回文字)"是死胡同:用户不知道是自己的问题还是系统坏了,
+        # 也不知道下一步该干嘛
+        for lang in ("zh", "en"):
+            m = srv._empty_reply_msg("length", lang)
+            if "finish_reason" in m and lang == "zh":
+                return "中文版把技术字段直接甩给用户了"
+            if len(m) < 30:
+                return f"{lang} 的说明太短,等于没说"
+        zh = srv._empty_reply_msg("content_filter", "zh")
+        if "安全策略" not in zh:
+            return "没把 content_filter 翻译成人话"
+        en = srv._empty_reply_msg("", "en")
+        if not en.startswith("\u26a0"):
+            return "英文版没走英文分支"
+        return True
+    check("给用户的说明是人话、双语、说得出下一步", message_is_actionable)
+
+    def no_dead_end_left():
+        # 老的死胡同话术不许残留
+        src = _src_no_comments("agent_server.py")
+        for bad in ("(ChatGPT 没有返回文字)", "(Gemini 没有返回文字)"):
+            if bad in src:
+                return f"还留着死胡同话术:{bad}"
+        return True
+    check("旧的「没有返回文字」话术已清干净", no_dead_end_left)
+
+
+def _src_no_comments(path: str) -> str:
+    import pathlib
+    return "\n".join(ln for ln in pathlib.Path(path).read_text().splitlines()
+                      if not ln.strip().startswith("#"))
+
+
 # ============ 3.45 按人隔离:别人的东西不能串过来 ============
 
 
@@ -1736,6 +1800,7 @@ if __name__ == "__main__":
     test_validation()
     test_guardrail()
     test_concurrent_turns()
+    test_empty_reply()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(97)、`node frontend_test.js`(56)、`node dashboard_test.js`(9)、`node platform_test.js`(35)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(101)、`node frontend_test.js`(56)、`node dashboard_test.js`(9)、`node platform_test.js`(35)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(97)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(35)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(101)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(9)+ `platform_test.js` 多平台(35)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -736,6 +736,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
 | 前端也能测 | 三套 node 测试都用极简 DOM 模拟**真实执行**页面脚本,不用开浏览器:`frontend_test.js`(多会话,16)、`dashboard_test.js`(大屏,9)、`platform_test.js`(多平台/未绑定引导,16)。helper 里已给 `location` 和按 URL 分发的 `fetch` 打桩 |
 | **白屏转圈的元凶** | marked.js 曾是**阻塞式** `<script src>`:它一卡(常见于端口转发的桥半死),后面的内联脚本永不执行 → 整页白屏,比报错更难查。已改 `async` + `onMarkedReady` 补排版:排版库晚到/失败也只是表格丑点,页面照常可用。**教训:前端任何阻塞式外部资源都是白屏隐患** |
 | OpenAI `insufficient_quota` | key 有效但账户没余额;OpenAI 是充值制,Gemini 才有免费日额度 |
+| **模型偶尔一个字都不吐,不能就这么甩给用户** | 线上出现过一句 `(ChatGPT 没有返回文字)` 就没了下文 —— 那是死胡同:用户不知道是自己的问题还是系统坏了,也不知道下一步该干嘛;**日志里同样查不到线索**,因为 `_openai_once` 压根没读 `finish_reason` —— 上游唯一能说明「为什么空」的字段(截断?被安全策略拦了?)。实测同样的问题连发三次都正常,说明是偶发。解法三件套:①`finish_reason` 带回来并 print 进日志;②**原地重试一次**(只一次 —— 真坏了反复重试只是白烧额度),重试前 emit `reset` 把吐了一半的字作废;③还空就用 `_empty_reply_msg()` 说清原因 + 给下一步,中英双语。**两条大脑路径(Gemini / ofox)都要做**,只修一边的话换条路又是死胡同 |
 | **接力只认 `APIError` 更不够** | 给 Gemini 设了超时之后,**超时抛的是 `httpx.ReadTimeout`,不是 genai 的 `APIError`** —— 原来的 `except genai_errors.APIError` 捕不到,于是明明配了 ofox 也不切,直接把错甩给用户。而没设超时更糟:SDK 默认不限时,对方不回音就干等到 TCP 自己放弃(实测 `check_brain.py` 跑了 **12 分 51 秒**)。现在:`_gemini_client()` 统一带 30s 超时,`_should_fallback()` 把网络异常也算进接力条件 |
 | **熔断要等备用通道真的顶上了才记** | 「刚才 Gemini 干等了 30s,接下来 5 分钟直接走备用通道」这个冷却,**如果在调备用通道之前就记下,备用通道也坏时就一个能用的都不剩了**。实测正好撞上:Gemini 504 过载 + ofox 余额为负全 402。所以 `_mark_gemini_down()` 必须放在 `ask_openai()` **返回之后**(冒烟测试查这个顺序)。另外冷却只对「干等型」失败生效(网络超时 / 503 / 504),429 是秒回的,压五分钟没道理 |
 | **接力只认 429 是不够的** | 原来只有 429(额度)才切下一级,结果 Gemini 报 **503(服务繁忙)** 时整条链直接断掉,明明有 ofox 兜底也不用,用户只看到"稍后再试"。现已定义 `_RETRYABLE_CODES = (429, 500, 502, 503, 504)`:额度类+上游临时故障都自动接力;**401/403 这类钥匙问题绝不接力**(要让用户看到真实原因,不能靠切换掩盖配置错误)|
@@ -851,7 +852,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 97 + 前端 56 + 大屏 9 + 平台 35 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 101 + 前端 56 + 大屏 9 + 平台 35 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -893,5 +894,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 97 / 前端 56 / 大屏 9 / 平台 35 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 101 / 前端 56 / 大屏 9 / 平台 35 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

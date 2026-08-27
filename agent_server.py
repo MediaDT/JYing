@@ -2595,6 +2595,7 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
     )
     streaming = CURRENT_EMIT.get() is not None
     contents = list(contents)
+    retried_empty = False        # 空回复只原地重试一次
 
     for _ in range(10):   # 设个上限防转圈
         texts, calls, model_parts = [], [], []
@@ -2625,7 +2626,18 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
                 take(part)
 
         if not calls:
-            return "".join(texts) or "(Gemini 没有返回文字)"
+            out = "".join(texts)
+            if out.strip():
+                return out
+            # 和 ChatGPT 那条一样:空回复要重试 + 说清原因,不能只甩一句"没有返回文字"
+            print(f"[brain] Gemini 空回复 model={model}", flush=True)
+            if not retried_empty:
+                retried_empty = True
+                if streaming:
+                    _emit("reset")
+                _emit("status", text="没收到内容,正在重试…")
+                continue
+            return _empty_reply_msg("", lang)
 
         # 它要用工具:说明刚才吐的那点字只是开场白,不是最终答案 → 让前端作废重来
         if streaming and texts:
@@ -2829,11 +2841,12 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
 
     streaming = CURRENT_EMIT.get() is not None
 
+    retried_empty = False        # 空回复只原地重试一次,别把额度耗在死循环上
     for _ in range(10):  # 工具调用循环:一轮没答完就继续,设个上限防转圈
-        content, tool_calls, ok_model = "", [], None
+        content, tool_calls, finish, ok_model = "", [], "", None
         for model in models_to_try:
             try:
-                content, tool_calls = _openai_once(client, model, msgs, streaming)
+                content, tool_calls, finish = _openai_once(client, model, msgs, streaming)
                 ok_model = model
                 break
             except openai.NotFoundError:
@@ -2843,7 +2856,19 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
         models_to_try = [ok_model]   # 记住能用的型号,后面几轮不再试错
 
         if not tool_calls:
-            return content or "(ChatGPT 没有返回文字)"
+            if content.strip():
+                return content
+            # **空回复**:一个字没吐,也没说要调工具。实测是偶发(同样的问题
+            # 连发三次都正常),所以原地重试一次 —— 原来直接甩一句
+            # "(ChatGPT 没有返回文字)",既不重试、也不留线索,用户只能干瞪眼。
+            print(f"[brain] 空回复 finish_reason={finish!r} model={ok_model}", flush=True)
+            if not retried_empty:
+                retried_empty = True
+                if streaming:
+                    _emit("reset")            # 把可能吐了一半的字作废
+                _emit("status", text="没收到内容,正在重试…")
+                continue
+            return _empty_reply_msg(finish, lang)
 
         # 它想用工具:说明刚才吐的那点字只是开场白,不是最终答案 → 让前端作废重来
         if streaming and content:
@@ -2866,24 +2891,51 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
     return "(工具调用轮数过多,已中止,请换个问法)"
 
 
-def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, list]:
-    """问一轮 OpenAI/ofox,返回 (文字, 工具调用清单)。
+def _empty_reply_msg(finish: str, lang: str = "zh") -> str:
+    """模型一个字都没吐时给用户的交代。
+
+    **绝不能只说"没有返回文字"** —— 那是死胡同:用户不知道是自己的问题、
+    还是系统坏了,也不知道该怎么办。把上游给的结束原因翻译成人话,并给出下一步。
+    """
+    english = str(lang).lower().startswith("en")
+    why_zh = {"length": "回答太长被截断了", "content_filter": "内容被安全策略拦下了"}
+    why_en = {"length": "the answer was cut off by the length limit",
+              "content_filter": "the content was blocked by a safety filter"}
+    if english:
+        why = why_en.get(finish, f"the provider reported finish_reason={finish or 'unknown'}")
+        return ("⚠️ The model returned nothing this time (" + why + "). "
+                "I already retried once. Please send the question again — "
+                "if it keeps happening, try rephrasing it or breaking it into smaller parts.")
+    why = why_zh.get(finish, f"上游给的结束原因是 {finish or '未知'}")
+    return ("⚠️ 这一轮模型一个字都没返回(" + why + ")。我已经自动重试过一次了。"
+            "请把问题再发一次;如果反复这样,换个说法、或者把问题拆小一点再问。")
+
+
+def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, list, str]:
+    """问一轮 OpenAI/ofox,返回 (文字, 工具调用清单, finish_reason)。
 
     流式时边收边把文字播报出去;工具调用是分片来的(名字和参数会拆成好几块),
     要按 index 拼起来才完整。
+
+    **`finish_reason` 一定要带回去**:模型偶尔会一个字都不吐、也不调工具,
+    上游只有这个字段能说明为什么(截断?被安全策略拦了?)。原来完全没读它,
+    于是那种情况只能回一句"没有返回文字",用户和日志都拿不到任何线索。
     """
     if not streaming:
         r = client.chat.completions.create(model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS)
         m = r.choices[0].message
         return (m.content or "",
                 [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or ""}
-                 for tc in (m.tool_calls or [])])
+                 for tc in (m.tool_calls or [])],
+                r.choices[0].finish_reason or "")
 
-    parts, slots = [], {}
+    parts, slots, finish = [], {}, ""
     for chunk in client.chat.completions.create(
             model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS, stream=True):
         if not chunk.choices:
             continue
+        if chunk.choices[0].finish_reason:
+            finish = chunk.choices[0].finish_reason
         d = chunk.choices[0].delta
         if d is None:
             continue
@@ -2899,7 +2951,7 @@ def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, 
                     slot["name"] += tc.function.name
                 if tc.function.arguments:
                     slot["arguments"] += tc.function.arguments
-    return "".join(parts), [slots[i] for i in sorted(slots)]
+    return "".join(parts), [slots[i] for i in sorted(slots)], finish
 
 
 def ask_claude(messages: list[ChatMessage], lang: str = "zh") -> str:
