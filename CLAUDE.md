@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(109)、`node frontend_test.js`(56)、`node dashboard_test.js`(23)、`node platform_test.js`(35)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(111)、`node frontend_test.js`(56)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(109)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(23)+ `platform_test.js` 多平台(35)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(111)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -735,6 +735,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
 | **"没绑就回落公用 token"= 没隔离** | 按人隔离时,`_token()` 必须区分「不在用户上下文」(None,回落 .env)和「在用户上下文但没绑」(空 dict,直接报错)。少了这个区分,B 登录后会直接用上 .env 里的公用 token,隔离形同虚设。冒烟测试里有一条专门守这个 |
 | **cookie 的 secure 不能写死 True** | 写死了本地 `http://localhost` 开发时浏览器**根本不存这个 cookie**,直接登不进去。要按 `request.url.scheme` 判断。放在 nginx 后面时这个 scheme 来自 `X-Forwarded-Proto` 请求头,所以反代配置里那行不能少;缺了只是退回不加 secure,不会把人挡在门外 |
 | **原生 `<input type="date">` 的日历换不了语言** | 页面已经把 `documentElement.lang` 设成 `en` 了,Chrome 的日期弹层照样是中文(`2026年07月` / `日一二三四五六` / `清除` / `今天`)—— **那个弹层只认浏览器自身的语言,不认页面的 `lang` 属性**,从页面这边改不了。要让它跟着切,只能自己画日历(顺带样式也能和页面统一,原生那个看着像另一个软件)。输入框改成 `type="text" readonly`,`.value` 语义不变、也不会再弹出原生日历。大屏测试里搜 `type="date"` 守着不许回退(**记得连 CSS 注释和 JS 行注释一起剥**,否则注释里写的说明会被当成命中)|
+| **有页面从来没被任何测试执行过** | 四个页面里,`platforms.html`(登录后第一眼)和 `login.html`(没登录只能看到它)**从没被跑过** —— 而这两页恰恰最经不起「函数名写错」「`const` 提升」这类问题:一旦初始化中途抛错,表现就是整页空白或点了没反应,`node --check` 查不出来。helper 加了 `opts.page` 参数就能跑别的页面。**新加页面时记得问一句:它有人跑过吗?** |
 | **测试的 DOM 模拟要够真** | helper 里 `remove()` 曾是空函数、`getElementById` 找不到动态创建的元素 → 测「提示有没有被撤掉」永远是假通过。已修:`appendChild` 记父节点、`remove()` 真摘、`id` setter 自动登记。另外 fetch 桩失败时要返回**失败的 Promise**而不是同步抛,否则测不出页面的 `.catch` 分支 |
 | **探活别 curl `/`** | 加了登录门之后,未登录访问 `/` 返回 **302**(跳 `/login`),这是**正常**的。老口诀「不是 200 就重启」会把好端端的服务白重启一遍。改用 `curl .../login` 看 200,或接受 200/302 都算活 |
 | **CSS 变量名写错不报错,只是静默失效** | 日期弹层写了 `background: var(--surface-0)`,而这个变量**根本不存在**(真名是 `--surface-1`)。CSS 取不到值时**不报错**,那条声明直接作废 → 弹层没有底色,浮在图表上是「透视」的,后面的 KPI 数字全透出来。**浏览器不吭声、`node --check` 也管不着**,只能扫:冒烟测试里比对四个页面 `var(--x)` 用到的和 `:root` 里定义过的,差集不为空就报错(顺带扫出 `--text` 也是编的,真名 `--text-primary`)。和「函数名要按实际的来」是同一类错:**别凭印象写名字,先 grep 一下真名** |
@@ -860,7 +861,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 109 + 前端 56 + 大屏 23 + 平台 35 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 111 + 前端 56 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -902,5 +903,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 109 / 前端 56 / 大屏 23 / 平台 35 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 111 / 前端 56 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

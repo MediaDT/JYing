@@ -184,6 +184,39 @@ console.log("\n【7】点素材图能放大看(缩略图才 100px,看不清画�
   t("点非图片不会误弹", !box.classList.contains("show"));
 }
 
+console.log("\n【8】平台选择页真的跑得起来(它是登录后第一眼看到的页面)");
+{
+  // 这一页此前**从没被测试执行过**。它里面有 esc()、render()、applyLang() ——
+  // 正是「函数名写错」「const 提升」这类问题最容易藏身的地方,而且一旦初始化
+  // 中途抛错,表现就是整页空白或按钮点了没反应,node --check 完全查不出来。
+  const app = boot({}, { page: "platforms.html", platforms: FAKE(true) });
+  await tick(); await tick();
+  const cards = app.registry["cards"];
+  t("页面初始化没中断(卡片区被填了内容)",
+    (cards.innerHTML || "").length > 0 || (cards.children || []).length > 0);
+  const html = String(cards.innerHTML || "") +
+    (cards.children || []).map((c) => String(c.innerHTML || "") + String(c.textContent || "")).join("");
+  t("已上线的平台列出来了", html.indexOf("NewsBreak") >= 0, html.slice(0, 60));
+  t("没对接的平台也列出来了(标敬请期待)", html.indexOf("Nextdoor") >= 0);
+  t("语言切换按钮挂上了监听", !!(app.registry["lang-toggle"]._h || {}).click);
+}
+
+console.log("\n【9】登录页真的跑得起来(没登录的人只能看到它)");
+{
+  // 同样从没被执行过。登录页崩了 = 谁都进不来。
+  const app = boot({}, { page: "login.html" });
+  await tick(); await tick();
+  t("表单挂上了提交监听(不然点登录没反应)", !!(app.registry["form"]._h || {}).submit);
+  t("render() 跑到了(标题被写进去了)", String(app.registry["title"]._text || "").length > 0,
+    String(app.registry["title"]._text || ""));
+  t("提交按钮的文案也写了", String(app.registry["submit"]._text || "").length > 0);
+  // 「去注册 / 去登录」那个链接是用 innerHTML 字符串建的,模拟不解析 HTML,
+  // 只能验它确实被写进去了,点击行为得靠浏览器里点一遍
+  t("切换登录/注册的链接渲染了",
+    String(app.registry["switch"].innerHTML || "").indexOf("<a") >= 0,
+    String(app.registry["switch"].innerHTML || "").slice(0, 40));
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 

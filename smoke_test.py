@@ -1309,6 +1309,49 @@ def test_concurrent_turns():
     check("执行台账每个请求一份", executed_ledger_is_per_request)
 
 
+# ============ 3.39 磁盘不能被慢慢吃掉 ============
+
+
+def test_disk_growth():
+    print("\n【3.39】本地留档有上限")
+    import agent_server as srv
+
+    def generated_is_capped():
+        # 这些图已经传进平台素材库了,本地这份只是"上传失败时别把钱花的东西弄丢"的保险。
+        # 不设上限的话,长驻服务跑几个月磁盘就被它吃掉了(每张几百 KB,只增不减)。
+        d = srv._GENERATED_DIR
+        made = []
+        try:
+            import os
+            for i in range(srv._KEEP_GENERATED + 5):
+                f = d / f"smoketest-{i:04d}.jpg"
+                f.write_bytes(b"x")
+                os.utime(f, (1000 + i, 1000 + i))     # 造出先后顺序
+                made.append(f)
+            srv._prune_generated()
+            left = {f.name for f in d.glob("smoketest-*.jpg")}
+            if len(list(d.glob("*.jpg"))) > srv._KEEP_GENERATED:
+                return "超过上限了还没清"
+            if f"smoketest-0000.jpg" in left:
+                return "删的不是最旧的"
+            if f"smoketest-{srv._KEEP_GENERATED + 4:04d}.jpg" not in left:
+                return "最新的反而被删了"
+            return True
+        finally:
+            for f in made:
+                f.unlink(missing_ok=True)     # 测试自己造的垃圾自己收走
+    check("生图的本地留档只留最近若干张", generated_is_capped)
+
+    def prune_is_called():
+        import inspect
+        src = "\n".join(ln for ln in inspect.getsource(srv._execute_make_creatives).splitlines()
+                         if not ln.strip().startswith("#"))
+        if "_prune_generated()" not in src:
+            return "落盘之后没调清理,上限等于没设"
+        return True
+    check("落盘之后真的会调清理", prune_is_called)
+
+
 # ============ 3.40 CSS 变量名不许编 ============
 
 
@@ -1901,6 +1944,7 @@ if __name__ == "__main__":
     test_validation()
     test_guardrail()
     test_concurrent_turns()
+    test_disk_growth()
     test_css_vars()
     test_dash_range()
     test_empty_reply()

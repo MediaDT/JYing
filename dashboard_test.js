@@ -89,7 +89,7 @@ const sandboxPrelude = `
 `;
 const calls = [];      // 记下每次 fetch 的地址,用来验"查的是哪一段时间"
 const runner = new Function("__doc", "__data", "__calls", sandboxPrelude + script + `
-  ; return { drawKPIs, drawTrend, drawBars, drawTable, rangeQuery, load, applyLang, renderCal,
+  ; return { drawKPIs, drawTrend, drawBars, drawTable, rangeQuery, load, applyLang, renderCal, openCal,
              setLang: function(v){ lang = v; },
              setData: function(d){ DATA = d; },
              setCustom: function(c){ CUSTOM = c; },
@@ -277,6 +277,38 @@ check("点弹层外面才关", () => {
   const outside = doc.getElementById("kpis");
   realClick(outside);
   assert(!els["date-pop"].classList.contains("show"), "点外面没关掉");
+});
+
+check("看得出日历正在给哪个框选日期", () => {
+  els["date-pop"].classList.remove("show");
+  els["custom-btn"].fire("click");
+  wireMarkup();
+  assert(els["date-from"].classList.contains("picking"), "默认没标出在选「开始日期」");
+  assert(!els["date-to"].classList.contains("picking"), "两个都亮着,反而看不出选哪个");
+  realClick(els["date-to"]);
+  assert(els["date-to"].classList.contains("picking"), "点了「结束日期」没跟着切");
+  assert(!els["date-from"].classList.contains("picking"), "上一个没熄掉");
+});
+
+check("点上/下月的灰格子,日历跟着翻过去", () => {
+  els["date-from"].value = "2026-07-15";
+  api.openCal("date-from");
+  const out = dayCells().find((c) => String(c.className).indexOf("out") >= 0);
+  const want = out.dataset.d;                       // 形如 2026-06-28
+  realClick(out);
+  const title = els["cal"].children.filter((c) => c.className === "cal-head")[0]
+                  .children.filter((c) => c.className === "cal-title")[0].textContent;
+  const m = Number(want.split("-")[1]);
+  assert(title.indexOf(m + "月") >= 0, "没翻到那一月,用户看不到自己选中了什么:" + title);
+  assert(els["date-from"].value === want, "日期没填对");
+});
+
+check("按 Esc 能关掉日期弹层", () => {
+  els["date-pop"].classList.remove("show");
+  els["custom-btn"].fire("click");
+  assert(els["date-pop"].classList.contains("show"), "前置:没打开");
+  (docHandlers["keydown"] || []).forEach((h) => h.fn({ key: "Escape" }));
+  assert(!els["date-pop"].classList.contains("show"), "Esc 关不掉");
 });
 
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);

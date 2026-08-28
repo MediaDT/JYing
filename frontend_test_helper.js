@@ -29,7 +29,18 @@ function makeEl(tag) {
         }
         return null;
       };
-      return walk(this);
+      const hit = walk(this);
+      if (hit) return hit;
+      // 页面里大量用 `el.innerHTML = "<div class=x>…"` 建内容,而模拟**不解析 HTML**,
+      // 于是 children 是空的、querySelector 一律返回 null ——
+      // 页面下一行 `.onclick = ...` 就崩在 null 上,测出来像是页面有 bug,其实是模拟不够真。
+      // 这里退一步:只要刚写进去的 innerHTML 里出现过这个 class,就给个替身节点,
+      // 让页面代码能往下走(替身也能 fire("click"),行为测得到)。
+      if (want && String(this.innerHTML || "").indexOf(want) >= 0) {
+        this._stubs = this._stubs || {};
+        return (this._stubs[want] = this._stubs[want] || makeEl("div"));
+      }
+      return null;
     },
     querySelectorAll(){ return []; },
     addEventListener(ev, fn){ (this._h ||= {})[ev] = fn; },
@@ -142,7 +153,9 @@ module.exports = function boot(store, opts) {
       headers: { get: () => "application/json" }, json: async () => body });
   };
 
-  const html = fs.readFileSync("/root/workspace/my-agent/static/index.html", "utf8");
+  // 默认跑聊天页;opts.page 可以指定别的页面(登录页、平台选择页也要有人真跑一遍 ——
+  // 它们是用户最先看到的两页,一个运行时错误就是"点按钮没反应"或整页空白)
+  const html = fs.readFileSync("/root/workspace/my-agent/static/" + (opts.page || "index.html"), "utf8");
   const js = html.match(/<script>([\s\S]*?)<\/script>/g).pop().replace(/<\/?script>/g, "");
   // 把页面脚本里的函数捞出来,好让测试能直接调(模拟"用户点了某个按钮之后")
   const exposed = {};

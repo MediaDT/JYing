@@ -114,6 +114,12 @@
   .cal-day.sel { background: var(--accent1); color: #fff; font-weight: 600; }
   .cal-day.today { box-shadow: inset 0 0 0 1px var(--accent1); }
   .date-pop input[type="text"] { cursor: pointer; }
+  /* 日历现在是在给「开始日期」还是「结束日期」选?不标出来的话,
+     用户点了一天不知道填到哪儿去了(尤其是刚打开、还没点过任何一个框时)。 */
+  .date-pop input.picking {
+    border-color: var(--accent1);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent1) 16%, transparent);
+  }
   .date-pop input[type="text"] {
     width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;
     border: 1px solid var(--border); border-radius: 9px;
@@ -461,6 +467,9 @@
       box.appendChild(hint);
       return;
     }
+    ["date-from", "date-to"].forEach(function (fid) {
+      document.getElementById(fid).classList.toggle("picking", fid === CAL_TARGET);
+    });
     var y = CAL_VIEW.getFullYear(), m = CAL_VIEW.getMonth();
 
     var head = document.createElement("div");
@@ -497,17 +506,25 @@
                     (str === selected ? " sel" : "") + (str === todayStr ? " today" : "");
       b.textContent = day.getDate();
       b.dataset.d = str;
-      b.onclick = (function (v) {
+      b.onclick = (function (v, dd) {
         return function () {
           document.getElementById(CAL_TARGET).value = v;
           showDateErr("");
-          renderCal();          // 重画一下,让选中态跟着走
+          // 点的是上/下月那几个灰格子 → 日历跟着翻过去。
+          // 不翻的话,选中的那天不在当前月里,用户看不到自己选中了什么
+          CAL_VIEW = new Date(dd.getFullYear(), dd.getMonth(), 1);
+          renderCal();
         };
-      })(str);
+      })(str, day);
       grid.appendChild(b);
     }
     box.appendChild(grid);
   }
+
+  // Esc 关掉日期弹层(和聊天页的确认框保持一致:随时能退出去)
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeDatePop();
+  });
 
   document.getElementById("date-cancel").onclick = function () { closeDatePop(); };
   document.getElementById("date-ok").onclick = function () {

@@ -1079,6 +1079,22 @@ def _plans() -> list[dict]:
 # data/ 已被 .gitignore 排除。
 _GENERATED_DIR = Path(__file__).parent / "data" / "generated"
 _GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+_KEEP_GENERATED = 200        # 本地只留最近这么多张
+
+
+def _prune_generated() -> None:
+    """本地留档只留最近 200 张。
+
+    这些图**已经传进 NewsBreak 素材库**了,本地这份只是"上传失败时别把钱花的东西弄丢"
+    的保险。不设上限的话,长驻服务跑几个月磁盘就被它吃掉了
+    (每张 1200×628 的 JPG 几百 KB,而且只增不减)。
+    """
+    try:
+        files = sorted(_GENERATED_DIR.glob("*.jpg"), key=lambda f: f.stat().st_mtime)
+        for f in files[:-_KEEP_GENERATED]:
+            f.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[warn] 清理本地留档失败(不影响功能): {e}", flush=True)
 
 
 def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
@@ -1200,6 +1216,7 @@ def _execute_make_creatives(a: dict) -> dict:
             local = _GENERATED_DIR / fname
             try:
                 local.write_bytes(img)
+                _prune_generated()      # 只留最近若干张,别让磁盘被慢慢吃掉
             except Exception as e:
                 print(f"[write-op] 本地留档失败(不影响上传):{e}", flush=True)
 
