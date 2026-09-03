@@ -850,6 +850,94 @@ def test_pure_logic():
         return f"测试往真实脚本库里写了垃圾:{junk}" if junk else None
     check("测试不许污染用户真实的脚本库", t_no_test_junk_in_store)
 
+    # ClickFlare:接口全靠实测(公开文档没有接口清单),细节见 CLAUDE.md 第六之十八节。
+    # 这几条不联网,守的是「代码里写死的那些前提别被人改坏」。
+    def t_clickflare_client_basics():
+        import clickflare_client as cfc
+        # ① 从 Campaign Tracking URL 抠 campaign id —— 用户手里有的就是这条链接,
+        #    比让模型按名字猜是哪个 campaign 可靠得多。
+        cid = "a1b2c3d4e5f60718293a4b5c"
+        cases = [(f"https://trk.x.com/abc?cpid={cid}&s1=y", cid),
+                 (f"https://trk.x.com/abc?campaign_id={cid}", cid),
+                 (cid, cid), (cid.upper(), cid)]
+        for raw, want in cases:
+            try:
+                got = cfc.campaign_id_from(raw)
+            except Exception as e:
+                return f"认不出 campaign:{raw[:40]} → {e}"
+            if got != want:
+                return f"抠错了:{raw[:40]} → {got}"
+        for bad, why in [("https://lp.example.com/exp/a/", "落地页地址"),
+                         ("https://trk.x.com/cf/click/1", "CTA 地址"),
+                         ("", "空的"), ("随便一句话", "不是链接")]:
+            try:
+                cfc.campaign_id_from(bad)
+                return f"把{why}当成 campaign 了:{bad}"
+            except cfc.ClickFlareError:
+                pass
+        # ② 建落地页的校验必须**在联网之前**就拦住 —— 这里没有网也应该报错
+        bad_args = [({"name": "x", "url": "https://a.com/", "workspace_id": "nope"}, "workspace"),
+                    ({"name": "x", "url": "ftp://a", "workspace_id": cid}, "地址协议"),
+                    ({"name": "  ", "url": "https://a.com/", "workspace_id": cid}, "空名字"),
+                    ({"name": "x", "url": "https://a.com/", "workspace_id": cid,
+                      "cta_count": 0}, "cta_count")]
+        for kwargs, why in bad_args:
+            try:
+                cfc.create_landing(**kwargs)
+                return f"{why}不合法却没拦住"
+            except cfc.ClickFlareError:
+                pass
+            except Exception as e:
+                return f"{why}报的不是 ClickFlareError,而是 {type(e).__name__}(说明是联网后才失败的)"
+        return None
+    check("ClickFlare:追踪链接能定位 campaign、建落地页的校验在联网前", t_clickflare_client_basics)
+
+    # 加工具最容易漏的就是「只注册了一半」——Gemini 一份、OpenAI 两份、
+    # 模式白名单一份、进度文案一份,漏哪份都是某条路径上悄悄用不了。
+    def t_clickflare_tools_registered():
+        import agent_server as srv, inspect
+        names = ["list_clickflare_campaigns", "describe_clickflare_campaign",
+                 "create_clickflare_landers"]
+        bad = []
+        for n in names:
+            if not any(f.__name__ == n for f in srv.NEWSBREAK_TOOLS):
+                bad.append(f"{n} 不在 Gemini 工具清单里")
+            if n not in srv.OPENAI_TOOL_FUNCS:
+                bad.append(f"{n} 不在 OPENAI_TOOL_FUNCS 里")
+            if not any(t["function"]["name"] == n for t in srv.OPENAI_TOOL_SCHEMAS):
+                bad.append(f"{n} 没有 OpenAI schema")
+            if n not in srv.LANDING_TOOL_NAMES:
+                bad.append(f"{n} 落地页模式里用不了")
+            if n not in srv._TOOL_LABELS:
+                bad.append(f"{n} 没有进度文案(流式时用户看不到在干嘛)")
+            # Gemini 从签名生成 schema,裸 list/dict 会让**整条 Gemini 路径**都 400
+            f = srv.OPENAI_TOOL_FUNCS.get(n)
+            if f:
+                for k, prm in inspect.signature(f).parameters.items():
+                    if prm.annotation in (list, dict):
+                        bad.append(f"{n} 的参数 {k} 标了裸 {prm.annotation.__name__}")
+        return bad or True
+    check("ClickFlare 三个工具五处都注册了", t_clickflare_tools_registered)
+
+    # 建 Lander 之前那道「A/B 不能是同一个地址」的检查,必须排在联网调用之前:
+    # 没网/没配 key 的环境里它也该直接拦住,而不是先去打接口。
+    def t_clickflare_ab_check_is_free():
+        import agent_server as srv, clickflare_client as cfc
+        called = []
+        real = cfc.describe_campaign
+        cfc.describe_campaign = lambda *a, **k: called.append(1) or {}
+        try:
+            r = srv.create_clickflare_landers("anything", "https://a.com/x/", "https://a.com/x/",
+                                              "https://trk.x.com/cf/click/1")
+        finally:
+            cfc.describe_campaign = real
+        if not r.get("error") or "同一个" not in r["error"]:
+            return f"A/B 同址没被拦:{str(r)[:120]}"
+        if called:
+            return "拦住了,但已经先去联网了 —— 免费的检查要排在联网之前"
+        return None
+    check("A/B 同址的检查排在联网之前", t_clickflare_ab_check_is_free)
+
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
     # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**

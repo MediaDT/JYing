@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(135)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(138)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -44,6 +44,7 @@
           creative_render.py   把方案做成广告图(第六之十五节,无字底图+代码叠字)
           cloudflare_pages.py  落地页 A/B 发布(第六之十七节)
           clickflare_scripts.py 追踪脚本库,每个追踪域名只贴一次(第六之十七节)
+          clickflare_client.py ClickFlare 追踪器 API(第六之十八节)
 ⑤ 安全层  agent_server.py     写操作"保险箱+保险丝"(第七节)+ AuthMiddleware 登录门
           accounts.py         账号/加盐哈希密码/会话/每人的聊天记录(第六之三节)
 ⑥ 平台层  platforms.py        投放平台注册表(NewsBreak 已通;Nextdoor/Meta 标 coming)
@@ -52,7 +53,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(135)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(138)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -858,6 +859,98 @@ A/B 两个生成文件;**Lander Tracking Script 只在这个追踪域名第一�
 同一个 Campaign Default Path 中选同一 Offer → 权重 50/50 → 复制一个 Campaign Tracking URL
 回本项目投放。
 
+## 六之十八、ClickFlare 接口(2026-09-03 实测,全部靠打接口打出来的)
+
+**这一节的每一条都是实测,不是文档给的。** ClickFlare 的公开文档**没有接口清单**,
+网上还有页面说认证头是 `api-token`(错的)。所以别改这一节的结论,
+怀疑变了就跑 `./venv/bin/python check_clickflare_params.py`(只发 GET,不改账号)。
+
+```
+入口      https://public-api.clickflare.io
+认证      请求头 api-key: <key>
+接口清单  GET /api/swagger.json   ← 54 个接口,平台自己吐的
+key       ClickFlare 后台 Settings → Security → Generate API Key
+```
+
+**怎么确定认证头的**(这个判据以后探别的平台也能用):
+用对了头,路径不对时返回 **404「Path not found」**(过了认证、卡在路由);
+用错了头,一律 **401「not authorized」**(根本没走到路由)。
+拿一个**已知不存在的路径**去打,能拿到 404 的那个头就是对的。
+
+### 数据模型:campaign → flow → paths
+
+**落地页不挂在 campaign 上,挂在 flow 里。** campaign 只有一个 `flow_id`。
+
+```json
+"paths": {"defaultPaths": {"paths": [{
+   "destination": "landers_offers",
+   "enabled": true, "weight": 100,
+   "landers_offers": {
+     "landers": [{"id": "…", "weight": 100}],
+     "offers":  [{"id": "…", "weight": 100}]
+   }}]}}
+```
+
+**A/B 分流就是把 `landers` 写成两条各 `weight: 50`,`offers` 一个字不动。**
+`GET /api/campaigns/{id}` 会把整个 flow 一起返回,不用再取一次。
+
+### 我们要用的接口
+
+| 动作 | 接口 |
+|---|---|
+| 建落地页 | `POST /api/landings` |
+| 读 campaign(连 flow) | `GET /api/campaigns/{id}` |
+| 改落地页和权重 | `PUT /api/flows/{id}` |
+| 列表 | `/api/workspaces`、`/api/campaigns/list`、`/api/landings`、`/api/offers`、`/api/domains`、`/api/traffic-sources` |
+| 报表 | `/api/report` |
+
+`POST /api/landings` 的字段:`workspace_id` / `name` / `url` / `cta_count` /
+`is_prelander` / `notes` / `tracking_info.tracking_domain_id` / `tags`。
+
+### 四条要记住的
+
+1. **落地页叫 `landings`,不叫 `landers`** —— `/api/landers` 各种写法全是 404,
+   靠猜路径名浪费了十几次请求。**先找 `swagger.json`,别猜。**
+2. **swagger 里写着的不一定能调**:`GET /api/campaigns` 实际 404(能用的是
+   `/api/campaigns/list`),`/api/offers/list`、`/api/flows/list` 返回 500。
+   和 OpenAdLibrary 那条「文档写了的参数不一定能用」是同一条教训,
+   体检脚本第 6 项专门守着这两个已知的对不上。
+3. **workspace 有 22 个,建东西时绝不许替用户挑。** 和 `_default_ad_account_id()`
+   同一条规矩:多于一个就明确报错并列出来让人选 —— 宁可吵,不要建错地方。
+4. **key 放 `.env` 全公司一份**(`CLICKFLARE_API_KEY`),和 Cloudflare 一样,
+   不按人存 —— 它是公司共用的追踪账号,不是各人各自的广告账户。
+   **但它和 Cloudflare 有个区别:改 flow 会立刻影响正在花钱的 campaign。**
+   所以隔离靠的不是「每人一把 key」,而是写操作一律走保险箱(第七节)。
+
+### 已经接进来的三个工具(第二步:只读 + 只新增)
+
+| 工具 | 做什么 | 风险 |
+|---|---|---|
+| `list_clickflare_campaigns(search)` | 列 campaign | 只读 |
+| `describe_clickflare_campaign(campaign)` | 看这条现在挂着哪些落地页/offer、权重多少 | 只读 |
+| `create_clickflare_landers(...)` | 把已发布的 A/B 地址登记成两个 Lander | **只新增**,不承接流量 |
+
+`campaign` 参数**直接把用户给的 Campaign Tracking URL 传进去**就行 ——
+里面带 `cpid=`,`campaign_id_from()` 会抠出来。这比让模型按名字猜靠谱得多
+(账号里 50 条 campaign,重名很常见);抠不出来就明确报错,**不许猜**。
+
+**两个值是推导出来的,不问用户也不会挑错**:
+`workspace_id` 从这条 campaign 自己读;`tracking_domain_id` 按 CTA 地址的域名反查。
+这样 22 个 workspace / 74 个域名都不用让用户从一长串里挑。**对不上就报错,绝不随便选一个。**
+
+**建好的 Lander 还不会承接任何流量** —— 要等它被挂进 campaign 的 flow 才算数。
+那一步会**立刻改变正在花钱的投放**,属于写操作,必须走保险箱,**还没做**(第三步)。
+
+### 第三步(改 campaign 的 flow)动手前必须想清楚的
+
+1. **立刻生效**:换上去的页面有毛病,当场就在烧钱往坏页面送。必须走保险箱,
+   提案里要列清「现在挂的是哪些 / 换成什么 / 权重多少 / offer 动不动」;
+2. **数据会混**:同一条 campaign 换了落地页,历史转化率就横跨两批页面了。
+   要么记下切换时间,要么新建 campaign 跑新页面 —— **让用户选,别替他定**;
+3. **offer 绝对不动**,只改 `landers` 数组;
+4. `PUT /api/flows/{id}` 是**整体替换**,不是打补丁 —— 要先 GET 回来改完再 PUT,
+   漏字段就等于把它清空了(和 Cloudflare Pages 那条「整站替换」同一类风险)。
+
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
 两阶段 + 物理保险丝:
@@ -933,6 +1026,8 @@ A/B 两个生成文件;**Lander Tracking Script 只在这个追踪域名第一�
 | **花钱的步骤要排在最后** | 生图 $0.20/张。踩了两次:一次卡在给文件起名(`_re` 没导入)、一次卡在上传缺 `mediaName` —— **两次都是图已生成、钱已付才失败**,那张就白花了。**所有免费又可能失败的准备工作(起名、校验、查余额)必须排在付费调用之前**,付过钱的产物还要先落盘再做后续 |
 | **按公开单价算的成本会差很远** | 按 ofox 报的 `output_image` 单价 × 官方 token 数算出一张 $0.05,**实测 $0.203,差 4 倍**。报低了用户以为很便宜,批量生成才发现烧了不少。**成本一律拿账单实测校正**(记余额→生成→再记余额),别信算出来的 |
 | **测试用 index() 找源码会命中注释** | 守"文件名要排在 `cr.render()` 之前"那条测试,`src.index("cr.render(")` 先命中了**注释里**写的 `cr.render()`,于是误报。和之前 `minDaysRunning` 在 docstring 里被搜到是同一类。**读源码做判断前先把注释/docstring 剥掉** |
+| **别猜接口路径名,先找 swagger** | ClickFlare 的落地页接口叫 `/api/landings`,而所有人(包括它自己的界面)都管这东西叫 **lander** —— `/api/landers`、`/api/lander`、`/api/lp`、`/api/landing-pages` 全是 404,猜了十几次没中。真正解决问题的是 `GET /api/swagger.json`(200,54 个接口全在里面)。**探一个没有公开文档的 API,第一件事是找它的 spec 端点**(`/swagger.json`、`/openapi.json`、`/api/docs`),别从资源名开始猜 |
+| **认证头对不对,看 404 还是 401** | 探认证方式时:用对了头 → 路径不对返回 **404「Path not found」**(过了认证、卡在路由);用错了头 → 一律 **401「not authorized」**(没走到路由)。所以拿一个**已知不存在的路径**去打,能拿到 404 的那个头就是对的 —— 比逐个试「哪个能返回 200」快得多,而且不需要先知道任何真实路径 |
 | **LRU 淘汰别把刚放进去的那条算进候选** | 脚本库满 40 个要丢「最久没用的」,排序键是 `last_used_at` —— 而刚存进来的那条这个字段**是空的**,空串排最前 → **刚存就被自己淘汰掉**,接着读它直接 `KeyError`,而落盘的已经是「没有这条」的版本,**重贴多少次都是同样的错,这个账号再也加不进新域名**。顺带淘汰顺序整个是反的(真正最老的反而留着)。两条规矩:①候选里**排除刚插入的那个键**;②没用过的条目拿**存入时间**当「最近使用」,别让空串参与排序 |
 | **「最后确认时间」不能因为内容没变就不刷新** | 脚本库记 `saved_at`,超过 180 天提醒用户回后台核对一次。原来写的是「内容相同就保留旧时间」—— 而平台没改版时,用户**照着提醒去复制回来的就是同一段**,于是那条提醒永远消不掉,提醒变成了骚扰。**凡是「多久没确认过」这类时间戳,记的是「最后一次确认」,不是「最后一次改变」** |
 | **`cancel_action` 一直没查归属** | `confirm_action` 早就查了「这个待办是不是你登记的」,`cancel_action` 没查 —— 而保险箱 `PENDING_ACTIONS` 是**全进程共享的一份**,不是每人一份。于是 B 登录进来能把 A 登记好的待办**删掉**,A 那边只会看到「找不到待办 xxx」,完全不知道发生了什么。**同一份共享状态上的每个入口都要查同一道归属**,补了 confirm 忘了 cancel 等于没补 |
@@ -1028,6 +1123,9 @@ A/B 两个生成文件;**Lander Tracking Script 只在这个追踪域名第一�
   代码层查文案照抄(第六之十三节);
 - **把方案做成广告图**:`propose_make_creatives` —— AI 画**无文字**底图 +
   **代码确定性叠字**,出 1200×628 成品直接传进素材库;走确认关卡先报价(第六之十五节);
+- **ClickFlare 接进来了(只读 + 建 Lander)**:接口全靠实测探出来(公开文档没有清单),
+  `check_clickflare_params.py` 随时可复查;追踪链接里的 `cpid` 直接定位 campaign,
+  workspace 和追踪域名由代码推导(第六之十八节)。**改 campaign 的 flow 还没做。**
 - **落地页 A/B 发布**:不用 GitHub,通过 Pages Direct Upload 发布;域名每次选择,
   新域名自动建项目、旧域名复用;ClickFlare CTA/脚本确定性注入,发布走二次确认;
   **追踪脚本每个追踪域名只贴一次**(脚本库,按人存),**CTA 域名和脚本域名对不上直接拒**,
@@ -1043,7 +1141,7 @@ A/B 两个生成文件;**Lander Tracking Script 只在这个追踪域名第一�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 135 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 138 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1071,9 +1169,12 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
 **接下来(按优先级)**:
 1. ~~建计划向导端到端验收~~ ✅ 已完成(2026-08-05 聊天版建成 `gutter-0805` 三层);
 2. 真接第二个平台(Nextdoor / Meta):现在只是注册表占位,按第六之二节最后那三步做;
-3. 补齐 Claude 那一级的工具支持(现在 `BRAIN=claude` 只能闲聊,见第八节坑表);
-4. 调预算等更多写操作(需先在 qx-ad-bot 里查 update 接口的 payload 格式);
-5. ~~流式回复(边想边出字)~~ ✅ 已完成(2026-08-14);把 README 推广给团队。
+3. **ClickFlare 第三步:把 A/B 挂进 campaign 并设 50/50**(`PUT /api/flows/{id}`)——
+   这是唯一还没做的一环,做完「发布落地页 → 接进追踪 → 填回 NewsBreak」就闭环了。
+   四条注意事项见第六之十八节末尾;
+4. 补齐 Claude 那一级的工具支持(现在 `BRAIN=claude` 只能闲聊,见第八节坑表);
+5. 调预算等更多写操作(需先在 qx-ad-bot 里查 update 接口的 payload 格式);
+6. ~~流式回复(边想边出字)~~ ✅ 已完成(2026-08-14);把 README 推广给团队。
 
 **落地页 A/B 这条线的现状(2026-09-03)** —— 代码全通了,卡在还没收齐材料:
 
@@ -1095,9 +1196,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 135 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 138 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 135 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 138 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

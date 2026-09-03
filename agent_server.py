@@ -122,6 +122,9 @@ _TOOL_LABELS = {
     "decompose_landing_page": "正在拆解落地页结构…",
     "summarize_landing_page_patterns": "正在汇总规律并生成两个新落地页…",
     "list_cloudflare_landing_resources": "正在读取 Cloudflare 项目和域名…",
+    "list_clickflare_campaigns": "正在读取 ClickFlare 的 campaign…",
+    "describe_clickflare_campaign": "正在看这条 campaign 现在挂着什么…",
+    "create_clickflare_landers": "正在把 A/B 两版登记进 ClickFlare…",
     "propose_publish_landing_pages": "正在登记 A/B 页面发布待办…",
     "my_ad_categories": "正在看你的账户在投什么品类…",
     "platform_kind": "正在判断这是哪类投放平台…",
@@ -547,6 +550,7 @@ import creative_render as cr  # noqa: E402
 import landing_lab as lp  # noqa: E402
 import cloudflare_pages as cfp  # noqa: E402
 import clickflare_scripts as cfs  # noqa: E402
+import clickflare_client as cfc  # noqa: E402
 import ad_platform_kinds as apk  # noqa: E402
 import openadlibrary_client as oal  # noqa: E402
 
@@ -2277,6 +2281,73 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
     return out
 
 
+def list_clickflare_campaigns(search: str = "") -> dict:
+    """列出 ClickFlare 里的 campaign(只读)。用户说不清要跑哪条时用它找。"""
+    try:
+        return cfc.list_campaigns(search=search)
+    except Exception as e:
+        return {"error": str(e)[:500]}
+
+
+def describe_clickflare_campaign(campaign: str) -> dict:
+    """看一条 campaign 现在挂着哪些落地页和 offer、权重各是多少(只读)。
+
+    `campaign` 直接把用户给的 **Campaign Tracking URL** 传进来就行 ——
+    里面带 `cpid=`,代码会抠出 campaign id;也接受 24 位的 id。
+    **改任何投放之前都要先调它**,把现状摆给用户看。
+    """
+    try:
+        return cfc.describe_campaign(campaign)
+    except Exception as e:
+        return {"error": str(e)[:500]}
+
+
+def create_clickflare_landers(campaign: str, variant_a_url: str, variant_b_url: str,
+                              cta_url: str, name_prefix: str = "") -> dict:
+    """把已经发布好的 A/B 两个地址登记成 ClickFlare 的两个 Lander(**只新增**)。
+
+    建好的 Lander **还不会承接任何流量** —— 要等它被挂进 campaign 的 flow 里才算数,
+    而那一步会改变正在花钱的投放,是单独的写操作、要用户确认。
+
+    两个关键值都是**推导**出来的,不问用户也不会挑错:
+    · `workspace_id` 从这条 campaign 自己读(账号里有 22 个 workspace);
+    · `tracking_domain_id` 按 `cta_url` 的域名反查(有 74 个追踪域名)。
+    """
+    # A/B 两个地址一样 = 这个实验问不出任何东西(和发布那道闸门同一个道理)。
+    # **这个检查不花一次请求,所以排在所有联网调用之前** —— 和生图那条
+    # 「免费又可能失败的步骤先做完」是同一条规矩。
+    if str(variant_a_url or "").strip() == str(variant_b_url or "").strip():
+        return {"error": "A/B 两个地址是同一个,这样建出来的 A/B 分流没有意义。"}
+    try:
+        info = cfc.describe_campaign(campaign)
+        workspace_id = str(info.get("workspace_id") or "")
+        if not workspace_id:
+            return {"error": "这条 campaign 上读不到 workspace_id,没法建 Lander。"}
+        domain_id = cfc.tracking_domain_id_for(cta_url)
+        raw = str(name_prefix or "").strip()
+        prefix = "".join(c if (c.isalnum() or c in "-_") else "-" for c in raw).strip("-")
+        if not prefix:
+            parts = [x for x in urlparse(str(variant_a_url)).path.split("/") if x]
+            prefix = parts[0] if parts else "lp"
+        made = []
+        for label, url in (("A", variant_a_url), ("B", variant_b_url)):
+            made.append(cfc.create_landing(
+                name=f"{prefix}-{label}", url=str(url).strip(), workspace_id=workspace_id,
+                tracking_domain_id=domain_id, cta_count=1,
+                notes="由投放助手创建;A/B 实验用"))
+    except Exception as e:
+        return {"error": str(e)[:500]}
+    return {
+        "created": made,
+        "campaign": {"id": info.get("campaign_id"), "名字": info.get("名字")},
+        "这条campaign现在挂着的": info.get("paths"),
+        "note": ("两个 Lander 已经建好,但**还没挂进 campaign,一点流量都不会走它们**。"
+                 "请把上面『现在挂着的』讲给用户听,并说明下一步是把这两个 Lander "
+                 "换进这条 campaign、权重各 50% —— 那会**立刻改变正在花钱的投放**,"
+                 "必须等他明确同意。**不许自己去改。**"),
+    }
+
+
 def list_schedules() -> dict:
     """查看所有定时任务(含下次执行时间、上次执行结果)。"""
     tasks = sched.list_tasks()
@@ -2310,6 +2381,7 @@ NEWSBREAK_TOOLS = [
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages,
+    list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -3051,6 +3123,7 @@ LANDING_TOOL_NAMES = {
     "native_market_scan", "search_competitor_ads", "search_competitor_landing_pages",
     "decompose_landing_page", "summarize_landing_page_patterns",
     "list_cloudflare_landing_resources", "propose_publish_landing_pages",
+    "list_clickflare_campaigns", "describe_clickflare_campaign", "create_clickflare_landers",
     "confirm_action", "cancel_action", "list_pending_actions",
 }
 
@@ -3404,6 +3477,24 @@ OPENAI_TOOL_SCHEMAS = [
              "只读列出 Cloudflare 可选域名、现有 Pages 项目和域名映射。用户准备发布但没指定域名时先调用",
              {"query": {"type": "string", "description": "按域名关键词筛选，可空"},
               "limit": {"type": "integer", "description": "最多返回多少个域名，默认50，最多100"}}, []),
+    _oa_tool("list_clickflare_campaigns",
+             "只读列出 ClickFlare 里的 campaign。用户说不清要跑哪条时用它找",
+             {"search": {"type": "string", "description": "按名字关键词筛选，可空"}}, []),
+    _oa_tool("describe_clickflare_campaign",
+             "只读:看一条 campaign 现在挂着哪些落地页和 offer、权重多少。"
+             "**改任何投放之前都要先调它，把现状摆给用户看**",
+             {"campaign": {"type": "string", "description":
+                 "用户给的 Campaign Tracking URL(里面带 cpid=)，或 24 位 campaign id"}},
+             ["campaign"]),
+    _oa_tool("create_clickflare_landers",
+             "把已发布的 A/B 两个地址登记成 ClickFlare 的两个 Lander。**只新增，建好也不会承接流量**；"
+             "要挂进 campaign 是另一步、必须用户确认。workspace 和追踪域名由代码推导，严禁自己填",
+             {"campaign": {"type": "string", "description": "Campaign Tracking URL 或 campaign id"},
+              "variant_a_url": {"type": "string", "description": "A 版正式地址"},
+              "variant_b_url": {"type": "string", "description": "B 版正式地址"},
+              "cta_url": {"type": "string", "description": "本次的 ClickFlare CTA Click URL，用来反查追踪域名"},
+              "name_prefix": {"type": "string", "description": "Lander 命名前缀，一般用实验名，可空"}},
+             ["campaign", "variant_a_url", "variant_b_url", "cta_url"]),
     _oa_tool("propose_publish_landing_pages",
              "登记把两个已生成页面发布为 Cloudflare Pages A/B 版本的待办。新域名自动建项目，旧域名复用；"
              "这是外部写操作，只登记，必须等用户下一条消息确认后再 confirm_action",
@@ -3480,6 +3571,7 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages,
+    list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
