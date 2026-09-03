@@ -248,11 +248,31 @@ def _guard_domain(domain: str) -> None:
         "确实要用这个域名的话，请先自己到 Cloudflare 后台删掉那条记录再来发布。")
 
 
+# ClickFlare 的 CTA Click URL **格式是固定的**:https://<追踪域名>/cf/click/<数字>
+# 只有域名会变(用户自己的追踪子域名),路径形状不变。
+# 有了这个我们才挡得住一类很贵的错误:**把三个地址搞混**。
+#   · Cloudflare 页面 URL      → 填进 ClickFlare 的 Lander
+#   · CTA Click URL (/cf/click/N) → 放在页面按钮的 href 上   ← 这里要的是它
+#   · Campaign Tracking URL    → 填进 NewsBreak 的 clickThroughUrl
+# 粘错了页面看起来**完全正常**,要等数据不对劲才发现 —— 那时钱已经花了。
+_CTA_PATH = re.compile(r"^/cf/click/\d+/?$")
+
+
 def validate_clickflare(cta_url: str, tracking_script: str) -> tuple[str, str]:
     url = str(cta_url or "").strip()
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise CloudflarePagesError("ClickFlare CTA Click URL 必须是完整 HTTPS 地址")
+    if not _CTA_PATH.match(parsed.path or ""):
+        hint = ""
+        if "cpid=" in (parsed.query or "") or not (parsed.path or "").strip("/"):
+            hint = ("这看起来像 **Campaign Tracking URL** —— 那个是最后填进 NewsBreak 广告里的,"
+                    "不是放在页面按钮上的。")
+        raise CloudflarePagesError(
+            f"这不像 ClickFlare 的 CTA Click URL。它的路径固定是 /cf/click/<数字>,"
+            f"整体形如 https://trk.你的域名.com/cf/click/1,而你给的路径是 "
+            f"「{parsed.path or '(空)'}」。{hint}"
+            "请到 ClickFlare 后台复制 **CTA Click URL**(落地页上的按钮用的那个)。")
     script = str(tracking_script or "").strip()
     if not script or len(script) > 30000 or "<script" not in script.lower() or "</script>" not in script.lower():
         raise CloudflarePagesError("请提供 ClickFlare 后台给出的完整 Lander Tracking Script")

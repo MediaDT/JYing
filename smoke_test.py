@@ -585,6 +585,40 @@ def test_pure_logic():
             (cfp._api, cfp._read_mappings) = keep
     check("空项目不算「会删掉线上内容」", t_empty_project_not_risky)
 
+    # 三个地址最容易搞混(CLAUDE.md 里专门记着)。ClickFlare 的 CTA Click URL
+    # **路径固定是 /cf/click/<数字>**,只有域名会变 —— 有了这个形状才挡得住误粘。
+    # 粘错了页面看起来完全正常,要等数据不对劲才发现,那时钱已经花了。
+    def t_cta_url_shape():
+        import cloudflare_pages as cfp
+        script = '<script src="https://t.example/l.js"></script>'
+        good = ["https://trk.example.com/cf/click/1",      # 标准
+                "https://trk.example.com/cf/click/2",      # 第二个 offer
+                "https://t.other.io/cf/click/1",           # 别的子域名前缀
+                "https://trk.example.com/cf/click/1/"]     # 结尾多个斜杠
+        bad = [("https://trk.example.com/abc?cpid=x", "Campaign Tracking URL"),
+               ("https://trk.example.com/", "域名首页"),
+               ("https://lp.example.com/exp/a/", "落地页地址")]
+        for u in good:
+            try:
+                cfp.validate_clickflare(u, script)
+            except Exception as e:
+                return f"合法地址被拦了:{u} → {str(e)[:60]}"
+        for u, label in bad:
+            try:
+                cfp.validate_clickflare(u, script)
+                return f"误粘的{label}竟然通过了:{u}"
+            except cfp.CloudflarePagesError as e:
+                if "/cf/click/" not in str(e):
+                    return f"拦住{label}但没说清正确格式"
+        # 误粘 Campaign URL 时要点名说破,别让用户对着"格式不对"发呆
+        try:
+            cfp.validate_clickflare("https://trk.example.com/abc?cpid=x", script)
+        except cfp.CloudflarePagesError as e:
+            if "Campaign Tracking URL" not in str(e):
+                return "没认出这是误粘了 Campaign Tracking URL"
+        return None
+    check("CTA 地址的形状要对(挡住三个地址搞混)", t_cta_url_shape)
+
     def t_conflict_checked_at_propose():
         import inspect
         import agent_server as srv

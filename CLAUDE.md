@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(127)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(128)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(127)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(128)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -718,6 +718,12 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
 |---|---|---|
 | Cloudflare 页面 URL | ClickFlare 的 Lander URL | 真正展示页面 |
 | ClickFlare CTA Click URL(`/cf/click/1`) | Cloudflare 页面 CTA 的 `href` | 记录 Lander → Offer 点击 |
+
+**CTA Click URL 的格式是固定的**(Cole 确认):`https://<追踪子域名>/cf/click/<数字>` ——
+只有域名部分会变,路径形状不变。代码据此校验(`_CTA_PATH`):形状不对就拒绝,
+带 `cpid=` 或路径为空时还会点名「这看起来像 Campaign Tracking URL」。
+**为什么值得挡**:粘错了页面看起来**完全正常**,要等数据不对劲才发现,那时钱已经花了。
+宁可偶尔误拦一个合法地址(报错很响、一句话就能放宽),也不能放过一个粘错的(静默、昂贵)。
 | ClickFlare Campaign Tracking URL | NewsBreak `clickThroughUrl` | 记录广告访问并分流到 A/B |
 
 **CTA Click URL 没有被省掉**,只是用户在做页面前就给出来,后端第一次发布时直接植入,
@@ -985,7 +991,7 @@ Tracking Script、A/B 两个生成文件。页面发布后 ClickFlare 的手工�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 127 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 128 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1027,5 +1033,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 127 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 128 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。
