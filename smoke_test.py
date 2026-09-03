@@ -510,6 +510,47 @@ def test_pure_logic():
         return None
     check("提案阶段就查出整站覆盖风险", t_risk_checked_at_propose)
 
+    # 生成那一步就要判断"这页能不能发布"。实测模型生成过整页零个 CTA 占位符、
+    # CTA 是 onclick="alert('Thank you!')" 的假按钮 —— 那种页面走到发布会被拒,
+    # 但用户已经把整条链走完才知道白做。提示词管不住模型,只能代码层查。
+    def t_generated_pages_checked():
+        import landing_lab as lp
+        made = []
+        try:
+            ok = {"命名": "ok", "html": '<html><body><a href="[[CLICKFLARE_CTA_URL]]">go</a></body></html>'}
+            bad = {"命名": "bad", "html": '<html><body><button onclick="alert(1)">go</button></body></html>'}
+            rows = lp.save_pages([ok, bad])
+            made = [lp.GENERATED_DIR / r["file"] for r in rows]
+            good, junk = rows[0], rows[1]
+            if not good.get("可发布"):
+                return f"合格的页面被判成不能发布:{good.get('⚠️问题')}"
+            if junk.get("可发布"):
+                return "没有 CTA 占位符的页面竟然算可发布 —— 用户会一路走到发布才发现白做"
+            if not any("CTA 占位符" in x for x in junk.get("⚠️问题") or []):
+                return "没说清缺的是 CTA 占位符"
+            if not any("假 CTA" in x for x in junk.get("⚠️问题") or []):
+                return "alert 假按钮没被点出来"
+            # 脚本占位符位置固定,可以确定性补上;CTA 不能猜(猜错就是把追踪挂错元素)
+            for path in made:
+                if "<!--[[CLICKFLARE_LANDER_SCRIPT]]-->" not in path.read_text():
+                    return "脚本占位符没有自动补上"
+            return None
+        finally:
+            for f in made:
+                f.unlink(missing_ok=True)
+    check("生成时就判断页面能不能发布(缺 CTA 占位符要明说)", t_generated_pages_checked)
+
+    def t_summarize_reports_unpublishable():
+        import inspect
+        import agent_server as srv
+        src = _no_comments(inspect.getsource(srv.summarize_landing_page_patterns))
+        if "不能发布的版本" not in src:
+            return "归纳结果没有把不可发布的版本列出来"
+        if "可发布" not in src:
+            return "note 里没要求 AI 把问题讲给用户"
+        return None
+    check("不能发布的版本要主动告诉用户", t_summarize_reports_unpublishable)
+
 
     # 竞品 key 按人存。换平台之后 key 不会过期了,但"每人各贴各的"这条仍然要守。
 

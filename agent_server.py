@@ -1166,8 +1166,13 @@ def summarize_landing_page_patterns(brand: str = "", offer: str = "",
     return {
         **out,
         "依据页面数": len(models),
+        "不能发布的版本": [p.get("file") for p in pages if not p.get("可发布")],
         "note": ("先总结共同规律和 offer 设计建议,再列出两个新落地页的 preview_url。"
-                 "提醒用户:这是可预览的 HTML 初稿,学的是结构和说服逻辑,没有复制竞品页面。"),
+                 "提醒用户:这是可预览的 HTML 初稿,学的是结构和说服逻辑,没有复制竞品页面。"
+                 "**任何一版的「可发布」是 false 时,必须在回复里明确说出来**:"
+                 "把「⚠️问题」原样讲给用户(通常是没有 CTA 占位符,或者 CTA 是 alert 这类假按钮),"
+                 "说明这一版**发布时会被拒绝**,并主动问他要不要重新生成 —— "
+                 "绝不能只报 preview_url 就完事,那样他会一路走到发布才发现白做。"),
     }
 
 

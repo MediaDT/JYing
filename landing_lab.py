@@ -313,13 +313,20 @@ def summarize(models: list[dict], brand: str = "", offer: str = "",
               audience: str = "", lang: str = "zh") -> dict:
     prompt = f"""下面是若干个竞品/同行落地页拆解结果。请汇总共性,再生成 2 个全新的落地页。
 
-硬规则:
-1. 新页面必须是新的表达,不能照抄任何竞品文案、品牌、电话号码、价格、保证或样式细节。
-2. 重点分析为什么表现好:排版、文字描述、offer、表单、信任背书、CTA 节奏。
-3. 生成的两个页面要方向不同,方便 A/B test。
-4. HTML 要完整可预览,但不要引用外部 JS/CSS/图片;可以用 CSS 做干净版式。
-5. 每一个真正跳往 Offer 的 CTA 必须写成 href="[[CLICKFLARE_CTA_URL]]"；不要自己编跳转地址。
-6. 在 </body> 前原样放一个 <!--[[CLICKFLARE_LANDER_SCRIPT]]--> 注释占位符，发布时由后端安全替换。
+硬规则(第 1 条最重要,不满足的页面**根本发布不出去**,等于白做):
+1. **每一个真正跳往 Offer 的 CTA,必须写成 <a href="[[CLICKFLARE_CTA_URL]]">**,
+   一个字都不许改、不许自己编跳转地址。整页至少要有 1 处,通常 2~3 处
+   (首屏一个、中间一个、页尾一个)。
+   · 表单式落地页也一样:提交按钮要么写成上面那种 <a>,要么表单
+     <form action="[[CLICKFLARE_CTA_URL]]" method="get">。
+   · **绝对不许**用 onclick="alert(...)"、href="#"、href="javascript:void(0)"
+     这类假交互冒充 CTA —— 那样用户点了哪儿也去不了,广告费全打水漂。
+2. 在 </body> 前原样放一个 <!--[[CLICKFLARE_LANDER_SCRIPT]]--> 注释占位符,
+   发布时由后端安全替换。
+3. 新页面必须是新的表达,不能照抄任何竞品文案、品牌、电话号码、价格、保证或样式细节。
+4. 重点分析为什么表现好:排版、文字描述、offer、表单、信任背书、CTA 节奏。
+5. 生成的两个页面要方向不同,方便 A/B test。
+6. HTML 要完整可预览,但不要引用外部 JS/CSS/图片;可以用 CSS 做干净版式。
 7. 只输出 JSON。
 
 我们自己的信息:
@@ -368,6 +375,38 @@ offer: {offer or "(未提供,请用可替换占位表达,不要编具体价格)"
     return _ask_json(prompt)
 
 
+CTA_MARK = "[[CLICKFLARE_CTA_URL]]"
+SCRIPT_MARK = "<!--[[CLICKFLARE_LANDER_SCRIPT]]-->"
+_FAKE_CTA = (r"""onclick\s*=\s*["'][^"']*alert\(""", r"""href\s*=\s*["']\s*#\s*["']""",
+             r"""href\s*=\s*["']\s*javascript:""")
+
+
+def _check_publishable(html: str) -> tuple[str, list[str]]:
+    """存盘前就把「这页能不能发布」判出来,并把能确定性补的补上。
+
+    **为什么必须在这里查**:提示词管不住模型 —— 实测它生成过整页零个占位符、
+    CTA 是 `onclick="alert('Thank you!')"` 的假按钮。那种页面走到发布那一步会被
+    护栏拒绝,但用户已经把整条链走完了才知道白做。所以在交出去之前就说清楚。
+
+    脚本占位符可以**确定性**补(位置固定,就在 </body> 前);
+    CTA 占位符**不能猜** —— 哪个按钮才是真正跳往 Offer 的,正则判断不了,
+    猜错就是把追踪挂在错误的元素上。只能如实报"这版不能发布"。
+    """
+    problems = []
+    if SCRIPT_MARK not in html and "[[CLICKFLARE_LANDER_SCRIPT]]" not in html:
+        if re.search(r"</body\s*>", html, re.I):
+            html = re.sub(r"</body\s*>", SCRIPT_MARK + "\n</body>", html, count=1, flags=re.I)
+        else:
+            html += "\n" + SCRIPT_MARK
+    if html.count(CTA_MARK) < 1:
+        problems.append(f"没有任何 CTA 占位符({CTA_MARK}),发布时会被拒绝")
+    for pattern in _FAKE_CTA:
+        if re.search(pattern, html, re.I):
+            problems.append("页面里有 alert()/#/javascript: 这类假 CTA,用户点了哪儿也去不了")
+            break
+    return html, problems
+
+
 def save_pages(pages: list[dict]) -> list[dict]:
     out = []
     for i, p in enumerate(pages[:2], start=1):
@@ -376,6 +415,7 @@ def save_pages(pages: list[dict]) -> list[dict]:
             continue
         if "<html" not in raw.lower():
             raw = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>" + raw + "</body></html>"
+        raw, problems = _check_publishable(raw)
         name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(p.get("命名") or f"landing-{i}")).strip("-").lower()
         filename = f"{uuid.uuid4().hex[:8]}-{name or 'landing'}.html"
         path = GENERATED_DIR / filename
@@ -383,6 +423,9 @@ def save_pages(pages: list[dict]) -> list[dict]:
         out.append({k: v for k, v in p.items() if k != "html"} | {
             "file": filename,
             "preview_url": f"/landing-pages/{filename}",
+            "可发布": not problems,
+            "CTA占位符数量": raw.count(CTA_MARK),
+            **({"⚠️问题": problems} if problems else {}),
         })
     _prune()
     return out
