@@ -110,21 +110,30 @@ def remember(user_id: str, tracking_script: str) -> dict:
         mine = dict(data.get(_key(user_id)) or {})
         old = mine.get(domain) or {}
         same = str(old.get("script") or "") == script
-        mine[domain] = {"script": script, "saved_at": old.get("saved_at") if same else _now(),
+        # `saved_at` 的意思是「最后一次确认这段脚本是当前版本」,所以**每次贴都刷新**,
+        # 哪怕内容一模一样。原来「内容相同就保留旧时间」会让过期提醒**永远消不掉**:
+        # 提醒叫你回后台复制一份新的,而平台没改版时复制回来的就是同一段。
+        saved_at = _now()
+        mine[domain] = {"script": script, "saved_at": saved_at,
                         "last_used_at": old.get("last_used_at") or ""}
-        if not mine[domain]["saved_at"]:
-            mine[domain]["saved_at"] = _now()
-        if len(mine) > MAX_DOMAINS:      # 丢最久没用过的
-            ordered = sorted(mine.items(),
-                             key=lambda kv: (kv[1].get("last_used_at") or "", kv[1].get("saved_at") or ""))
-            for dead, _ in ordered[:len(mine) - MAX_DOMAINS]:
+        if len(mine) > MAX_DOMAINS:
+            # 丢最久没用过的。两个坑(都是实测撞出来的):
+            # ① **刚存进来的这条绝不能算进候选** —— 它 `last_used_at` 是空的,
+            #    排序会把它排在最前面 → 刚存就被淘汰,接着读它直接 KeyError,
+            #    而且落盘的已经是「没有这条」的版本,重贴多少次都是同样的错;
+            # ② 没用过的条目要拿**存入时间**当"最近使用",否则空串排最前,
+            #    反而先淘汰新来的、把真正最老的留下来(淘汰顺序整个是反的)。
+            others = [(k, v) for k, v in mine.items() if k != domain]
+            others.sort(key=lambda kv: (kv[1].get("last_used_at") or kv[1].get("saved_at") or "",
+                                        kv[1].get("saved_at") or ""))
+            for dead, _ in others[:len(mine) - MAX_DOMAINS]:
                 mine.pop(dead, None)
         data[_key(user_id)] = mine
         _write(data)
     return {"stored": True, "domain": domain,
             "action": "已存在脚本库里（内容相同）" if same and old else
                       ("已更新脚本库里这个域名的脚本" if old else "已存进脚本库"),
-            "saved_at": mine[domain]["saved_at"]}
+            "saved_at": saved_at}
 
 
 def lookup(user_id: str, domain: str) -> dict | None:

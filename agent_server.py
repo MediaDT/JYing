@@ -2291,6 +2291,13 @@ def cancel_schedule(task_id: str) -> dict:
 
 def cancel_action(action_id: str) -> dict:
     """取消之前登记的待办(用户不同意或改主意时调用)。"""
+    # 归属检查:和 confirm_action 一样,别人的待办不能碰。
+    # 少了这条的话,B 登录进来能把 A 登记好的待办**删掉**,A 那边只会看到
+    # 「找不到待办」—— 保险箱是全进程共享的一份,不是每人一份。
+    holder = PENDING_ACTIONS.get(action_id)
+    if holder and holder.get("user_id") and CURRENT_USER_ID.get() \
+            and holder.get("user_id") != CURRENT_USER_ID.get():
+        return {"error": "这个待办属于另一个账号，不能取消。"}
     removed = PENDING_ACTIONS.pop(action_id, None)
     _save_actions()
     print(f"[write-op] 取消待办 {action_id}: {'成功' if removed else '不存在'}", flush=True)

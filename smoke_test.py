@@ -373,6 +373,14 @@ def test_pure_logic():
         paths = [srv.lp.GENERATED_DIR / name for name in names]
         original_list, original_publish, original_zone = cfp.list_resources, cfp.publish_ab, cfp.owned_zone
         original_risk, original_conflict = cfp.replace_risk, cfp.domain_conflict
+        # 这条测试会走到 cfs.remember() —— 不改指向的话它会写进**用户真实的**脚本库,
+        # 跑一次留一条 smoke-cloudflare 的垃圾在那儿(实测留下了)。
+        import clickflare_scripts as cfs
+        import tempfile as _tf
+        from pathlib import Path as _P
+        original_store = cfs.STORE
+        _tmpdir = _tf.TemporaryDirectory()
+        cfs.STORE = _P(_tmpdir.name) / "scripts.json"
         user_token = srv.CURRENT_USER_ID.set(uid)
         mode_token = srv.CURRENT_CHAT_MODE.set("landing")
         seq_token = srv.CURRENT_SEQ.set(81001)
@@ -413,6 +421,8 @@ def test_pure_logic():
         finally:
             cfp.list_resources, cfp.publish_ab, cfp.owned_zone = original_list, original_publish, original_zone
             cfp.replace_risk, cfp.domain_conflict = original_risk, original_conflict
+            cfs.STORE = original_store
+            _tmpdir.cleanup()
             if aid:
                 srv.PENDING_ACTIONS.pop(aid, None)
                 srv._save_actions()
@@ -690,8 +700,34 @@ def test_pure_logic():
                 bad = cfs.remember("userA", '<script>var a="https://p.com",b="https://q.com";</script>')
                 if bad.get("stored") or not bad.get("reason"):
                     return "认不出域名时不该存,而且要说明原因"
+                # 重贴同样的脚本要**刷新时间** —— 否则过期提醒叫你去做的事做不掉它
+                import clickflare_scripts as _c
+                _real_now = _c._now          # 存下来还原,别 del(那会把函数整个删掉)
+                _c._now = lambda: "2099-01-01 00:00"
+                try:
+                    refreshed = cfs.remember("userA", s1).get("saved_at")
+                finally:
+                    _c._now = _real_now
+                if refreshed != "2099-01-01 00:00":
+                    return "重贴同样的脚本没有刷新 saved_at,过期提醒永远消不掉"
                 if not cfs.forget("userA", "trk.one.com") or cfs.lookup("userA", "trk.one.com"):
                     return "删不掉"
+                # 存满之后再存一个:不许崩、新的要进得去、被丢掉的必须是最久没用的
+                for i in range(cfs.MAX_DOMAINS):
+                    dom = f"trk{i:02d}.full.com"
+                    cfs.remember("userC", f'<script>var c="https://{dom}";</script>')
+                    cfs.touch("userC", dom)
+                try:
+                    r = cfs.remember("userC", '<script>var c="https://trk-new.full.com";</script>')
+                except Exception as e:
+                    return f"存满之后再存一个直接崩了:{type(e).__name__} {e}"
+                names = [x["追踪域名"] for x in cfs.listing("userC")]
+                if not r.get("stored") or "trk-new.full.com" not in names:
+                    return "存满之后新域名进不去(而且用户的脚本就这么丢了)"
+                if len(names) > cfs.MAX_DOMAINS:
+                    return "超过上限了"
+                if "trk00.full.com" in names:
+                    return "淘汰顺序反了:最久没用的还在,新来的反被丢掉"
             finally:
                 cfs.STORE = real
         return None
@@ -771,6 +807,48 @@ def test_pure_logic():
                 srv._LANDING_PAGES_BY_USER.pop("__abtest__", None)
         return None
     check("A/B 两版内容不许一模一样(A/A 要用户明说)", t_ab_must_differ)
+
+    # 保险箱是全进程共享的一份。confirm_action 早就查了归属,cancel_action 一直没查 ——
+    # B 能把 A 登记好的待办删掉,A 那边只会看到「找不到待办」。
+    def t_cancel_checks_owner():
+        import agent_server as srv
+        aid = "__smoke_owner__"
+        srv.PENDING_ACTIONS[aid] = {"type": "status_change", "level": "campaign",
+                                    "object_id": "x", "status": "ON",
+                                    "user_id": "owner-a", "seq": 1}
+        try:
+            tok = srv.CURRENT_USER_ID.set("someone-b")
+            try:
+                r = srv.cancel_action(aid)
+            finally:
+                srv.CURRENT_USER_ID.reset(tok)
+            if r.get("cancelled") or aid not in srv.PENDING_ACTIONS:
+                return "别的账号把这个待办取消掉了"
+            if "另一个账号" not in str(r.get("error", "")):
+                return "拦住了但没说清原因"
+            tok = srv.CURRENT_USER_ID.set("owner-a")
+            try:
+                if not srv.cancel_action(aid).get("cancelled"):
+                    return "本人反而取消不了"
+            finally:
+                srv.CURRENT_USER_ID.reset(tok)
+        finally:
+            srv.PENDING_ACTIONS.pop(aid, None)
+        return None
+    check("待办只能由登记它的账号取消", t_cancel_checks_owner)
+
+    # 测试跑完不许在用户真实的脚本库里留垃圾(实测留过 smoke-cloudflare 一条)
+    def t_no_test_junk_in_store():
+        import json, clickflare_scripts as cfs
+        if not cfs.STORE.exists():
+            return None
+        try:
+            data = json.loads(cfs.STORE.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        junk = [k for k in data if str(k).startswith(("smoke-", "__", "userA", "userB", "userC"))]
+        return f"测试往真实脚本库里写了垃圾:{junk}" if junk else None
+    check("测试不许污染用户真实的脚本库", t_no_test_junk_in_store)
 
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
