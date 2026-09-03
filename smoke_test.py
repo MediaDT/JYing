@@ -366,8 +366,10 @@ def test_pure_logic():
         uid = "smoke-cloudflare"
         suffix = uuid.uuid4().hex[:8]
         names = [f"{suffix}-a.html", f"{suffix}-b.html"]
-        source = ('<html><body><a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
+        # A/B 两版必须真的不一样(两版逐字节相同的话根本不是 A/B,已被代码层拦住)
+        source = ('<html><body><h1>{h}</h1><a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
                   '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+        sources = [source.format(h="Save on energy"), source.format(h="Done in one day")]
         paths = [srv.lp.GENERATED_DIR / name for name in names]
         original_list, original_publish, original_zone = cfp.list_resources, cfp.publish_ab, cfp.owned_zone
         original_risk, original_conflict = cfp.replace_risk, cfp.domain_conflict
@@ -376,8 +378,8 @@ def test_pure_logic():
         seq_token = srv.CURRENT_SEQ.set(81001)
         aid = ""
         try:
-            for path in paths:
-                path.write_text(source, encoding="utf-8")
+            for path, body in zip(paths, sources):
+                path.write_text(body, encoding="utf-8")
             srv._LANDING_PAGES_BY_USER[uid] = [{"file": names[0]}, {"file": names[1]}]
             cfp.list_resources = lambda *args, **kwargs: {
                 "zones": [{"name": "example.com"}], "projects": [],
@@ -590,7 +592,12 @@ def test_pure_logic():
     # 粘错了页面看起来完全正常,要等数据不对劲才发现,那时钱已经花了。
     def t_cta_url_shape():
         import cloudflare_pages as cfp
-        script = '<script src="https://t.example/l.js"></script>'
+        from urllib.parse import urlparse
+        # 脚本里写死的追踪域名必然和它自己的 CTA 域名一致(实测过),
+        # 所以这里按 URL 现造配套的脚本 —— 用固定域名的假脚本是不真实的数据。
+        def script_for(u):
+            host = urlparse(u).hostname or "t.example"
+            return f'<script src="https://{host}/cf/lander.js"></script>'
         good = ["https://trk.example.com/cf/click/1",      # 标准
                 "https://trk.example.com/cf/click/2",      # 第二个 offer
                 "https://t.other.io/cf/click/1",           # 别的子域名前缀
@@ -600,24 +607,170 @@ def test_pure_logic():
                ("https://lp.example.com/exp/a/", "落地页地址")]
         for u in good:
             try:
-                cfp.validate_clickflare(u, script)
+                cfp.validate_clickflare(u, script_for(u))
             except Exception as e:
                 return f"合法地址被拦了:{u} → {str(e)[:60]}"
         for u, label in bad:
             try:
-                cfp.validate_clickflare(u, script)
+                cfp.validate_clickflare(u, script_for(u))
                 return f"误粘的{label}竟然通过了:{u}"
             except cfp.CloudflarePagesError as e:
                 if "/cf/click/" not in str(e):
                     return f"拦住{label}但没说清正确格式"
         # 误粘 Campaign URL 时要点名说破,别让用户对着"格式不对"发呆
         try:
-            cfp.validate_clickflare("https://trk.example.com/abc?cpid=x", script)
+            cfp.validate_clickflare("https://trk.example.com/abc?cpid=x",
+                                    script_for("https://trk.example.com/x"))
         except cfp.CloudflarePagesError as e:
             if "Campaign Tracking URL" not in str(e):
                 return "没认出这是误粘了 Campaign Tracking URL"
         return None
     check("CTA 地址的形状要对(挡住三个地址搞混)", t_cta_url_shape)
+
+    # 脚本里写死了追踪域名,而且它会把页面上 CTA 链接的域名**改写成自己的**
+    # (实测:href 从 trk.a.com/cf/click/1 变成 track.b.com/cf/click/1)。
+    # 所以两者对不上就等于把点击送去另一个追踪器,而页面一切正常、看不出来。
+    def t_tracking_domain_match():
+        import cloudflare_pages as cfp
+        cta = "https://trk.mine.com/cf/click/1"
+        ok = '<script>var c="https://trk.mine.com";</script>'
+        bad = '<script>var c="https://track.other.com";</script>'
+        try:
+            cfp.validate_clickflare(cta, ok)
+        except Exception as e:
+            return f"配套的脚本被误拦:{str(e)[:70]}"
+        try:
+            cfp.validate_clickflare(cta, bad)
+            return "追踪域名对不上竟然放行了 —— 点击会被送到另一个追踪器"
+        except cfp.CloudflarePagesError as e:
+            if "trk.mine.com" not in str(e) or "track.other.com" not in str(e):
+                return "拦住了但没点名是哪两个域名对不上"
+        # **只在有正面证据时拦**:提取不到主机名(平台改了格式)必须放行,
+        # 否则 ClickFlare 一次改版就会把所有发布堵死。
+        try:
+            cfp.validate_clickflare(cta, "<script>console.log(1)</script>")
+        except Exception as e:
+            return f"认不出域名时不该拦:{str(e)[:70]}"
+        if cfp.tracking_domain_of('<script>var a="https://x.com",b="https://y.com";</script>'):
+            return "两个域名时应该认不出(返回空),不许挑一个当追踪域名"
+        return None
+    check("CTA 和追踪脚本必须同一个追踪域名", t_tracking_domain_match)
+
+    # 实测:同一追踪域名下所有 Lander 的脚本**逐字节相同**(脚本里没有 lander id,
+    # 靠上报 lpurl 区分),所以每个追踪域名只需用户贴一次。
+    def t_script_registry():
+        import clickflare_scripts as cfs
+        import tempfile
+        from pathlib import Path as _P
+        real = cfs.STORE
+        with tempfile.TemporaryDirectory() as d:
+            cfs.STORE = _P(d) / "s.json"      # 别碰用户真实的脚本库
+            try:
+                s1 = '<script>var c="https://trk.one.com";/*a*/</script>'
+                s2 = '<script>var c="https://trk.two.com";/*b*/</script>'
+                r = cfs.remember("userA", s1)
+                if not r.get("stored") or r.get("domain") != "trk.one.com":
+                    return f"没按脚本自己的追踪域名存:{r}"
+                got = cfs.lookup("userA", "trk.one.com")
+                if not got or got["script"] != s1:
+                    return "存进去和取出来的不是同一段"
+                # 按人隔离:B 不该读到 A 存的东西(坑表:缓存键忘了带用户 = 数据串号)
+                if cfs.lookup("userB", "trk.one.com") is not None:
+                    return "另一个账号读到了别人存的脚本"
+                cfs.remember("userB", s2)
+                if cfs.lookup("userA", "trk.two.com") is not None:
+                    return "A 读到了 B 存的脚本"
+                # 清单里**绝不能**出现脚本原文
+                text = str(cfs.listing("userA"))
+                if s1 in text or "<script" in text:
+                    return "清单把脚本原文回显出来了"
+                if "trk.one.com" not in text:
+                    return "清单没列出存过的追踪域名"
+                # 认不出唯一域名的脚本不存,但要说清原因
+                bad = cfs.remember("userA", '<script>var a="https://p.com",b="https://q.com";</script>')
+                if bad.get("stored") or not bad.get("reason"):
+                    return "认不出域名时不该存,而且要说明原因"
+                if not cfs.forget("userA", "trk.one.com") or cfs.lookup("userA", "trk.one.com"):
+                    return "删不掉"
+            finally:
+                cfs.STORE = real
+        return None
+    check("脚本库按人存、按追踪域名索引、不回显原文", t_script_registry)
+
+    # 脚本不能出现在聊天和待办清单里。tracking_script_b 是后加的,
+    # 加的时候漏了脱敏 —— 这条守着两个字段都被挡住。
+    def t_pending_hides_scripts():
+        import agent_server as srv
+        aid = "__smoke_mask__"
+        srv.PENDING_ACTIONS[aid] = {
+            "type": "publish_landing_pages", "domain": "lp.example.com", "slug": "x",
+            "cta_url": "https://trk.example.com/cf/click/1",
+            "tracking_script": "<script>SECRET_A</script>",
+            "tracking_script_b": "<script>SECRET_B</script>", "seq": 1}
+        try:
+            token = srv.CURRENT_CHAT_MODE.set("landing")
+            try:
+                text = str(srv.list_pending_actions())
+            finally:
+                srv.CURRENT_CHAT_MODE.reset(token)
+            for secret in ("SECRET_A", "SECRET_B"):
+                if secret in text:
+                    return f"待办清单把脚本原文回显了({secret})"
+            if "[已保存" not in text:
+                return "没有标出脚本已保存"
+        finally:
+            srv.PENDING_ACTIONS.pop(aid, None)
+        return None
+    check("待办清单不回显 A/B 两段追踪脚本", t_pending_hides_scripts)
+
+    # A/B 两版一模一样 = 花一周的钱跑同一个页面,分出来的「胜者」只是噪音,
+    # 而且**从外面完全看不出来**(两个网址不同、两页都正常、数据照常上报)。
+    def t_ab_must_differ():
+        import agent_server as srv, landing_lab as lp, cloudflare_pages as cfp
+        import clickflare_scripts as cfs, tempfile, inspect
+        from pathlib import Path as _P
+        sig = inspect.signature(srv.propose_publish_landing_pages)
+        if sig.parameters["allow_identical"].default is not False:
+            return "A/A 的口子默认必须是关着的"
+        page = ('<!doctype html><html><head><title>{t}</title></head><body>'
+                '<a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
+                '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+        script = '<script>var c="https://trk.ab-test.com";</script>'
+        cta = "https://trk.ab-test.com/cf/click/1"
+        keep = (cfs.STORE, lp.GENERATED_DIR, cfp.MAPPING_FILE, cfp.SITES_DIR)
+        with tempfile.TemporaryDirectory() as d:
+            d = _P(d)
+            cfs.STORE, cfp.MAPPING_FILE, cfp.SITES_DIR = d/"s.json", d/"m.json", d/"sites"
+            lp.GENERATED_DIR = d/"gen"; lp.GENERATED_DIR.mkdir()
+            tok = srv.CURRENT_USER_ID.set("__abtest__")
+            try:
+                # save_pages 一次固定只出两版(A/B 的设计),第三版要再调一次
+                f = lp.save_pages([{"name": "A", "html": page.format(t="X")},
+                                   {"name": "B", "html": page.format(t="X")}])
+                f += lp.save_pages([{"name": "C", "html": page.format(t="Y")}])
+                # 内容相同的两个文件
+                r = srv.propose_publish_landing_pages("lp.example.com", "s1", cta, script,
+                                                      f[0]["file"], f[1]["file"])
+                if not r.get("error") or "噪音" not in r["error"]:
+                    return f"两版内容一样竟然没拦:{str(r)[:120]}"
+                # 同一个文件当 A 又当 B
+                r = srv.propose_publish_landing_pages("lp.example.com", "s2", cta, script,
+                                                      f[0]["file"], f[0]["file"])
+                if not r.get("error"):
+                    return "同一个文件当 A 又当 B 竟然没拦"
+                # 两版真的不同 → 不该被这条拦住(拦住就成了画地为牢)
+                r = srv.propose_publish_landing_pages("lp.example.com", "s3", cta, script,
+                                                      f[0]["file"], f[2]["file"])
+                if r.get("error") and "噪音" in r["error"]:
+                    return "两版明明不同却被误拦"
+                if r.get("action_id"):
+                    srv.PENDING_ACTIONS.pop(r["action_id"], None); srv._save_actions()
+            finally:
+                srv.CURRENT_USER_ID.reset(tok)
+                cfs.STORE, lp.GENERATED_DIR, cfp.MAPPING_FILE, cfp.SITES_DIR = keep
+                srv._LANDING_PAGES_BY_USER.pop("__abtest__", None)
+        return None
+    check("A/B 两版内容不许一模一样(A/A 要用户明说)", t_ab_must_differ)
 
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,

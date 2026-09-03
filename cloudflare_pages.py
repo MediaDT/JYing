@@ -257,6 +257,35 @@ def _guard_domain(domain: str) -> None:
 # 粘错了页面看起来**完全正常**,要等数据不对劲才发现 —— 那时钱已经花了。
 _CTA_PATH = re.compile(r"^/cf/click/\d+/?$")
 
+# 脚本里写死了追踪域名(实测:同一追踪域名下,不管建几个 Lander、路径怎么排,
+# ClickFlare 给的脚本都是**逐字节相同的同一份**;两段脚本之间唯一会变的就是这个域名)。
+# 而且脚本会把页面上 CTA 链接的域名**改写成它自己的** —— 实测:
+#   href  https://trk.a.com/cf/click/1
+#   → 变成 clickflare.l="https://track.b.com/cf/click/1"
+# 所以脚本和 CTA 必须来自同一套。对不上的话点击被送到另一个追踪器,
+# 而页面一切正常、按钮照点、跳转照跳,要等数据对不上才发现 —— 静默且昂贵。
+_SCRIPT_HOST = re.compile(r"https://([a-z0-9][a-z0-9.\-]{0,252}[a-z0-9])", re.I)
+
+
+def script_hosts(tracking_script: str) -> list[str]:
+    """脚本里出现过的 https 主机名(去重排序)。
+
+    注意脚本里的 `http(?:s?)://` 是**正则源码**不是网址,不含字面 `https://`,
+    所以不会被误抓。实测两份真脚本各只提取到 1 个,就是它的追踪域名。
+    """
+    found = _SCRIPT_HOST.findall(str(tracking_script or ""))
+    return sorted({h.lower().rstrip(".") for h in found})
+
+
+def tracking_domain_of(tracking_script: str) -> str:
+    """脚本对应的追踪域名;认不出就返回空字符串,**不猜**。
+
+    只有恰好提取到 1 个主机名时才算认出来。0 个 = 格式变了;
+    多于 1 个 = 分不清哪个是追踪域名 —— 两种都不该拿去当索引。
+    """
+    hosts = script_hosts(tracking_script)
+    return hosts[0] if len(hosts) == 1 else ""
+
 
 def validate_clickflare(cta_url: str, tracking_script: str) -> tuple[str, str]:
     url = str(cta_url or "").strip()
@@ -278,6 +307,19 @@ def validate_clickflare(cta_url: str, tracking_script: str) -> tuple[str, str]:
         raise CloudflarePagesError("请提供 ClickFlare 后台给出的完整 Lander Tracking Script")
     if re.search(r"</(?:body|html)\s*>", script, re.I):
         raise CloudflarePagesError("Tracking Script 里不能包含 </body> 或 </html>")
+    # 追踪域名对不上就拒绝 —— 见上面 _SCRIPT_HOST 那段的实测说明。
+    # **只在有正面证据时拦**:提取不到主机名(ClickFlare 改了格式)时放行,
+    # 否则一次改版就会把所有发布堵死。
+    hosts = script_hosts(script)
+    cta_host = (parsed.hostname or "").lower()
+    if hosts and cta_host not in hosts:
+        raise CloudflarePagesError(
+            f"CTA 地址和 Tracking Script 不是同一套。脚本里写死的追踪域名是 "
+            f"「{'、'.join(hosts)}」,而 CTA 用的是「{cta_host}」。"
+            "脚本会把页面上 CTA 链接的域名**改写成它自己的**,所以这样发出去,"
+            "点击会被送到另一个追踪器 —— 页面一切正常、按钮照点,你看不出来,"
+            "要等数据对不上才发现。请在 ClickFlare 里用**同一个追踪域名**"
+            "生成脚本和 CTA Click URL,两者配套再发。")
     return url, script
 
 

@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import anthropic
 import httpx
@@ -545,6 +546,7 @@ import creative_lab as lab  # noqa: E402
 import creative_render as cr  # noqa: E402
 import landing_lab as lp  # noqa: E402
 import cloudflare_pages as cfp  # noqa: E402
+import clickflare_scripts as cfs  # noqa: E402
 import ad_platform_kinds as apk  # noqa: E402
 import openadlibrary_client as oal  # noqa: E402
 
@@ -1177,9 +1179,15 @@ def summarize_landing_page_patterns(brand: str = "", offer: str = "",
 
 
 def list_cloudflare_landing_resources(query: str = "", limit: int = 50) -> dict:
-    """发布前读取可选域名、既有 Pages 项目和域名映射；只读，不会修改 Cloudflare。"""
+    """发布前读取可选域名、既有 Pages 项目和域名映射；只读，不会修改 Cloudflare。
+
+    顺带返回这个人的**脚本库**存了哪些追踪域名(只给域名和日期,不回显脚本原文)——
+    这样 AI 收集发布材料时能直接说清哪些域名不用再贴脚本。
+    """
     try:
-        return cfp.list_resources(query=query, limit=limit)
+        result = cfp.list_resources(query=query, limit=limit)
+        result["已存脚本的追踪域名"] = cfs.listing(CURRENT_USER_ID.get()) or "还没存过（第一次发布要贴一次）"
+        return result
     except Exception as e:
         return {"error": str(e)[:500]}
 
@@ -1194,11 +1202,19 @@ def _generated_landing_file(filename: str) -> Path:
 
 
 def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
-                                   tracking_script: str, variant_a_file: str = "",
+                                   tracking_script: str = "", variant_a_file: str = "",
                                    variant_b_file: str = "",
                                    allow_replace: bool = False,
-                                   tracking_script_b: str = "") -> dict:
+                                   tracking_script_b: str = "",
+                                   allow_identical: bool = False) -> dict:
     """登记 Cloudflare Pages A/B 发布待办；用户下一条消息确认后才真正发布。
+
+    tracking_script **可以不传**:同一个追踪域名的脚本只需要贴一次,
+    以后按 CTA 的域名从脚本库里自动取(见 clickflare_scripts.py)。
+    第一次用某个追踪域名时没得取,会明确报错请用户贴一次,**绝不许自己编**。
+
+    allow_identical:A/B 两版内容完全相同时才用得上,**只有用户明确说要做 A/A 测试
+    (拿两个一样的页面验证分流准不准)才允许传 true**。
 
     allow_replace:**只有用户明确说了「覆盖发布」才允许传 true**。
     发布是整站替换,本地历史目录丢了的话这一下会把线上旧实验全删掉
@@ -1207,10 +1223,35 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
     try:
         domain = cfp.normalize_domain(domain)
         slug = cfp.normalize_slug(slug)
-        cfp.validate_clickflare(cta_url, tracking_script)
+        uid = CURRENT_USER_ID.get()
+        cta_url = str(cta_url or "").strip()
+        script = str(tracking_script or "").strip()
+        reused = None
+        if not script:
+            # 没给脚本 → 按 CTA 的域名到**这个人**的脚本库里找。
+            # 能这么干是因为实测过:同一追踪域名下所有 Lander 的脚本逐字节相同。
+            host = (urlparse(cta_url).hostname or "").lower()
+            reused = cfs.lookup(uid, host) if host else None
+            if not reused:
+                stored = "、".join(x["追踪域名"] for x in cfs.listing(uid)) or "(还没存过任何脚本)"
+                return {"error": (
+                    f"没有登记发布待办:脚本库里没有 {host or '这个域名'} 的 Lander Tracking Script。"
+                    f"你已经存过的追踪域名:{stored}。"),
+                    "note": ("请用户到 ClickFlare 后台复制**这个追踪域名**的 Lander Tracking Script "
+                             "完整贴过来(含 <script>…</script>)。**同一个追踪域名只用贴这一次**,"
+                             "以后同域名的发布会自动复用。**严禁自己编造、拼接或改写脚本。**")}
+            script = reused["script"]
+        cfp.validate_clickflare(cta_url, script)
         # B 版有自己的脚本时,同样要校验(留空 = 两版共用 A 的那段)
         if str(tracking_script_b or "").strip():
             cfp.validate_clickflare(cta_url, tracking_script_b)
+        # 校验通过了才存 —— 存进去的必然是「形状正确、且和 CTA 同一个追踪域名」的那段。
+        # 提前存(而不是等发布成功)的好处:这次哪怕因为域名冲突被拒,重来时也不用再贴一遍。
+        saved = {"stored": False}
+        if reused is None:
+            saved = cfs.remember(uid, script)
+        else:
+            cfs.touch(uid, reused["domain"])
         latest = _landing_pages()
         if not variant_a_file and len(latest) >= 1:
             variant_a_file = str(latest[0].get("file") or "")
@@ -1219,8 +1260,28 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
         file_a = _generated_landing_file(variant_a_file)
         file_b = _generated_landing_file(variant_b_file)
         # 提案阶段就检查代码层占位符，不能等用户确认后才发现页面无法安全注入。
-        cfp.inject_tracking(file_a.read_text(encoding="utf-8"), cta_url, tracking_script)
-        cfp.inject_tracking(file_b.read_text(encoding="utf-8"), cta_url, tracking_script)
+        cfp.inject_tracking(file_a.read_text(encoding="utf-8"), cta_url, script)
+        cfp.inject_tracking(file_b.read_text(encoding="utf-8"), cta_url,
+                            str(tracking_script_b or "").strip() or script)
+        # A/B 两版一模一样 = 这个实验从一开始就问不出任何东西:花一周的钱,
+        # 分出来的「胜者」只是噪音。而且**从外面完全看不出来** ——
+        # 两个网址不同、两页都正常、数据也照常上报。所以只能在这里拦。
+        # (A/A 测试是个真实用法:拿两个一样的页面验证分流准不准。所以留了口子,
+        #  但必须用户明确要求,不许 AI 自己带上。)
+        sha_a = hashlib.sha256(file_a.read_bytes()).hexdigest()
+        sha_b = hashlib.sha256(file_b.read_bytes()).hexdigest()
+        if sha_a == sha_b and not allow_identical:
+            same_file = file_a.name == file_b.name
+            return {"error": (
+                f"没有登记发布待办。A/B 两版{'用的是同一个文件' if same_file else '内容一模一样'}"
+                f"({file_a.name}{'' if same_file else ' / ' + file_b.name})——"
+                "这样发出去,两个网址各跑一个**完全相同**的页面,钱照花、数据照上报、"
+                "页面也一切正常,但这个实验问不出任何东西,分出来的「胜者」只是噪音。"),
+                "note": ("如实讲给用户,并问他要哪一种:"
+                         "①重新生成两版**方向不同**的页面(推荐,A/B 的意义就在这);"
+                         "②他确实是想做 **A/A 测试**(用两个一样的页面验证分流准不准),"
+                         "请他明确说一句,你再带 allow_identical=true 重新登记。"
+                         "**不许自己替他决定,更不许直接带上这个参数。**")}
         zone = cfp.owned_zone(domain)
         resources = cfp.list_resources(query=zone, limit=10)
         # **提案阶段就把覆盖风险查出来**,和占位符检查一个道理:
@@ -1260,12 +1321,12 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
         "domain": domain,
         "slug": slug,
         "cta_url": cta_url.strip(),
-        "tracking_script": tracking_script.strip(),
+        "tracking_script": script,
         "tracking_script_b": str(tracking_script_b or "").strip(),
         "variant_a_file": file_a.name,
         "variant_b_file": file_b.name,
-        "variant_a_sha256": hashlib.sha256(file_a.read_bytes()).hexdigest(),
-        "variant_b_sha256": hashlib.sha256(file_b.read_bytes()).hexdigest(),
+        "variant_a_sha256": sha_a,
+        "variant_b_sha256": sha_b,
         "allow_replace": bool(allow_replace),
         "user_id": CURRENT_USER_ID.get(),
         "seq": _seq(),
@@ -1279,6 +1340,17 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
     _save_actions()
     mapping = (resources.get("domain_project_mappings") or {}).get(domain) or {}
     project = mapping.get("project") or cfp.project_name_for_domain(domain)
+    # 脚本从哪来,要如实讲给用户 —— 复用的那段是他上次贴的,他有权知道用的是哪份、什么时候存的
+    if reused is not None:
+        script_line = f"复用脚本库里 {reused['domain']} 存过的那段(存于 {reused['saved_at']})"
+    elif saved.get("stored"):
+        script_line = (f"用户这次提供的,{saved['action']}(追踪域名 {saved['domain']});"
+                       "以后同一个追踪域名不用再贴")
+    else:
+        script_line = "用户这次提供的" + (f";{saved.get('reason')}" if saved.get("reason") else "")
+    if str(tracking_script_b or "").strip():
+        script_line = f"A/B 各一段 —— A:{script_line};B:用户单独提供的一段"
+    script_line += "(内容不在聊天中回显)"
     return {
         "action_id": action_id,
         "pending": {
@@ -1288,9 +1360,9 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
             "A版": f"https://{domain}/{slug}/a/",
             "B版": f"https://{domain}/{slug}/b/",
             "CTA地址": cta_url,
-            "追踪脚本": ("A/B 各一段,已收到,将分别原样植入（内容不在聊天中回显）"
-                       if str(tracking_script_b or "").strip()
-                       else "两版共用同一段,已收到,将原样植入（内容不在聊天中回显）"),
+            "追踪脚本": script_line,
+            **({"⚠️脚本时效": (reused or {}).get("stale_note")}
+               if (reused or {}).get("stale_note") else {}),
             "线上保留的旧实验": "、".join(risk["local_slugs"]) or "无（这是该域名的第一个实验）",
             **({"⚠️覆盖发布": "线上现有页面会被整站替换掉，这是用户明确同意的"}
                if allow_replace and risk["risky"] else {}),
@@ -1742,7 +1814,7 @@ def list_pending_actions() -> dict:
                or (mode == "creative" and a.get("type") == "make_creatives")
                or (mode == "landing" and a.get("type") == "publish_landing_pages")]
     return {"pending_actions": [
-        {"action_id": aid, **{k: ("[已保存，不回显]" if k == "tracking_script" else v)
+        {"action_id": aid, **{k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b") else v)
                               for k, v in a.items() if k != "seq"}}
         for aid, a in visible
     ] or "保险箱是空的,没有待执行的待办"}
@@ -2127,7 +2199,7 @@ def confirm_action(action_id: str) -> dict:
             _save_actions()
         else:
             _executed().append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
-        safe_action = {k: ("[已保存，不回显]" if k == "tracking_script" else v)
+        safe_action = {k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b") else v)
                        for k, v in action.items() if k != "seq"}
         return {"executed": safe_action,
                 **(result if isinstance(result, dict) else {"detail": result})}
@@ -2912,7 +2984,9 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "extracted public page text with explicit evidence limits. Extract layout, "
                    "copy, offer, trust, form and CTA patterns, then create two original HTML landing-page drafts. "
                    "Never copy competitor branding or claims, and never create, pause, or schedule ads. "
-                   "For publishing, first collect the exact ClickFlare CTA URL and lander script; never invent or "
+                   "For publishing, collect the exact ClickFlare CTA URL; the lander script only needs pasting "
+                   "ONCE per tracking domain (leave tracking_script empty to reuse the stored one; "
+                   "check list_cloudflare_landing_resources to see which domains are stored). Never invent or "
                    "rewrite them. List Cloudflare resources if the domain is unknown. Register publishing with "
                    "propose_publish_landing_pages and only call confirm_action after confirmation in the next message."
                    if english else
@@ -2922,7 +2996,9 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "从排版、文案、offer、信任背书、表单和 CTA 节奏分析，提炼关键词"
                    "与可迁移优点，最后生成两个方向不同、可预览的原创 HTML 落地页。严禁照抄竞品品牌、"
                    "承诺和具体优惠，也严禁创建、启停广告或登记定时任务。发布前必须向用户取得原样的"
-                   "ClickFlare CTA Click URL 和 Lander Tracking Script，绝不编造或改写；域名没定时先读取"
+                   "ClickFlare CTA Click URL，绝不编造或改写。Lander Tracking Script **同一个追踪域名只需贴一次**："
+                   "贴过的域名把 tracking_script 留空即可自动复用，没贴过的要请用户贴一次；"
+                   "不确定就先调 list_cloudflare_landing_resources 看「已存脚本的追踪域名」。域名没定时先读取"
                    "Cloudflare 可选域名。发布必须先用 propose_publish_landing_pages 登记，向用户完整复述，"
                    "只有用户下一条消息明确确认后才能调用 confirm_action。")
 
@@ -3327,9 +3403,16 @@ OPENAI_TOOL_SCHEMAS = [
              {"domain": {"type": "string", "description": "本次选择的域名或子域名，不带路径"},
               "slug": {"type": "string", "description": "实验路径名，如 roof-260902"},
               "cta_url": {"type": "string", "description": "用户原样提供的 ClickFlare HTTPS CTA Click URL，严禁编造"},
-              "tracking_script": {"type": "string", "description": "用户原样提供的 ClickFlare Lander Tracking Script，严禁编造或改写"},
+              "tracking_script": {"type": "string", "description":
+                  "用户原样提供的 ClickFlare Lander Tracking Script，严禁编造、拼接或改写。"
+                  "**同一个追踪域名只需贴一次**：这个 CTA 域名以前贴过的话就留空，系统会自动复用脚本库里那段。"
+                  "不确定贴没贴过就先调 list_cloudflare_landing_resources 看「已存脚本的追踪域名」"},
               "variant_a_file": {"type": "string", "description": "生成结果中 A 版的 file；可空则用最近生成页"},
               "variant_b_file": {"type": "string", "description": "生成结果中 B 版的 file；可空则用最近生成页"},
+              "allow_identical": {"type": "boolean", "description":
+                  "A/B 两版内容完全相同时才允许发布。默认 false。"
+                  "**只有用户明确说要做 A/A 测试(用两个一样的页面验证分流是否准确)才传 true**,"
+                  "绝不许自己替用户决定"},
               "tracking_script_b": {"type": "string",
                                     "description": "B 版单独的 Lander Tracking Script。"
                                                    "**留空 = 两版共用上面那段**。"
@@ -3339,7 +3422,7 @@ OPENAI_TOOL_SCHEMAS = [
                                 "description": "整站覆盖发布。默认 false。**只有用户明确说了「覆盖发布」才可以传 true** —— "
                                                "发布是整站替换,本地历史目录丢失时这一下会删掉线上所有旧实验,"
                                                "ClickFlare 里的 Lander 会指向 404。绝不许自己替用户决定"}},
-             ["domain", "slug", "cta_url", "tracking_script"]),
+             ["domain", "slug", "cta_url"]),
     _oa_tool("decompose_creative",
              "拆解一张广告素材:看懂它的版式、画面、文字层、配色、CTA 和文案角度。"
              "用户想知道某条广告为什么好、怎么设计的时候调它。只接受搜索结果里出现过的地址",
