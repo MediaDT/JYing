@@ -370,6 +370,7 @@ def test_pure_logic():
                   '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
         paths = [srv.lp.GENERATED_DIR / name for name in names]
         original_list, original_publish, original_zone = cfp.list_resources, cfp.publish_ab, cfp.owned_zone
+        original_risk, original_conflict = cfp.replace_risk, cfp.domain_conflict
         user_token = srv.CURRENT_USER_ID.set(uid)
         mode_token = srv.CURRENT_CHAT_MODE.set("landing")
         seq_token = srv.CURRENT_SEQ.set(81001)
@@ -382,6 +383,12 @@ def test_pure_logic():
                 "zones": [{"name": "example.com"}], "projects": [],
                 "domain_project_mappings": {}}
             cfp.owned_zone = lambda domain: "example.com"
+            # 这条测的是"二次确认"这道关,不联网查覆盖风险和域名占用(各有专门的测试)
+            cfp.replace_risk = lambda d, s2: {"project": "landing-x", "project_exists": False,
+                                              "local_slugs": [], "known_releases": [],
+                                              "risky": False, "missing_locally": []}
+            cfp.domain_conflict = lambda d: {"domain": d, "zone": "example.com", "records": [],
+                                             "already_ours": False, "conflict": False}
             cfp.publish_ab = lambda *args, **kwargs: {
                 "done": True, "created": {"variant_a_url": "https://lp.example.com/test/a/",
                                              "variant_b_url": "https://lp.example.com/test/b/"}}
@@ -403,6 +410,7 @@ def test_pure_logic():
             return bad or True
         finally:
             cfp.list_resources, cfp.publish_ab, cfp.owned_zone = original_list, original_publish, original_zone
+            cfp.replace_risk, cfp.domain_conflict = original_risk, original_conflict
             if aid:
                 srv.PENDING_ACTIONS.pop(aid, None)
                 srv._save_actions()
@@ -431,12 +439,13 @@ def test_pure_logic():
         tmp = _P(tempfile.mkdtemp(prefix="lpguard-"))
         keep = (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._project_exists,
                 cfp._ensure_project, cfp._ensure_domain, cfp._wrangler_deploy,
-                cfp.owned_zone, cfp._api)
+                cfp.owned_zone, cfp._api, cfp._guard_domain)
         try:
             cfp.SITES_DIR, cfp.MAPPING_FILE = tmp / "sites", tmp / "map.json"
             made, uploaded = set(), []
             cfp._api = lambda *a, **k: {"success": True, "result": []}
             cfp.owned_zone = lambda d: "example.com"
+            cfp._guard_domain = lambda d: None      # 这条测的是覆盖风险,不是域名占用
             cfp._project_exists = lambda n: n in made
             cfp._ensure_project = lambda n: (n not in made) and (made.add(n) or True)
             cfp._ensure_domain = lambda p, d: {"name": d, "status": "active"}
@@ -478,7 +487,8 @@ def test_pure_logic():
             return None
         finally:
             (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._project_exists, cfp._ensure_project,
-             cfp._ensure_domain, cfp._wrangler_deploy, cfp.owned_zone, cfp._api) = keep
+             cfp._ensure_domain, cfp._wrangler_deploy, cfp.owned_zone, cfp._api,
+             cfp._guard_domain) = keep
             shutil.rmtree(tmp, ignore_errors=True)
     check("本地历史丢失时拒绝整站覆盖(除非用户明确同意)", t_replace_guard)
 
@@ -509,6 +519,56 @@ def test_pure_logic():
             return "先登记了待办才查风险,顺序反了"
         return None
     check("提案阶段就查出整站覆盖风险", t_risk_checked_at_propose)
+
+    # 目标域名上已经有东西在跑时,绑定会**接管这个主机名**,现有页面当场下线。
+    # 实测踩到:某根域名上有一条已代理的 A 记录,打开是一个在投的落地页;
+    # 追踪子域名(CNAME 到 ClickFlare)更不能碰 —— 绑了等于把追踪打断。
+    def t_domain_conflict_guard():
+        import cloudflare_pages as cfp
+        keep = (cfp._list_zones, cfp._api, cfp._project_exists, cfp._read_mappings)
+        try:
+            cfp._list_zones = lambda: [{"id": "z1", "name": "example.com"}]
+            cfp._project_exists = lambda n: False
+            cfp._read_mappings = lambda: {}
+            records = {
+                "example.com": [{"type": "A", "content": "1.2.3.4", "proxied": True}],
+                "trk.example.com": [{"type": "CNAME", "content": "cname.tracker.com"}],
+                "lp.example.com": [],
+                "txt.example.com": [{"type": "TXT", "content": "v=spf1"}],
+            }
+            cfp._api = lambda m, path, **kw: {
+                "success": True,
+                "result": records.get((kw.get("params") or {}).get("name"), [])}
+
+            for host, want in (("example.com", True), ("trk.example.com", True),
+                               ("lp.example.com", False), ("txt.example.com", False)):
+                got = cfp.domain_conflict(host)["conflict"]
+                if got != want:
+                    return (f"{host}: 期望 conflict={want} 实际 {got}"
+                            + ("（TXT 不影响网页服务,不该算冲突）" if host.startswith("txt") else ""))
+            try:
+                cfp._guard_domain("example.com")
+                return "根域名上有在跑的记录,竟然放行了 —— 会把现有页面弄下线"
+            except cfp.CloudflarePagesError as e:
+                if "下线" not in str(e) or "lp.example.com" not in str(e):
+                    return f"拦住了但没说清后果/没给替代方案:{str(e)[:90]}"
+            cfp._guard_domain("lp.example.com")      # 空着的子域名要放行
+            return None
+        finally:
+            (cfp._list_zones, cfp._api, cfp._project_exists, cfp._read_mappings) = keep
+    check("不抢占已经在服务的域名(会把现有页面弄下线)", t_domain_conflict_guard)
+
+    def t_conflict_checked_at_propose():
+        import inspect
+        import agent_server as srv
+        src = _no_comments(inspect.getsource(srv.propose_publish_landing_pages))
+        if "domain_conflict" not in src:
+            return "提案阶段没查域名占用"
+        i_chk, i_reg = src.find("domain_conflict"), src.find("PENDING_ACTIONS[action_id]")
+        if i_reg >= 0 and i_chk > i_reg:
+            return "先登记了待办才查域名占用,顺序反了"
+        return None
+    check("提案阶段就查域名有没有被占用", t_conflict_checked_at_propose)
 
     # 生成那一步就要判断"这页能不能发布"。实测模型生成过整页零个 CTA 占位符、
     # CTA 是 onclick="alert('Thank you!')" 的假按钮 —— 那种页面走到发布会被拒,

@@ -1222,8 +1222,22 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
         # **提案阶段就把覆盖风险查出来**,和占位符检查一个道理:
         # 不能等用户点了头、真要上传时才发现"这一下会删掉线上的旧页面"
         risk = cfp.replace_risk(domain, slug)
+        # 目标域名上已经有东西在跑?**提案阶段就拦住** ——
+        # 绑定会接管主机名,把现有页面弄下线,而那可能是一个在投的落地页
+        conflict = cfp.domain_conflict(domain)
     except Exception as e:
         return {"error": str(e)[:500]}
+
+    if conflict["conflict"]:
+        what = "；".join(f"{r['type']} → {r['content']}" for r in conflict["records"])
+        return {"error": (
+            f"没有登记发布待办。{domain} 上已经有 DNS 记录在服务（{what}）。"
+            "把它绑给 Pages 项目会**接管这个主机名，现有页面当场下线** —— "
+            "如果它正在承接广告流量，转化会静静地归零。"),
+            "note": (f"如实讲给用户，并建议他换一个没被占用的子域名，"
+                     f"比如 lp.{conflict['zone']} 或 go.{conflict['zone']}。"
+                     "**不要自作主张替他挑域名**，问清楚再登记。"
+                     "他确实要用这个域名的话，请他先自己到 Cloudflare 后台删掉那条记录。")}
 
     if risk["risky"] and not allow_replace:
         lost = "、".join(risk["missing_locally"]) or "无法列出(本地记录也丢了)"

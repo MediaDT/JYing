@@ -170,11 +170,70 @@ def list_resources(query: str = "", limit: int = 50) -> dict:
 
 
 def owned_zone(domain: str) -> str:
-    zones = [str(x.get("name") or "").lower() for x in _list_zones()]
-    hits = [zone for zone in zones if domain == zone or domain.endswith("." + zone)]
+    return _owned_zone_record(domain)["name"]
+
+
+def _owned_zone_record(domain: str) -> dict:
+    domain = normalize_domain(domain)
+    hits = [z for z in _list_zones()
+            if domain == str(z.get("name") or "").lower()
+            or domain.endswith("." + str(z.get("name") or "").lower())]
     if not hits:
         raise CloudflarePagesError("这个域名不在当前 Cloudflare 账号的 Zone 中，不能自动绑定")
-    return max(hits, key=len)
+    return max(hits, key=lambda z: len(str(z.get("name") or "")))
+
+
+# 会「接管这个主机名」的记录类型。TXT/MX 之类不影响网页服务,不算冲突。
+_SERVING_TYPES = ("A", "AAAA", "CNAME")
+
+
+def domain_conflict(domain: str) -> dict:
+    """这个域名上是不是已经有别的东西在跑?
+
+    **实测踩到过**:某个根域名上有一条已代理的 A 记录,打开是一个**在投的落地页**
+    (`<title>Window LP1</title>`)。把它绑给 Pages 项目,Cloudflare 会接管这个主机名 ——
+    那个页面**当场下线**,而它可能正承接着广告流量,你要过一阵才发现转化归零。
+
+    已经绑在**我们自己这个项目**上的不算冲突(那是重复发布同一个域名,正常)。
+    """
+    domain = normalize_domain(domain)
+    zone = _owned_zone_record(domain)
+    records = _api("GET", f"/zones/{zone['id']}/dns_records",
+                   params={"name": domain, "per_page": 100}).get("result") or []
+    blocking = [{"type": r.get("type"), "content": str(r.get("content"))[:80],
+                 "proxied": bool(r.get("proxied"))}
+                for r in records if str(r.get("type") or "").upper() in _SERVING_TYPES]
+
+    project = str((_read_mappings().get(domain) or {}).get("project")
+                  or project_name_for_domain(domain))
+    already_ours = False
+    if blocking and _project_exists(project):
+        bound = _api("GET", f"/accounts/{{account}}/pages/projects/{project}/domains")
+        already_ours = any(str(x.get("name") or "").lower() == domain
+                           for x in bound.get("result") or [])
+    return {"domain": domain, "zone": zone["name"], "records": blocking,
+            "already_ours": already_ours,
+            "conflict": bool(blocking) and not already_ours}
+
+
+def _guard_domain(domain: str) -> None:
+    """目标域名已经在跑别的东西 → **直接拒绝**,不给"确认一下就覆盖"的口子。
+
+    这和「覆盖旧实验」是两回事:那个的影响范围是自己的实验,这个是**抢走一个
+    正在服务的主机名**,可能把别人在投的页面弄下线。真要这么干,应该由人去
+    Cloudflare 后台先把那条记录删掉 —— 那是个需要看清楚才做得出的动作。
+    """
+    info = domain_conflict(domain)
+    if not info["conflict"]:
+        return
+    what = "；".join(f"{r['type']} → {r['content']}" + ("（已代理）" if r["proxied"] else "")
+                    for r in info["records"])
+    raise CloudflarePagesError(
+        f"停止发布：{info['domain']} 上已经有 DNS 记录在服务（{what}）。"
+        "把它绑给 Pages 项目会**接管这个主机名，现有页面当场下线** —— "
+        "如果它正在承接广告流量，你要过一阵才会发现转化归零。"
+        f"请改用一个没被占用的子域名（例如 lp.{info['zone']}）；"
+        "确实要用这个域名的话，请先自己到 Cloudflare 后台删掉那条记录再来发布。")
 
 
 def validate_clickflare(cta_url: str, tracking_script: str) -> tuple[str, str]:
@@ -321,6 +380,7 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
     """创建/复用项目，发布 A/B 两页并绑定域名。调用方必须先取得用户确认。"""
     domain, slug = normalize_domain(domain), normalize_slug(slug)
     owned_zone(domain)
+    _guard_domain(domain)      # 别把一个正在跑的域名抢过来
     for path in (variant_a, variant_b):
         if not path.is_file():
             raise CloudflarePagesError(f"找不到待发布页面：{path.name}")
