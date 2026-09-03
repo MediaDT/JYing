@@ -540,8 +540,16 @@ def test_pure_logic():
                 "success": True,
                 "result": records.get((kw.get("params") or {}).get("name"), [])}
 
+            # 用户自己先在后台把 CNAME 配好指向**本项目**,是个完全合理的操作 ——
+            # 不能反过来告诉他"这个域名被占用了"。指向别的项目才算冲突。
+            ours = cfp.project_name_for_domain("mine.example.com")
+            records["mine.example.com"] = [{"type": "CNAME", "content": f"{ours}.pages.dev",
+                                            "proxied": True}]
+            records["other.example.com"] = [{"type": "CNAME", "content": "someone-else.pages.dev",
+                                             "proxied": True}]
             for host, want in (("example.com", True), ("trk.example.com", True),
-                               ("lp.example.com", False), ("txt.example.com", False)):
+                               ("lp.example.com", False), ("txt.example.com", False),
+                               ("mine.example.com", False), ("other.example.com", True)):
                 got = cfp.domain_conflict(host)["conflict"]
                 if got != want:
                     return (f"{host}: 期望 conflict={want} 实际 {got}"

@@ -200,12 +200,24 @@ def domain_conflict(domain: str) -> dict:
     zone = _owned_zone_record(domain)
     records = _api("GET", f"/zones/{zone['id']}/dns_records",
                    params={"name": domain, "per_page": 100}).get("result") or []
-    blocking = [{"type": r.get("type"), "content": str(r.get("content"))[:80],
-                 "proxied": bool(r.get("proxied"))}
-                for r in records if str(r.get("type") or "").upper() in _SERVING_TYPES]
-
     project = str((_read_mappings().get(domain) or {}).get("project")
                   or project_name_for_domain(domain))
+
+    def _points_at_us(r: dict) -> bool:
+        """CNAME 已经指向**我们这个项目**的 pages.dev —— 那不是冲突,是有人先手动配好了。
+
+        不排除这种记录的话,一个完全合理的操作(用户自己先在 Cloudflare 后台把
+        CNAME 建好)反而会被护栏拦住,还告诉他"这个域名已经被占用了" —— 莫名其妙。
+        指向**别的** pages 项目仍然算冲突,那确实会抢走别人的站点。
+        """
+        if str(r.get("type") or "").upper() != "CNAME":
+            return False
+        return str(r.get("content") or "").strip().lower().rstrip(".") == f"{project}.pages.dev"
+
+    blocking = [{"type": r.get("type"), "content": str(r.get("content"))[:80],
+                 "proxied": bool(r.get("proxied"))}
+                for r in records
+                if str(r.get("type") or "").upper() in _SERVING_TYPES and not _points_at_us(r)]
     already_ours = False
     if blocking and _project_exists(project):
         bound = _api("GET", f"/accounts/{{account}}/pages/projects/{project}/domains")
