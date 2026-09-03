@@ -44,6 +44,21 @@ console.log("【1】老版本单条历史 → 自动迁移,且立刻落盘");
   t("旧键已清理", !("adbot-chat-history" in store));
 }
 
+console.log("\n【1.5】三个工作区能独立切换");
+{
+  const app = boot({});
+  app.registry["landing-mode"].fire("click");
+  const landing = app.convs().find((c) => c.id === app.curId());
+  t("能切到落地页工作室", landing && landing.mode === "landing");
+  t("落地页 Tab 显示选中", app.registry["landing-mode"].classList.contains("active"));
+  t("页面标题切成落地页工作室", app.registry["app-title"].textContent === "落地页工作室");
+  app.registry["creative-mode"].fire("click");
+  const creative = app.convs().find((c) => c.id === app.curId());
+  t("能继续切到素材工作室", creative && creative.mode === "creative");
+  t("两个工作区各自保存为独立会话", app.convs().some((c) => c.mode === "landing") &&
+                                      app.convs().some((c) => c.mode === "creative"));
+}
+
 console.log("\n【2】已有两个会话:打开的是当前那个");
 {
   const store = {

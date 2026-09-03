@@ -66,6 +66,12 @@
   .title-wrap .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 1px; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px color-mix(in srgb, #22c55e 20%, transparent); }
   header .right { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 12px; }
+  .workspace-switch { display:flex; gap:3px; padding:3px; border:1px solid var(--border); border-radius:12px; background:var(--bg); overflow-x:auto; scrollbar-width:none; }
+  .workspace-switch::-webkit-scrollbar { display:none; }
+  .workspace-btn { border:0; background:transparent; color:var(--muted); border-radius:9px; padding:7px 11px; cursor:pointer; font-size:12.5px; white-space:nowrap; }
+  .workspace-btn.active { background:var(--panel); color:var(--accent1); box-shadow:var(--shadow); font-weight:650; }
+  .workspace-btn:hover { color:var(--accent1); background:color-mix(in srgb,var(--accent1) 7%,transparent); }
+  .workspace-btn.unlinked { color:#d97706; }
 
   /* ============ 主体:左侧会话栏 + 右侧聊天区 ============ */
   .main { flex: 1; display: flex; min-height: 0; }
@@ -94,6 +100,9 @@
   .conv-item:hover { background: color-mix(in srgb, var(--accent1) 9%, transparent); }
   .conv-item.active { background: color-mix(in srgb, var(--accent1) 15%, transparent); font-weight: 600; }
   .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv-kind { flex:none; font-size:10px; padding:2px 5px; border-radius:5px; color:var(--muted); background:color-mix(in srgb,var(--accent1) 8%,transparent); }
+  .conv-kind.creative { color:#a855f7; background:color-mix(in srgb,#a855f7 11%,transparent); }
+  .conv-kind.landing { color:#0f9f82; background:color-mix(in srgb,#0f9f82 11%,transparent); }
   /* 删除按钮**必须一直看得见**。原来是 opacity:0、悬停才显形 ——
      对小白用户等于"这个功能不存在";触屏设备上压根没有悬停,永远点不到。
      所以默认就露出来(淡一点,不喧宾夺主),悬停时加深、变红。 */
@@ -150,7 +159,8 @@
     transition: all .15s ease; white-space: nowrap;
   }
   .ghost-btn:hover { border-color: var(--accent1); color: var(--accent1); }
-  @media (max-width: 640px) { .tagline { display: none; } }
+  @media (max-width: 1050px) { .tagline, #lang-toggle { display: none; } }
+  @media (max-width: 760px) { .title-wrap { display:none; } header { gap:7px; padding:10px; } header .right { min-width:0; gap:6px; } .workspace-switch { max-width:calc(100vw - 115px); } .workspace-btn { padding:7px 9px; } }
 
   /* ============ 消息区 ============ */
   #messages {
@@ -385,17 +395,22 @@
 <body>
   <header>
     <button id="sidebar-toggle" class="ghost-btn" title="显示 / 隐藏对话列表">☰</button>
-    <div class="logo">🤖</div>
+    <div class="logo" id="app-logo">🤖</div>
     <div class="title-wrap">
       <h1 id="app-title">广告投放小助手</h1>
       <div class="sub"><span class="dot"></span><span id="app-sub">在线 · NewsBreak 对话式投放</span></div>
     </div>
     <div class="right">
       <span class="tagline" id="app-tagline">查数据 · 看报表 · 管投放</span>
-      <button id="platform-btn" class="ghost-btn" title="切换投放平台" onclick="location.href='/platforms'">🔄</button>
+      <div class="workspace-switch" aria-label="工作区">
+        <button id="campaign-mode" class="workspace-btn active">💬 投放助手</button>
+        <button id="creative-mode" class="workspace-btn">🎨 素材工作室</button>
+        <button id="landing-mode" class="workspace-btn">🧭 落地页工作室</button>
+        <button id="acct-btn" class="workspace-btn" title="接入 / 切换广告账户">🔗 账户管理</button>
+        <button id="dash-btn" class="workspace-btn" title="打开数据大屏(KPI/趋势/AI诊断)" onclick="location.href='/dashboard'">📊 数据大屏</button>
+        <button id="platform-btn" class="workspace-btn" title="切换投放平台" onclick="location.href='/platforms'">🔄 切换平台</button>
+      </div>
       <span id="user-chip" class="ghost-btn" style="display:none;cursor:default"></span>
-      <button id="dash-btn" class="ghost-btn" title="打开数据大屏(KPI/趋势/AI诊断)" onclick="location.href='/dashboard'">📊 大屏</button>
-      <button id="acct-btn" class="ghost-btn" title="接入 / 切换广告账户">🔗 账户</button>
       <button id="lang-toggle" class="ghost-btn" title="切换中文 / English">🌐 EN</button>
       <button id="new-chat" class="ghost-btn" title="开一个新对话(当前对话会存进左侧列表)">✚ 新对话</button>
     </div>
@@ -512,13 +527,13 @@
       upErrNetwork: (m) => `连接中断,请求没能送达服务器(${m})。\n常见原因:①VSCode 端口转发的"桥"断了 → 去端口面板把 18100 删掉重加;②服务刚重启;③文件过大导致连接被掐断。\n先刷新页面确认能正常聊天,再重新上传。`,
       storageTrimmed: (n) => `⚠️ 浏览器存储空间满了,已自动清掉最旧的 ${n} 段对话腾地方。想彻底清爽可以手动删掉不用的对话。`,
       storageFull: "⚠️ 浏览器存储空间已满,这段对话可能存不下了。请点「✚ 新对话」或删掉几段旧对话再继续。",
-      dashBtn: "📊 大屏",
+      dashBtn: "📊 数据大屏",
       dashBtnTitle: "打开数据大屏(KPI / 趋势 / AI 诊断)",
       syncFailed: "⚠️ 没能读回你账号里的聊天记录(网络或服务出了问题)。**先别发新消息**,刷新一下页面再试 —— 现在发的话可能会覆盖掉服务器上的旧记录。",
       imgZoomHint: "点图片可以放大看",
       imgOpenNew: "在新标签页打开原图 ↗",
       imgLoading: "加载中…",
-      acctBtn: "🔗 账户",
+      acctBtn: "🔗 账户管理",
       acctBtnTitle: "接入 / 切换广告账户",
       acctBtnUnlinked: "🔗 未接入账户",
       acctTitle: "🔗 接入广告账户",
@@ -567,6 +582,18 @@
         "哪条广告的 CTR 最高?",
         "我想投一个新广告",
       ],
+      campaignMode: "💬 投放助手", creativeMode: "🎨 素材工作室", landingMode: "🧭 落地页工作室",
+      creativeTitle: "素材工作室", creativeSub: "在线 · 创意研究与制作",
+      creativeTagline: "找灵感 · 拆素材 · 做新图",
+      creativeHint: "🎨 素材模式不会创建或启停广告 · 生图付费前一定会确认",
+      creativeWelcome: "你好,这里是**素材工作室** 🎨\n我可以陪你找竞品灵感、拆解素材、写创意方案并生成新图片。这里不会创建、开启或暂停广告;做好后可再带到投放助手。\n你想从哪一步开始?",
+      creativeChips: ["看看同行最近在投什么", "帮我找可商用的图片", "上传一张图帮我拆解", "我有想法,帮我做成广告图"],
+      landingTitle: "落地页工作室", landingSub: "在线 · 落地页研究与制作",
+      landingTagline: "找案例 · 拆结构 · 做页面",
+      landingHint: "🧭 生成 A/B 页面 · 确认后可直接发布 Cloudflare Pages",
+      landingWelcome: "你好,这里是**落地页工作室** 🧭\n我可以筛选和拆解同行页面，制作两个原创 A/B 版本；你提供 ClickFlare CTA 地址与追踪脚本后，还可以选择域名直接发布到 Cloudflare Pages。\n告诉我品类或直接发一个落地页链接即可。",
+      landingChips: ["找一批 roof repair 优质落地页", "我发链接,帮我拆解页面", "根据拆解生成两个新落地页", "查看 Cloudflare 可发布域名", "把 A/B 页面发布到 Cloudflare"],
+      campaignKind: "投放", creativeKind: "素材", landingKind: "落地页",
       busy: "助手正在思考,请等它回完再发…",
       busyDelete: "这段对话还在生成回复,等它回完再删。",
       bgDone: (title) => `「${title}」的回复已经好了,点左栏就能看`,
@@ -607,7 +634,7 @@
       imgZoomHint: "Click an image to enlarge",
       imgOpenNew: "Open original in a new tab ↗",
       imgLoading: "Loading…",
-      acctBtn: "🔗 Account",
+      acctBtn: "🔗 Accounts",
       acctBtnTitle: "Connect / switch ad account",
       acctBtnUnlinked: "🔗 Not connected",
       acctTitle: "🔗 Connect ad account",
@@ -656,6 +683,18 @@
         "Which ad has the highest CTR?",
         "I want to create a new ad",
       ],
+      campaignMode: "💬 Campaigns", creativeMode: "🎨 Creative Studio", landingMode: "🧭 Landing Studio",
+      creativeTitle: "Creative Studio", creativeSub: "Online · Creative research & production",
+      creativeTagline: "Research · Analyze · Create",
+      creativeHint: "🎨 Creative mode cannot create or change ads · image costs are always confirmed first",
+      creativeWelcome: "Welcome to the **Creative Studio** 🎨\nI can research competitor ideas, analyze creatives, plan concepts, and generate new images. This workspace cannot create, launch, or pause ads.\nWhere would you like to start?",
+      creativeChips: ["Show me what competitors are running", "Find commercially usable images", "Analyze an image I upload", "Turn my idea into ad creatives"],
+      landingTitle: "Landing Page Studio", landingSub: "Online · Landing-page research & production",
+      landingTagline: "Research · Analyze · Build",
+      landingHint: "🧭 Build A/B pages · publish to Cloudflare Pages after confirmation",
+      landingWelcome: "Welcome to the **Landing Page Studio** 🧭\nI can research and analyze competitor pages, build two original A/B versions, and publish them to a Cloudflare domain after you provide the exact ClickFlare CTA URL and tracking script.\nGive me a category or a complete landing-page URL.",
+      landingChips: ["Find strong roof repair landing pages", "Analyze a landing-page URL", "Generate two new landing pages", "Show Cloudflare domains", "Publish A/B pages to Cloudflare"],
+      campaignKind: "Ads", creativeKind: "Creative", landingKind: "Landing",
       busy: "The assistant is thinking — please wait for its reply…",
       busyDelete: "This chat is still generating a reply — wait for it to finish before deleting it.",
       bgDone: (title) => `“${title}” has finished replying — open it from the left panel`,
@@ -675,15 +714,30 @@
   let lang = localStorage.getItem(LANG_KEY) === "en" ? "en" : "zh";
   const t = () => I18N[lang];
 
+  function currentMode() {
+    const c = (typeof conversations !== "undefined") && conversations.find((x) => x.id === currentId);
+    return c && ["creative", "landing"].includes(c.mode) ? c.mode : "campaign";
+  }
+
   /** 把界面上所有静态文案刷成当前语言 */
   function applyLang() {
     const d = t();
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
-    document.title = d.title;
-    document.getElementById("app-title").textContent = d.title;
-    document.getElementById("app-sub").textContent = d.sub.replace("{p}", PLATFORM_NAME);
-    document.getElementById("app-tagline").textContent = d.tagline;
-    document.getElementById("app-hint").textContent = d.hint;
+    const mode = currentMode();
+    const creative = mode === "creative", landing = mode === "landing";
+    document.title = landing ? d.landingTitle : creative ? d.creativeTitle : d.title;
+    document.getElementById("app-title").textContent = landing ? d.landingTitle : creative ? d.creativeTitle : d.title;
+    document.getElementById("app-sub").textContent = landing ? d.landingSub : creative ? d.creativeSub : d.sub.replace("{p}", PLATFORM_NAME);
+    document.getElementById("app-tagline").textContent = landing ? d.landingTagline : creative ? d.creativeTagline : d.tagline;
+    document.getElementById("app-hint").textContent = landing ? d.landingHint : creative ? d.creativeHint : d.hint;
+    document.getElementById("app-logo").textContent = landing ? "🧭" : creative ? "🎨" : "🤖";
+    document.getElementById("campaign-mode").textContent = d.campaignMode;
+    document.getElementById("creative-mode").textContent = d.creativeMode;
+    document.getElementById("landing-mode").textContent = d.landingMode;
+    document.getElementById("platform-btn").textContent = lang === "en" ? "🔄 Platforms" : "🔄 切换平台";
+    document.getElementById("campaign-mode").classList.toggle("active", mode === "campaign");
+    document.getElementById("creative-mode").classList.toggle("active", creative);
+    document.getElementById("landing-mode").classList.toggle("active", landing);
 
     const langBtn = document.getElementById("lang-toggle");
     langBtn.textContent = d.langBtn;
@@ -708,7 +762,9 @@
     if (typeof renderConvList === "function") renderConvList();
     document.getElementById("attach").title = d.attachTitle;
     document.getElementById("send").title = d.sendTitle;
-    inputEl.placeholder = d.placeholder;
+    inputEl.placeholder = landing
+      ? (lang === "en" ? "Describe the landing page you want to research or build…" : "说说要研究或制作什么落地页…")
+      : creative ? (lang === "en" ? "Describe the creative you want to make…" : "说说你想做什么素材…") : d.placeholder;
   }
 
   // ===== 页面的"记忆":完整聊天记录。API 不记事,每次都把它全量发给后端 =====
@@ -738,7 +794,7 @@
       try {
         const old = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
         if (Array.isArray(old) && old.length > 0) {
-          convs = [{ id: newId(), title: titleOf(old), messages: old, updatedAt: Date.now() }];
+          convs = [{ id: newId(), title: titleOf(old), mode: "campaign", messages: old, updatedAt: Date.now() }];
           migratedOld = true;   // 注意:这里**先不删**旧数据,等新数据确认存好了再删,
         }                       // 否则用户迁移后没发消息就刷新页面 → 历史永久丢失
       } catch (e) { /* 忽略 */ }
@@ -972,7 +1028,7 @@
   function ensureConv(id) {
     let conv = conversations.find((c) => c.id === id);
     if (!conv) {
-      conv = { id: id, title: "", messages: [], updatedAt: 0 };
+      conv = { id: id, title: "", mode: "campaign", messages: [], updatedAt: 0 };
       conversations.unshift(conv);
     }
     return conv;
@@ -1096,7 +1152,7 @@
     const timer = setTimeout(() => controller.abort(), 180000);   // 3 分钟
 
     try {
-      const body = JSON.stringify({ messages: msgs, lang: lang });
+      const body = JSON.stringify({ messages: msgs, lang: lang, mode: ensureConv(convId).mode || "campaign" });
       const common = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1296,12 +1352,13 @@
 
   // ===== 开场:有存档就恢复,没有才显示欢迎语 + 快捷提问 =====
   function showWelcome() {
-    const row = addBubble("bot", t().welcome);
+    const mode = currentMode(), creative = mode === "creative", landing = mode === "landing";
+    const row = addBubble("bot", landing ? t().landingWelcome : creative ? t().creativeWelcome : t().welcome);
     row.dataset.welcome = "1";   // 打标记:切语言时这条要跟着换(它是界面文字,不是对话内容)
 
     const chipsWrap = document.createElement("div");
     chipsWrap.id = "chips";
-    t().chips.forEach((q) => {
+    (landing ? t().landingChips : creative ? t().creativeChips : t().chips).forEach((q) => {
       const b = document.createElement("button");
       b.className = "chip";
       b.textContent = q;
@@ -1360,6 +1417,11 @@
       title.className = "conv-title";
       title.textContent = c.title || t().untitled;
       item.appendChild(title);
+
+      const kind = document.createElement("span");
+      kind.className = "conv-kind" + (c.mode === "creative" ? " creative" : c.mode === "landing" ? " landing" : "");
+      kind.textContent = c.mode === "creative" ? t().creativeKind : c.mode === "landing" ? t().landingKind : t().campaignKind;
+      item.appendChild(kind);
 
       const del = document.createElement("button");
       del.className = "conv-del";
@@ -1454,6 +1516,7 @@
     history.length = 0;
     conv.messages.forEach((m) => history.push(m));
     localStorage.setItem(CUR_KEY, currentId);
+    applyLang();
     paintCurrent();
     renderConvList();
     sendBtn.disabled = running.has(currentId);   // 这一段自己在忙才禁用
@@ -1481,6 +1544,7 @@
       history.length = 0;
       if (next) next.messages.forEach((m) => history.push(m));
       clearLive();
+      applyLang();
       paintCurrent();
       sendBtn.disabled = running.has(currentId);
     }
@@ -1489,12 +1553,16 @@
   }
 
   /** 开新对话:当前这段已经在 conversations 里了,只要新开一个空的即可(不删任何东西) */
-  function startNewConversation() {
-    if (history.length === 0) return;    // 已经是空白新对话了,别重复开
+  function startNewConversation(mode) {
+    mode = ["campaign", "creative", "landing"].includes(mode) ? mode : currentMode();
+    if (history.length === 0 && currentMode() === mode) return;
     clearLive();                          // 那一段还在跑也没关系,它自己会跑完
     currentId = newId();
+    ensureConv(currentId).mode = mode;
     history.length = 0;
     localStorage.setItem(CUR_KEY, currentId);
+    saveConversations();
+    applyLang();
     paintCurrent();
     renderConvList();
     sendBtn.disabled = false;             // 新的这段是空的,当然能发
@@ -1505,7 +1573,10 @@
   paintCurrent();
   renderConvList();
 
-  document.getElementById("new-chat").addEventListener("click", startNewConversation);
+  document.getElementById("new-chat").addEventListener("click", () => startNewConversation(currentMode()));
+  document.getElementById("campaign-mode").addEventListener("click", () => startNewConversation("campaign"));
+  document.getElementById("creative-mode").addEventListener("click", () => startNewConversation("creative"));
+  document.getElementById("landing-mode").addEventListener("click", () => startNewConversation("landing"));
 
   document.getElementById("sidebar-toggle").addEventListener("click", () => {
     document.getElementById("sidebar").classList.toggle("collapsed");
@@ -1530,8 +1601,10 @@
     // 已经聊过:对话内容保持原样(那是历史记录),但开场欢迎语属于界面文字,跟着换
     const welcomeRow = messagesEl.querySelector('.row[data-welcome="1"] .bubble');
     if (welcomeRow) {
-      welcomeRow.dataset.raw = t().welcome;
-      renderBubble(welcomeRow, t().welcome);
+      const mode = currentMode();
+      const welcome = mode === "landing" ? t().landingWelcome : mode === "creative" ? t().creativeWelcome : t().welcome;
+      welcomeRow.dataset.raw = welcome;
+      renderBubble(welcomeRow, welcome);
     }
 
     // 提示语:同一条反复切换时替换掉旧提示,不要堆一串
@@ -1580,11 +1653,12 @@
     if (acctState && acctState.connected) {
       const active = (acctState.accounts || []).find((a) => a.id === acctState.active_account_id);
       const name = active ? active.name : d.acctBtn;
-      acctBtn.textContent = "🔗 " + (name.length > 12 ? name.slice(0, 12) + "…" : name);
-      acctBtn.className = "ghost-btn linked";
+      const shortName = name.length > 10 ? name.slice(0, 10) + "…" : name;
+      acctBtn.textContent = (lang === "en" ? "🔗 Account · " : "🔗 账户 · ") + shortName;
+      acctBtn.className = "workspace-btn linked";
     } else {
-      acctBtn.textContent = d.acctBtnUnlinked;
-      acctBtn.className = "ghost-btn unlinked";
+      acctBtn.textContent = lang === "en" ? "🔗 Connect account" : "🔗 账户管理";
+      acctBtn.className = "workspace-btn unlinked";
     }
     acctBtn.title = d.acctBtnTitle;
   }

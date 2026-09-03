@@ -15,7 +15,12 @@ function makeEl(tag) {
     scrollHeight: 0, scrollTop: 0, files: [],
     get lastElementChild() { return this.children[this.children.length - 1] || null; },
     classList: { _s:new Set(), add(c){this._s.add(c)}, remove(c){this._s.delete(c)},
-                 toggle(c){this._s.has(c)?this._s.delete(c):this._s.add(c)}, contains(c){return this._s.has(c)} },
+                 toggle(c, force){
+                   if (force === true) { this._s.add(c); return true; }
+                   if (force === false) { this._s.delete(c); return false; }
+                   this._s.has(c) ? this._s.delete(c) : this._s.add(c);
+                   return this._s.has(c);
+                 }, contains(c){return this._s.has(c)} },
     appendChild(c){ c._parent = this; this.children.push(c); return c; },
     // 按 .class 在子孙里找第一个 —— 原来永远返回 null,导致
     // 「查到某个节点再改它」这类代码在测试里静默空转,测了等于没测

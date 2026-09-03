@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(111)、`node frontend_test.js`(56)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(122)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(111)+ `frontend_test.js` 多会话(56)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(122)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -693,10 +693,116 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
 > 教训写进坑表了:**别用「锁住界面」来保证数据不出错**。锁是症状,
 > "写给谁认错了对象"才是病。把归属定死,锁就不需要了。
 
+## 六之十七、落地页工作室 + Cloudflare Pages A/B 发布(2026-09-03)
+
+### 已确定的产品链路
+
+这套功能**不接 ClickFlare API,也不经过 GitHub**。ClickFlare 仍由用户手工配置,
+本项目只接收用户从 ClickFlare 复制来的精确 URL/脚本:
+
+```text
+落地页工作室找案例/拆解 → 生成原创 A/B 两版
+→ 用户提供 ClickFlare CTA Click URL + Lander Tracking Script
+→ 用户选择本次 Cloudflare 域名和实验 slug
+→ propose_publish_landing_pages 登记发布待办
+→ 用户下一条消息确认
+→ Pages Direct Upload 一次发布 A/B
+→ 用户把 A/B 正式 URL 手工添加为 ClickFlare 两个 Lander,设 50/50
+→ 用户把 ClickFlare Campaign Tracking URL 复制回投放助手
+→ NewsBreak 的 clickThroughUrl 使用 Campaign Tracking URL
+```
+
+三个地址绝不能混:
+
+| 地址 | 放在哪里 | 作用 |
+|---|---|---|
+| Cloudflare 页面 URL | ClickFlare 的 Lander URL | 真正展示页面 |
+| ClickFlare CTA Click URL(`/cf/click/1`) | Cloudflare 页面 CTA 的 `href` | 记录 Lander → Offer 点击 |
+| ClickFlare Campaign Tracking URL | NewsBreak `clickThroughUrl` | 记录广告访问并分流到 A/B |
+
+**CTA Click URL 没有被省掉**,只是用户在做页面前就给出来,后端第一次发布时直接植入,
+从而省去「先部署 → 再拿 CTA URL → 改页面 → 再部署」这一轮。若 A/B 进入同一个 Campaign、
+同一路径、同一 Offer,两版可以用同一个 `/cf/click/1`;NewsBreak 也只使用一个 Campaign URL。
+
+### Pages 项目和域名的规则
+
+- **一个投放 hostname = 一个 Pages 项目**。同一域名再次发布复用原项目,不重复创建;
+- **一个实验的 A/B 在同一项目的两个路径**:`/<slug>/a/`、`/<slug>/b/`;
+- 新域名第一次确认发布时自动创建项目,项目名由
+  `CLOUDFLARE_PAGES_PROJECT_PREFIX + 域名 + hash` 确定性生成;
+- 域名在**每次发布时选择**,不能把唯一域名写死在 `.env`;
+- `data/cloudflare_sites.json` 保存 `域名 ↔ Pages 项目 ↔ 历史 release`,
+  `data/cloudflare_sites/<project>/` 保存待上传的完整静态目录。两者都在 `data/`,不进 git;
+- 本地映射丢了也能靠确定性项目名认回项目。域名已被别的项目/DNS 占用时让 Cloudflare 报清楚,
+  **不得偷偷覆盖现有绑定**;
+- 根路径会跳到该域名最近一次发布的 A 版;历史实验路径仍保留在同一部署目录中。
+
+`.env` 只要求固定凭据:
+
+```env
+CLOUDFLARE_ACCOUNT_ID=...
+CLOUDFLARE_API_TOKEN=...
+CLOUDFLARE_PAGES_PROJECT_PREFIX=landing   # 可选,不填也默认 landing
+```
+
+**不要再要求**固定的 `CLOUDFLARE_PAGES_PROJECT` 或 `CLOUDFLARE_LANDING_DOMAIN`。
+当前账号(2026-09-03 只读实测)能读到 **351 个 Zone、0 个 Pages 项目**;
+Wrangler 身份验证成功。0 个项目是正常初始状态,第一次真实发布确认后才创建。
+截至记录时**尚未创建真实 Pages 项目、尚未修改 DNS**。
+
+### 实现边界和安全规则
+
+- `cloudflare_pages.py`:列 Zone/项目、域名规范化、确定性项目名、创建/复用 Pages、
+  Direct Upload、绑定域名、持久化映射;
+- `landing_lab.py`:生成的新页面必须把所有真正去 Offer 的 CTA 写成
+  `href="[[CLICKFLARE_CTA_URL]]"`,并在 `</body>` 前留
+  `<!--[[CLICKFLARE_LANDER_SCRIPT]]-->`;
+- 发布时由 Python **逐字替换占位符**,不让模型拼 URL、改脚本。URL 必须是 HTTPS,
+  Tracking Script 必须包含完整 `<script>...</script>`;脚本不在聊天/待办列表中回显;
+- 缺 CTA 占位符的旧页面拒绝发布,要重新生成,不能用正则猜哪个按钮算真正 CTA;
+- 不自动访问 CTA/Campaign Tracking URL 做健康检查 —— 打开追踪链接会制造测试点击、污染统计;
+- **发布是「整站替换」,本地 `data/cloudflare_sites/<project>/` 是「线上有什么」的唯一依据。**
+  `wrangler pages deploy <目录>` 会用那个目录**整体覆盖**线上内容,而 `data/` 不进 git ——
+  它一丢(换机器/重装/没备份),项目名还能靠域名 hash 认回来,但本地没有历史实验目录,
+  这一次部署就会把线上**所有旧实验删掉**,而 ClickFlare 里的 Lander 还指着老地址,
+  **买来的流量落到 404 上,钱照花**。`replace_risk()` 的判据**不依赖本地映射文件**(它可能一起丢):
+  「Cloudflare 上项目已存在 + 本地除了这次这个实验之外一个目录都没有」→ 拒绝发布并说清楚。
+  提案阶段就查(和占位符检查同理);用户明确说「覆盖发布」才带 `allow_replace=true` 放行。
+- **上传超时 `UPLOAD_TIMEOUT_S=120` 必须小于前端的 180 秒。** 超了的话用户看到「等太久了」、
+  后端还在传,而发布是**不可逆**的 —— 他很可能再确认一次,于是发布两遍。
+- **根路径是中性静态页,不跳转、也不列实验清单。** 跳转会让裸访问算到 A 版头上、
+  审核抓根域名时只看到一个跳转页;列清单等于把在跑的实验公开给同行。
+  A/B 的准确地址在发布结果里给用户,也存在 `data/cloudflare_sites.json`(带发布时间)。
+- **A/B 共用一个 CTA Click URL**,前提是「同 Campaign、同路径、同 Offer」——
+  要让 A/B 指向不同 Offer 现在做不到,得分两次发布。发布结果里已写明这条。
+- 域名绑定后可能还在签证书(`domain_status != active`),结果里会提醒**先别填进 ClickFlare**,
+  先用 `*.pages.dev` 自查。
+- 发布是外部写操作,走和建广告相同的保险箱:
+  `propose_publish_landing_pages` 只登记,下一条明确确认才允许 `confirm_action`;
+  确认前对 A/B 文件记 SHA-256,文件被换过就停止发布;
+- 同一个待办只允许创建它的账号执行;落地页工作室只能确认/取消发布待办,
+  不能借 `confirm_action` 执行投放待办;
+- Direct Upload 使用项目本地固定版本的 Wrangler(`package.json`),新机器要先 `npm install`。
+
+落地页工作室新增工具:
+
+- `list_cloudflare_landing_resources(query, limit)`:只读列域名/项目/映射。Zone 有 351 个,
+  所以代码会自动翻页,返回聊天时最多 100 个并支持关键词筛选;
+- `propose_publish_landing_pages(domain, slug, cta_url, tracking_script, variant_a_file,
+  variant_b_file)`:校验并登记发布;
+- `confirm_action(action_id)`:下一轮才真正创建/复用项目、上传、绑定域名。成功结果同时给普通 A/B URL
+  和 ClickFlare 可粘贴的 `?cpid={campaign_id}` Lander URL。
+
+每次发布必须向用户收齐:本次 domain/subdomain、实验 slug、精确 CTA Click URL、完整 Lander
+Tracking Script、A/B 两个生成文件。页面发布后 ClickFlare 的手工步骤是:建两个 Lander →
+同一个 Campaign Default Path 中选同一 Offer → 权重 50/50 → 复制一个 Campaign Tracking URL
+回本项目投放。
+
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
 两阶段 + 物理保险丝:
-1. AI 只能先调 `propose_status_change` / `propose_create_campaign` 把动作放进「保险箱」
+1. AI 只能先调 `propose_status_change` / `propose_create_campaign` /
+   `propose_publish_landing_pages` 把动作放进「保险箱」
    (PENDING_ACTIONS),然后向用户复述 + **报出待办编号**请求确认;
 2. 用户在**下一条消息**明确同意后,AI 才能调 `confirm_action` 执行;
 3. 保险丝:`_REQUEST_SEQ` 每条用户消息+1,登记与执行同序号=同一条消息 → 代码层直接拒绝,AI 无法自问自答;
@@ -765,6 +871,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
 | **花钱的步骤要排在最后** | 生图 $0.20/张。踩了两次:一次卡在给文件起名(`_re` 没导入)、一次卡在上传缺 `mediaName` —— **两次都是图已生成、钱已付才失败**,那张就白花了。**所有免费又可能失败的准备工作(起名、校验、查余额)必须排在付费调用之前**,付过钱的产物还要先落盘再做后续 |
 | **按公开单价算的成本会差很远** | 按 ofox 报的 `output_image` 单价 × 官方 token 数算出一张 $0.05,**实测 $0.203,差 4 倍**。报低了用户以为很便宜,批量生成才发现烧了不少。**成本一律拿账单实测校正**(记余额→生成→再记余额),别信算出来的 |
 | **测试用 index() 找源码会命中注释** | 守"文件名要排在 `cr.render()` 之前"那条测试,`src.index("cr.render(")` 先命中了**注释里**写的 `cr.render()`,于是误报。和之前 `minDaysRunning` 在 docstring 里被搜到是同一类。**读源码做判断前先把注释/docstring 剥掉** |
+| **「整站替换」式的部署,本地目录就是线上内容的唯一真相** | `wrangler pages deploy <目录>` 用那个目录**整体覆盖**线上。而目录在 `data/` 里、不进 git。实测:删掉 `data/` 再发一次新实验,**线上原有的两个实验被静默删除**,而 ClickFlare 的 Lander 还指着它们 —— 买来的流量落到 404 上,钱照花。判据不能依赖本地映射文件(它一起丢了),要用「远端项目已存在 + 本地没有任何历史目录」;**默认拒绝**,用户明确说「覆盖发布」才放行。凡是「上传一个目录 = 替换整站」的部署方式,都要先问一句:**我怎么知道线上现在有什么?** |
 | **待办里要存快照,不能只存「指向当前状态的编号」** | 生图待办原来只存 `indexes`(第几版),执行时再回 `_plans()` 里按编号取。用户还没点头就又归纳了一次 → 方案列表整个换掉 → **同样的编号指到别的方案**:报价时给他看的是 A,真花钱做出来的是 B。凡是「先报价、后执行」的两阶段流程,待办里存的必须是**当时给用户看的那份东西本身**,不是指向可变状态的引用(老待办没快照时回落按编号取,并说明风险)|
 | **改了行为要顺手改掉所有说法** | 把生图默认从"叠字"改成"出干净图"时,**六处描述**(中英提示词、两个 docstring、提议话术、OpenAI schema)全留在原地,而五套测试当时全绿 —— 助手会照着旧话术跟用户说"文字是代码排上去的",实际图上没字。这就是第二节第 6 条。已加测试:默认不叠字时,这些地方出现「代码精确排版」等字样就报错 |
 | **裁切锚点跟着用途走** | 3:2 原图裁成 1200×628 要去掉 22% 高度。叠字时从**顶部**裁(保住文字那块留白)是对的;改成不叠字后还固定切底部,就把主体在下半部分的照片(跪着干活的人、地上的材料)整个切没了。**同一段裁切代码,用途变了锚点就得变** |
@@ -850,7 +957,10 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
   代码层查文案照抄(第六之十三节);
 - **把方案做成广告图**:`propose_make_creatives` —— AI 画**无文字**底图 +
   **代码确定性叠字**,出 1200×628 成品直接传进素材库;走确认关卡先报价(第六之十五节);
-- 大脑:三级火箭 + `BRAIN` 开关;工具共 26 个;
+- **落地页 A/B 发布**:不用 GitHub,通过 Pages Direct Upload 发布;域名每次选择,
+  新域名自动建项目、旧域名复用;ClickFlare CTA/脚本确定性注入,发布走二次确认
+  (第六之十七节);
+- 大脑:三级火箭 + `BRAIN` 开关;Gemini/OpenAI 工具共 31 个;
 - **数据大屏**:KPI(带环比)/ 每日趋势 / 各计划对比 / 三层明细表 / **AI 投放诊断**,双语;
 - 定时任务:一次性 + 每天重复,看表线程每 30 秒检查,错过 >15 分钟不补跑;
   **定时开启同样三层一起开**(任务里存 `targets`);
@@ -861,7 +971,7 @@ Yahoo 上是通用的,跨平台的素材池大得多,规律也更可靠。
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 111 + 前端 56 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 122 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -899,9 +1009,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 62 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 119 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 111 / 前端 56 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 122 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

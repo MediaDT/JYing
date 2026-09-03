@@ -248,6 +248,7 @@ def save_chats(user_id: str, conversations: list) -> dict:
         trimmed.append({
             "id": str(conv.get("id") or uuid.uuid4().hex[:10]),
             "title": str(conv.get("title") or "")[:80],
+            "mode": conv.get("mode") if conv.get("mode") in {"campaign", "creative", "landing"} else "campaign",
             "messages": msgs[-MAX_MSGS:] if isinstance(msgs, list) else [],
             "updatedAt": conv.get("updatedAt") or 0,
         })

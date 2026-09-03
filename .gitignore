@@ -7,6 +7,7 @@
 
 # Python 虚拟环境和缓存(换机器重装即可,不用带走)
 venv/
+node_modules/
 __pycache__/
 *.pyc
 

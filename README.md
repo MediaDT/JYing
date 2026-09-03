@@ -640,6 +640,8 @@ cd my-agent
 # 2. 建环境、装依赖
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
+# 落地页要直接发布 Cloudflare Pages 时还需安装 Wrangler
+npm install
 
 # 3. 建 .env 文件,填上自己的钥匙(参考第十节)
 #    ⚠️ .env 不在仓库里,必须手动建 —— 里面是真钥匙,不能进 git
@@ -668,6 +670,8 @@ node stream_test.js                # 流式 13 项
 |------|------|
 | `agent_server.py` | 后端主程序:AI 大脑 + 15 个工具 + 安全护栏 |
 | `newsbreak_client.py` | NewsBreak 接口封装(查询、报表、建广告、开关) |
+| `landing_lab.py` | 同行落地页拆解、A/B 页面生成与本地预览 |
+| `cloudflare_pages.py` | Pages Direct Upload、动态域名/项目映射、ClickFlare 代码注入 |
 | `platforms.py` | 投放平台注册表(哪些平台能用、绑没绑) |
 | `accounts.py` | 账号、密码、会话、每个人的聊天记录 |
 | `static/login.html` | 登录 / 注册页 |

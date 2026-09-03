@@ -13,11 +13,13 @@
 """
 
 import contextvars
+import hashlib
 import json
 import os
 import queue
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import anthropic
@@ -102,6 +104,7 @@ CURRENT_USER_ID: contextvars.ContextVar = contextvars.ContextVar("adbot_user_id"
 # 流式回复时,用来把「进度/文字」一小段一小段递给前端的回调。
 # None = 这次不是流式请求,大脑那边照常一次性返回。
 CURRENT_EMIT: contextvars.ContextVar = contextvars.ContextVar("adbot_emit", default=None)
+CURRENT_CHAT_MODE: contextvars.ContextVar = contextvars.ContextVar("adbot_chat_mode", default="campaign")
 
 
 _TOOL_LABELS = {
@@ -114,6 +117,11 @@ _TOOL_LABELS = {
     "recommend_creatives": "正在从你的历史广告里挑好素材…",
     "search_stock_creatives": "正在从授权图库里找素材…",
     "search_competitor_ads": "正在查竞品正在投的广告…",
+    "search_competitor_landing_pages": "正在找疑似优质落地页…",
+    "decompose_landing_page": "正在拆解落地页结构…",
+    "summarize_landing_page_patterns": "正在汇总规律并生成两个新落地页…",
+    "list_cloudflare_landing_resources": "正在读取 Cloudflare 项目和域名…",
+    "propose_publish_landing_pages": "正在登记 A/B 页面发布待办…",
     "my_ad_categories": "正在看你的账户在投什么品类…",
     "platform_kind": "正在判断这是哪类投放平台…",
     "native_market_scan": "正在扫原生平台上什么在跑得最好…",
@@ -535,6 +543,8 @@ import scheduler as sched  # noqa: E402
 import creative_search as cs  # noqa: E402
 import creative_lab as lab  # noqa: E402
 import creative_render as cr  # noqa: E402
+import landing_lab as lp  # noqa: E402
+import cloudflare_pages as cfp  # noqa: E402
 import ad_platform_kinds as apk  # noqa: E402
 import openadlibrary_client as oal  # noqa: E402
 
@@ -957,6 +967,329 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
     }
 
 
+# ===== 落地页研究与生成 =====
+_LANDING_CANDIDATES_BY_USER: dict[str, dict[str, dict]] = {}
+_LANDING_MODELS_BY_USER: dict[str, dict[str, dict]] = {}
+_LANDING_PAGES_BY_USER: dict[str, list[dict]] = {}
+
+
+def _landing_candidates() -> dict[str, dict]:
+    return _LANDING_CANDIDATES_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", {})
+
+
+def _landing_models() -> dict[str, dict]:
+    return _LANDING_MODELS_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", {})
+
+
+def _landing_pages() -> list[dict]:
+    return _LANDING_PAGES_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", [])
+
+
+def search_competitor_landing_pages(keyword: str, count: int = 8, country: str = "US",
+                                    active_only: bool = True, min_days: int = 0) -> dict:
+    """找疑似优质落地页候选。
+
+    口径和竞品素材一致:从 OpenAdLibrary 按品类找还在投、版位数多、投放久的广告。
+    OpenAdLibrary 的公共 API 不给原始点击 URL，但会给 landingDomain；再用落地页
+    语料接口补充截图、抓取次数和关联广告数。截图可用时可以直接做视觉拆解。
+    """
+    try:
+        r = oal.search_landing_candidates(keyword, count=count, country=country,
+                                          active_only=active_only, min_days=min_days)
+    except oal.OpenAdLibraryError as e:
+        return {"error": str(e),
+                "note": "把错误原样告诉用户。OpenAdLibrary 用的是服务器公用 key。"}
+    except Exception as e:
+        return {"error": f"查落地页候选失败:{str(e)[:200]}"}
+
+    items = list(r.get("results") or [])
+    domain_count = len({str(x.get("落地页域名") or "").lower() for x in items
+                        if str(x.get("落地页域名") or "").strip()})
+    # 精确短语常命中一批 search-arbitrage 广告，它们为了 leak-safe 不给域名。
+    # 候选太少时只放宽一次到品类主词，仍然逐条做相关性筛选，不无限重试。
+    words = [w for w in str(keyword or "").split() if len(w) > 2]
+    already_broadened = "自动降级为品类主词" in str(r.get("数据状态") or "")
+    if domain_count < min(3, max(1, int(count or 8))) and len(words) > 1 and not already_broadened:
+        try:
+            wider = oal.search_landing_candidates(words[0], count=min(12, max(6, int(count or 8))),
+                                                   country=country, active_only=active_only,
+                                                   min_days=min_days)
+            known = {str(x.get("image_url") or "") for x in items}
+            items.extend(x for x in (wider.get("results") or [])
+                         if str(x.get("image_url") or "") not in known)
+            r["候选池"] = str(r.get("候选池") or "") + f"；域名不足时补查主词 {words[0]}"
+        except Exception:
+            pass
+
+    out = []
+    bucket = _landing_candidates()
+    seen_domains = set()
+    screenshot_failures = 0
+    for item in items:
+        domain = str(item.get("落地页域名") or "").strip()
+        url = str(item.get("落地页链接") or "").strip()
+        marker = domain.lower() or url
+        if (not domain and not url) or marker in seen_domains:
+            continue
+        seen_domains.add(marker)
+        landing_info = {}
+        if domain:
+            try:
+                landing_info = oal.landing_page_info(domain)
+            except Exception as e:
+                landing_info = {"detail_error": str(e)[:160]}
+        reported_shot = str(landing_info.get("screenshotUrl") or "")
+        shot_ok = bool(reported_shot and oal.screenshot_available(reported_shot))
+        if reported_shot and not shot_ok:
+            screenshot_failures += 1
+        cid = uuid.uuid4().hex[:8]
+        candidate = {
+            "id": cid,
+            "keyword": keyword,
+            "title": item.get("title"),
+            "body": item.get("文案"),
+            "landing_url": url,
+            "landing_domain": domain,
+            "screenshot_url": reported_shot if shot_ok else "",
+            "reported_screenshot_url": reported_shot,
+            "screenshot_available": shot_ok,
+            "ad_reference_image": item.get("image_url"),
+            "landing_evidence": {
+                "抓取次数": landing_info.get("captures"),
+                "关联广告数": landing_info.get("linkedAdCount"),
+                "首次抓取": landing_info.get("firstCapturedAt"),
+                "最近抓取": landing_info.get("lastCapturedAt"),
+            },
+            "can_decompose": bool(url or domain or shot_ok),
+            "performance_signal": {
+                "版位数": item.get("版位数"),
+                "投放天数": item.get("投放天数"),
+                "还在投": item.get("还在投"),
+                "广告网络": item.get("广告网络"),
+            },
+            "confidence": "中高" if shot_ok else ("中" if url else "低"),
+            "why_candidate": ("有 OpenAdLibrary 落地页截图，可结合页面文字拆解"
+                              if shot_ok else "截图暂不可用，将按域名当前公开页面文字做降级拆解"),
+        }
+        bucket[cid] = candidate
+        out.append(candidate)
+        if len(out) >= int(count or 8):
+            break
+    while len(bucket) > 80:
+        bucket.pop(next(iter(bucket)))
+
+    return {
+        "results": out,
+        "query": keyword,
+        "候选池": r.get("候选池"),
+        "筛选": r.get("筛选"),
+        "数据状态": r.get("数据状态", "OpenAdLibrary 实时查询成功"),
+        "截图异常数": screenshot_failures,
+        "note": ("用表格列出候选，必须带 candidate id、域名、版位数、投放天数、抓取次数和置信度。"
+                 "对 `screenshot_available=true` 的候选，必须用 `![落地页参考](screenshot_url)` 直接展示截图；"
+                 "图片可点击放大。若截图不可用，可以展示 `ad_reference_image`，但必须明确标为广告素材参考，"
+                 "绝不能说成落地页截图。提醒用户：优质仅指持续投放/版位/抓取等可观察信号，不是实际 CTR/CVR。"
+                 "用户选中后，把 candidate id 传给 decompose_landing_page。"),
+    }
+
+
+def decompose_landing_page(candidate_id: str = "", url: str = "", lang: str = "zh") -> dict:
+    """拆解一个落地页:排版、文字、offer、表单、信任背书、CTA 节奏。
+
+    candidate_id 来自 search_competitor_landing_pages;也允许用户直接给 url。
+    拆解结果会存起来,之后 summarize_landing_page_patterns 会汇总这些页面并生成 2 个新页面。
+    """
+    candidate, page = {}, {}
+    if candidate_id:
+        candidate = _landing_candidates().get(candidate_id.strip()) or {}
+        if not candidate:
+            return {"error": "没找到这个 candidate_id。请先查落地页候选,或直接传 url。"}
+        url = str(candidate.get("landing_url") or url or "")
+        domain = str(candidate.get("landing_domain") or "")
+        if url:
+            page = lp.fetch_page(url)
+            page["evidence_scope"] = "用户或平台提供的完整落地页 URL"
+        elif domain:
+            page = lp.fetch_page("https://" + domain)
+            page["evidence_scope"] = "落地页域名的当前公开首页，可能不是广告当时的完整路径"
+    elif url:
+        page = lp.fetch_page(url)
+        page["evidence_scope"] = "用户直接提供的完整 URL"
+    else:
+        return {"error": "请传 candidate_id 或完整落地页 URL。"}
+
+    screenshot_url = str(candidate.get("screenshot_url") or "")
+    image, mime_or_error = (lp.fetch_image(screenshot_url) if screenshot_url else (None, "没有可用截图"))
+    if image:
+        model = lp.decompose_screenshot(image, mime_or_error, page, ad_context=candidate, lang=lang)
+        evidence_used = ["OpenAdLibrary 落地页截图", page.get("evidence_scope")]
+    elif not page.get("error"):
+        model = lp.decompose(page, ad_context=candidate, lang=lang)
+        evidence_used = [page.get("evidence_scope"), f"截图未使用：{mime_or_error}"]
+    else:
+        return {"error": "截图和页面文字都无法取得，不能可靠拆解。",
+                "截图错误": mime_or_error, "页面错误": page.get("error"),
+                "note": "请换一个候选，或让用户提供完整 URL/页面截图。"}
+    if model.get("error"):
+        return model
+    key = candidate_id.strip() or page.get("url") or url
+    wrapped = {"candidate": candidate, "page": {k: v for k, v in page.items() if k != "text"},
+               "evidence_used": evidence_used, "analysis": model}
+    _landing_models()[key] = wrapped
+    while len(_landing_models()) > 40:
+        _landing_models().pop(next(iter(_landing_models())))
+    return {
+        "落地页拆解": wrapped,
+        "已拆解总数": len(_landing_models()),
+        "note": ("重点讲三个部分:①为什么可能表现好;②关键词和关键信息;"
+                 "③哪些优点可以迁移、哪些不能照搬。拆够 2 个后,"
+                 "可以调用 summarize_landing_page_patterns 汇总并生成两个新落地页。"),
+    }
+
+
+def summarize_landing_page_patterns(brand: str = "", offer: str = "",
+                                    audience: str = "", lang: str = "zh") -> dict:
+    """汇总已拆解落地页,并生成 2 个新的 HTML 落地页草稿。
+
+    要先拆解至少 1 个真实页面;2 个以上更稳。生成结果会保存到本地,
+    返回 preview_url 供用户点击预览。
+    """
+    models = list(_landing_models().values())
+    if not models:
+        return {"error": "还没有拆解过落地页。请先用 decompose_landing_page 拆至少 1 个页面。"}
+    out = lp.summarize(models, brand=brand, offer=offer, audience=audience, lang=lang)
+    if out.get("error"):
+        return out
+    pages = lp.save_pages(out.get("新落地页") or [])
+    out["新落地页"] = pages
+    _LANDING_PAGES_BY_USER[CURRENT_USER_ID.get() or "-"] = list(pages)
+    return {
+        **out,
+        "依据页面数": len(models),
+        "note": ("先总结共同规律和 offer 设计建议,再列出两个新落地页的 preview_url。"
+                 "提醒用户:这是可预览的 HTML 初稿,学的是结构和说服逻辑,没有复制竞品页面。"),
+    }
+
+
+def list_cloudflare_landing_resources(query: str = "", limit: int = 50) -> dict:
+    """发布前读取可选域名、既有 Pages 项目和域名映射；只读，不会修改 Cloudflare。"""
+    try:
+        return cfp.list_resources(query=query, limit=limit)
+    except Exception as e:
+        return {"error": str(e)[:500]}
+
+
+def _generated_landing_file(filename: str) -> Path:
+    name = Path(str(filename or "")).name
+    path = (lp.GENERATED_DIR / name).resolve()
+    root = lp.GENERATED_DIR.resolve()
+    if not name or path.parent != root or path.suffix.lower() != ".html" or not path.is_file():
+        raise ValueError(f"找不到生成的落地页文件：{name or '(空)'}")
+    return path
+
+
+def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
+                                   tracking_script: str, variant_a_file: str = "",
+                                   variant_b_file: str = "",
+                                   allow_replace: bool = False) -> dict:
+    """登记 Cloudflare Pages A/B 发布待办；用户下一条消息确认后才真正发布。
+
+    allow_replace:**只有用户明确说了「覆盖发布」才允许传 true**。
+    发布是整站替换,本地历史目录丢了的话这一下会把线上旧实验全删掉
+    (ClickFlare 里的 Lander 就会指向 404)。默认 false = 遇到这种情况直接拒绝。
+    """
+    try:
+        domain = cfp.normalize_domain(domain)
+        slug = cfp.normalize_slug(slug)
+        cfp.validate_clickflare(cta_url, tracking_script)
+        latest = _landing_pages()
+        if not variant_a_file and len(latest) >= 1:
+            variant_a_file = str(latest[0].get("file") or "")
+        if not variant_b_file and len(latest) >= 2:
+            variant_b_file = str(latest[1].get("file") or "")
+        file_a = _generated_landing_file(variant_a_file)
+        file_b = _generated_landing_file(variant_b_file)
+        # 提案阶段就检查代码层占位符，不能等用户确认后才发现页面无法安全注入。
+        cfp.inject_tracking(file_a.read_text(encoding="utf-8"), cta_url, tracking_script)
+        cfp.inject_tracking(file_b.read_text(encoding="utf-8"), cta_url, tracking_script)
+        zone = cfp.owned_zone(domain)
+        resources = cfp.list_resources(query=zone, limit=10)
+        # **提案阶段就把覆盖风险查出来**,和占位符检查一个道理:
+        # 不能等用户点了头、真要上传时才发现"这一下会删掉线上的旧页面"
+        risk = cfp.replace_risk(domain, slug)
+    except Exception as e:
+        return {"error": str(e)[:500]}
+
+    if risk["risky"] and not allow_replace:
+        lost = "、".join(risk["missing_locally"]) or "无法列出(本地记录也丢了)"
+        return {"error": (
+            f"没有登记发布待办。Cloudflare 上项目 {risk['project']} 已经存在,"
+            f"但本地 data/ 里没有任何历史实验目录 —— 发布是**整站替换**,"
+            f"这一次会把线上现有页面全部删掉(已知的旧实验:{lost})。"
+            "ClickFlare 里的 Lander 若还指着它们,买来的流量就会落到 404 上。"),
+            "note": ("如实把上面这段讲给用户,并给两条路:"
+                     "①先恢复服务器上 data/ 目录的备份,再来发布(推荐);"
+                     "②确实要整站重来,就请他明确说一句「覆盖发布」,"
+                     "你再带 allow_replace=true 重新登记。**不许自己替他决定。**")}
+
+    candidate = {
+        "type": "publish_landing_pages",
+        "domain": domain,
+        "slug": slug,
+        "cta_url": cta_url.strip(),
+        "tracking_script": tracking_script.strip(),
+        "variant_a_file": file_a.name,
+        "variant_b_file": file_b.name,
+        "variant_a_sha256": hashlib.sha256(file_a.read_bytes()).hexdigest(),
+        "variant_b_sha256": hashlib.sha256(file_b.read_bytes()).hexdigest(),
+        "allow_replace": bool(allow_replace),
+        "user_id": CURRENT_USER_ID.get(),
+        "seq": _seq(),
+    }
+    dup = _find_duplicate(candidate)
+    if dup:
+        return {"action_id": dup,
+                "note": f"相同发布待办已经存在（编号 {dup}），请复述后等待用户确认。"}
+    action_id = uuid.uuid4().hex[:8]
+    PENDING_ACTIONS[action_id] = candidate
+    _save_actions()
+    mapping = (resources.get("domain_project_mappings") or {}).get(domain) or {}
+    project = mapping.get("project") or cfp.project_name_for_domain(domain)
+    return {
+        "action_id": action_id,
+        "pending": {
+            "Cloudflare域名": domain,
+            "Pages项目": project,
+            "项目处理": "复用现有项目" if mapping else "新域名，自动创建项目",
+            "A版": f"https://{domain}/{slug}/a/",
+            "B版": f"https://{domain}/{slug}/b/",
+            "CTA地址": cta_url,
+            "追踪脚本": "已收到，将原样植入（内容不在聊天中回显）",
+            "线上保留的旧实验": "、".join(risk["local_slugs"]) or "无（这是该域名的第一个实验）",
+            **({"⚠️覆盖发布": "线上现有页面会被整站替换掉，这是用户明确同意的"}
+               if allow_replace and risk["risky"] else {}),
+        },
+        "note": ("这里只登记了发布待办，尚未创建项目、改 DNS 或上传页面。"
+                 "请完整复述域名、项目、A/B 地址和 CTA，等用户下一条消息明确确认后调用 confirm_action。"),
+    }
+
+
+def _execute_publish_landing_pages(action: dict) -> dict:
+    file_a = _generated_landing_file(action.get("variant_a_file", ""))
+    file_b = _generated_landing_file(action.get("variant_b_file", ""))
+    if hashlib.sha256(file_a.read_bytes()).hexdigest() != action.get("variant_a_sha256"):
+        return {"error": "A 版页面在确认前发生了变化，已停止发布，请重新登记。"}
+    if hashlib.sha256(file_b.read_bytes()).hexdigest() != action.get("variant_b_sha256"):
+        return {"error": "B 版页面在确认前发生了变化，已停止发布，请重新登记。"}
+    try:
+        return cfp.publish_ab(action["domain"], action["slug"], file_a, file_b,
+                              action["cta_url"], action["tracking_script"],
+                              user_id=action.get("user_id") or "",
+                              allow_replace=bool(action.get("allow_replace")))
+    except Exception as e:
+        return {"error": str(e)[:1500]}
+
+
 # ===== 创意拆解与方案(P0:只出文字,不出图)=====
 # 拆解过的素材模型,按 image_url 存着。summarize 那步要一次看多条,
 # 靠 AI 把几百行 JSON 在工具参数里传来传去不现实,也容易被截断 ——
@@ -1308,7 +1641,6 @@ def get_report(level: str = "campaign", start_date: str = "", end_date: str = ""
 
 
 # ============ 写操作的护栏:先登记 → 隔一条用户消息 → 确认才执行 ============
-import uuid  # noqa: E402
 
 _ACTIONS_FILE = Path(__file__).with_name("pending_actions.json")
 
@@ -1377,9 +1709,15 @@ def _find_duplicate(candidate: dict) -> str:
 def list_pending_actions() -> dict:
     """查看保险箱:所有已登记、还没执行的待办(含编号 action_id)。
     用户确认后若不记得编号,先用这个查,严禁重新登记同一件事。"""
+    mode = CURRENT_CHAT_MODE.get()
+    visible = [(aid, a) for aid, a in PENDING_ACTIONS.items()
+               if mode == "campaign"
+               or (mode == "creative" and a.get("type") == "make_creatives")
+               or (mode == "landing" and a.get("type") == "publish_landing_pages")]
     return {"pending_actions": [
-        {"action_id": aid, **{k: v for k, v in a.items() if k != "seq"}}
-        for aid, a in PENDING_ACTIONS.items()
+        {"action_id": aid, **{k: ("[已保存，不回显]" if k == "tracking_script" else v)
+                              for k, v in a.items() if k != "seq"}}
+        for aid, a in visible
     ] or "保险箱是空的,没有待执行的待办"}
 
 
@@ -1715,6 +2053,8 @@ def confirm_action(action_id: str) -> dict:
     action = PENDING_ACTIONS.get(action_id)
     if not action:
         return {"error": f"找不到待办 {action_id}(可能已执行/已取消,或 id 有误)"}
+    if action.get("user_id") and CURRENT_USER_ID.get() and action.get("user_id") != CURRENT_USER_ID.get():
+        return {"error": "这个待办属于另一个账号，不能执行。"}
     if action["seq"] == _seq():
         # 保险丝:登记和执行发生在同一条用户消息里 → 物理拦截
         return {"error": f"保险丝拦截:登记和执行不能在同一条用户消息里完成。待办 {action_id} 已登记好,"
@@ -1730,6 +2070,8 @@ def confirm_action(action_id: str) -> dict:
             result = _execute_create_campaign(action)
         elif action.get("type") == "make_creatives":
             result = _execute_make_creatives(action)
+        elif action.get("type") == "publish_landing_pages":
+            result = _execute_publish_landing_pages(action)
         else:
             # 一次可能要改好几个对象(开启广告要三层一起开)。逐个改、逐个记账,
             # 有失败的也要如实说明是哪一个 —— 别让用户以为全成了。
@@ -1758,7 +2100,10 @@ def confirm_action(action_id: str) -> dict:
             _save_actions()
         else:
             _executed().append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
-        return {"executed": {k: v for k, v in action.items() if k != "seq"}, **(result if isinstance(result, dict) else {"detail": result})}
+        safe_action = {k: ("[已保存，不回显]" if k == "tracking_script" else v)
+                       for k, v in action.items() if k != "seq"}
+        return {"executed": safe_action,
+                **(result if isinstance(result, dict) else {"detail": result})}
     except Exception as e:
         print(f"[write-op] 待办 {action_id} 异常: {e}", flush=True)
         _executed().append({"id": action_id, "ok": False, "detail": str(e)[:220]})
@@ -1857,6 +2202,8 @@ def cancel_action(action_id: str) -> dict:
 NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
+    search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
+    list_cloudflare_landing_resources, propose_publish_landing_pages,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -1873,6 +2220,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]  # 完整的聊天记录(API 不记事,每次都要全量发)
     lang: str = "zh"             # 界面语言:"zh" 中文 / "en" 英文,决定 AI 用哪种语言回答
+    mode: str = "campaign"       # campaign=投放助手 creative=素材工作室 landing=落地页工作室
 
 
 @app.get("/")
@@ -2228,6 +2576,22 @@ def dashboard_page():
     return FileResponse(Path(__file__).with_name("static") / "dashboard.html")
 
 
+@app.get("/landing-pages/{filename}")
+def landing_page_preview(filename: str):
+    """预览本机生成的落地页；只允许访问生成目录下的 HTML 文件。"""
+    if "/" in filename or "\\" in filename or not filename.lower().endswith(".html"):
+        return JSONResponse(status_code=400, content={"error": "无效的预览文件名"})
+    path = lp.GENERATED_DIR / filename
+    if not path.is_file():
+        return JSONResponse(status_code=404, content={"error": "落地页预览不存在或已过期"})
+    return FileResponse(path, media_type="text/html; charset=utf-8", headers={
+        "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+                                    "font-src data:; form-action 'none'; base-uri 'none'; sandbox"),
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    })
+
+
 # ============ 登录 / 注册 / 每个账号的聊天记录 ============
 
 def _current_user(request: Request) -> dict | None:
@@ -2494,6 +2858,7 @@ def _system_prompt_now(lang: str = "zh") -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     english = str(lang).lower().startswith("en")
 
+    mode = CURRENT_CHAT_MODE.get()
     if english:
         prompt = SYSTEM_PROMPT_EN + f"\n\nToday's date (UTC) is {today}; use it when working out ranges like \"the last N days\"."
         prompt += ("\n\nKNOWN LANDING-PAGE TYPES: " + " / ".join(KNOWN_AD_TYPES)
@@ -2505,16 +2870,53 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    + "。落地页里能对上其中一个就直接用它命名(告诉用户一声);"
                      "**对不上就必须问用户「这次用什么关键词命名?」,不许自己编一个。**")
 
-    if sched.recent_runs:
+    if mode == "creative":
+        prompt += ("\n\n[CREATIVE STUDIO MODE] You are a creative-production partner, not a campaign operator. "
+                   "Help research, upload, analyze, plan and generate ad creatives. You may generate images only after "
+                   "the normal cost-confirmation step. You must not create ads, change delivery status, or schedule actions."
+                   if english else
+                   "\n\n【素材工作室模式】你现在是素材制作搭档,不是投放操作员。专注于找素材、上传、拆解、"
+                   "归纳创意、写标题描述和生成广告图。生图仍须先报价并等待用户确认。"
+                   "严禁创建广告、开启/暂停投放或登记定时任务;素材做好后只能建议用户切换到投放助手。")
+    elif mode == "landing":
+        prompt += ("\n\n[LANDING PAGE STUDIO MODE] You are a direct-response landing-page strategist. "
+                   "Find candidates through OpenAdLibrary, clearly distinguish performance signals from verified "
+                   "conversion data, show available landing-page screenshots directly, and analyze screenshots plus "
+                   "extracted public page text with explicit evidence limits. Extract layout, "
+                   "copy, offer, trust, form and CTA patterns, then create two original HTML landing-page drafts. "
+                   "Never copy competitor branding or claims, and never create, pause, or schedule ads. "
+                   "For publishing, first collect the exact ClickFlare CTA URL and lander script; never invent or "
+                   "rewrite them. List Cloudflare resources if the domain is unknown. Register publishing with "
+                   "propose_publish_landing_pages and only call confirm_action after confirmation in the next message."
+                   if english else
+                   "\n\n【落地页工作室模式】你现在是直效落地页策略师。先从 OpenAdLibrary 找仍在投、"
+                   "投放较久或版位较多的候选，并明确这些只是表现信号，不是真实 CTR/CVR。截图可用时必须直接"
+                   "展示，并结合截图与公开页面文字拆解；只有域名首页时必须说明不一定是当时的完整投放路径。"
+                   "从排版、文案、offer、信任背书、表单和 CTA 节奏分析，提炼关键词"
+                   "与可迁移优点，最后生成两个方向不同、可预览的原创 HTML 落地页。严禁照抄竞品品牌、"
+                   "承诺和具体优惠，也严禁创建、启停广告或登记定时任务。发布前必须向用户取得原样的"
+                   "ClickFlare CTA Click URL 和 Lander Tracking Script，绝不编造或改写；域名没定时先读取"
+                   "Cloudflare 可选域名。发布必须先用 propose_publish_landing_pages 登记，向用户完整复述，"
+                   "只有用户下一条消息明确确认后才能调用 confirm_action。")
+
+    if mode == "campaign" and sched.recent_runs:
         prompt += ("\n\n【定时任务最近的执行结果】(代码层记录,若用户还不知道,主动告知一句):\n"
                    + "\n".join(f"- {m}" for m in sched.recent_runs))
-    if PENDING_ACTIONS:
+    visible_actions = {aid: a for aid, a in PENDING_ACTIONS.items()
+                       if mode == "campaign"
+                       or (mode == "creative" and a.get("type") == "make_creatives")
+                       or (mode == "landing" and a.get("type") == "publish_landing_pages")}
+    if visible_actions:
         lines = []
-        for aid, a in PENDING_ACTIONS.items():
-            what = (f"create ad \"{a.get('campaign_name')}\"" if english else f"新建广告「{a.get('campaign_name')}」") \
-                if a.get("type") == "create_campaign" else \
-                (f"{a.get('status')} {a.get('level')} \"{a.get('name') or a.get('object_id')}\"" if english
-                 else f"{a.get('status')} {a.get('level')}「{a.get('name') or a.get('object_id')}」")
+        for aid, a in visible_actions.items():
+            if a.get("type") == "create_campaign":
+                what = f"create ad \"{a.get('campaign_name')}\"" if english else f"新建广告「{a.get('campaign_name')}」"
+            elif a.get("type") == "publish_landing_pages":
+                what = (f"publish landing A/B to {a.get('domain')}/{a.get('slug')}"
+                        if english else f"发布落地页 A/B 到 {a.get('domain')}/{a.get('slug')}")
+            else:
+                what = (f"{a.get('status')} {a.get('level')} \"{a.get('name') or a.get('object_id')}\"" if english
+                        else f"{a.get('status')} {a.get('level')}「{a.get('name') or a.get('object_id')}」")
             lines.append(f"- id {aid}: {what}" if english else f"- 编号 {aid}:{what}(已登记,待执行)")
         if english:
             prompt += ("\n\n[PENDING ACTIONS] Already registered — do NOT register them again:\n"
@@ -2524,6 +2926,46 @@ def _system_prompt_now(lang: str = "zh") -> str:
             prompt += ("\n\n【保险箱现状】以下待办已登记完毕,严禁重新登记:\n" + "\n".join(lines) +
                        "\n用户已确认/同意时,直接调 confirm_action(用上面的编号)执行,不要再要求确认。")
     return prompt
+
+
+CREATIVE_TOOL_NAMES = {
+    "list_organizations", "list_ad_accounts", "recommend_creatives",
+    "search_stock_creatives", "search_competitor_ads", "my_ad_categories",
+    "platform_kind", "native_market_scan", "decompose_creative",
+    "summarize_creative_patterns", "use_found_creative",
+    "propose_make_creatives", "confirm_action", "cancel_action", "list_pending_actions",
+}
+
+LANDING_TOOL_NAMES = {
+    "list_organizations", "list_ad_accounts", "my_ad_categories", "platform_kind",
+    "native_market_scan", "search_competitor_ads", "search_competitor_landing_pages",
+    "decompose_landing_page", "summarize_landing_page_patterns",
+    "list_cloudflare_landing_resources", "propose_publish_landing_pages",
+    "confirm_action", "cancel_action", "list_pending_actions",
+}
+
+
+def _tool_allowed(name: str) -> bool:
+    mode = CURRENT_CHAT_MODE.get()
+    if mode == "creative":
+        return name in CREATIVE_TOOL_NAMES
+    if mode == "landing":
+        return name in LANDING_TOOL_NAMES
+    return True
+
+
+def _tool_call(name: str, args: dict) -> dict:
+    """执行模型工具；工作室模式在代码层拦住投放写操作。"""
+    if not _tool_allowed(name):
+        return {"error": "当前工作室不能执行这项投放操作。请切换到投放助手。"}
+    if CURRENT_CHAT_MODE.get() in ("creative", "landing") and name in ("confirm_action", "cancel_action"):
+        action = PENDING_ACTIONS.get(str(args.get("action_id") or ""))
+        expected = "make_creatives" if CURRENT_CHAT_MODE.get() == "creative" else "publish_landing_pages"
+        if not action or action.get("type") != expected:
+            label = "素材" if CURRENT_CHAT_MODE.get() == "creative" else "落地页"
+            return {"error": f"{label}工作室不能确认或取消其它工作区的待办。"}
+    fn = OPENAI_TOOL_FUNCS.get(name)
+    return fn(**args) if fn else {"error": f"未知工具 {name}"}
 
 
 # 遇到这些错误码就"换人再试":429=额度用尽或太频繁,5xx=上游服务繁忙/临时故障。
@@ -2646,7 +3088,7 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
     """Gemini 的工具调用循环(手动挡)。流式时边收边把文字播报出去。"""
     cfg = genai_types.GenerateContentConfig(
         system_instruction=_system_prompt_now(lang),
-        tools=NEWSBREAK_TOOLS,
+        tools=[fn for fn in NEWSBREAK_TOOLS if _tool_allowed(fn.__name__)],
         # 关掉自动工具调用:我们自己执行、自己把结果贴回去。
         # 这样才能在流式下正常工作,也才能播报每一步在干什么。
         automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
@@ -2707,9 +3149,8 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
         result_parts = []
         for fc in calls:
             _emit("status", text=_tool_label(fc.name))
-            fn = OPENAI_TOOL_FUNCS.get(fc.name)
             try:
-                result = fn(**dict(fc.args or {})) if fn else {"error": f"未知工具 {fc.name}"}
+                result = _tool_call(fc.name, dict(fc.args or {}))
             except Exception as e:
                 result = {"error": str(e)}
             result_parts.append(genai_types.Part.from_function_response(
@@ -2827,6 +3268,46 @@ OPENAI_TOOL_SCHEMAS = [
                           "description": "placements=按版位数(默认,铺得广=肯花钱) days=按投放天数 recent=最近新上的"},
               "min_days": {"type": "integer", "description": "只要投放天数≥这个数的,默认0不筛"}},
              ["keyword"]),
+    _oa_tool("search_competitor_landing_pages",
+             "从 OpenAdLibrary 查疑似表现较好的落地页候选。按仍在投、投放天数、版位数筛选；"
+             "这些是表现信号而非真实转化数据。返回 candidate_id、落地页截图、域名和抓取证据；"
+             "截图可用时应直接用 Markdown 图片展示",
+             {"keyword": {"type": "string", "description": "英文品类关键词，如 roof repair"},
+              "count": {"type": "integer", "description": "候选数量，默认8"},
+              "country": {"type": "string", "description": "两位国家码，默认 US"},
+              "active_only": {"type": "boolean", "description": "是否只看仍在投的广告"},
+              "min_days": {"type": "integer", "description": "最低投放天数，默认0"}},
+             ["keyword"]),
+    _oa_tool("decompose_landing_page",
+             "抓取并拆解一个落地页，分析排版、文案、offer、信任、表单、CTA、关键词和可迁移优点。"
+             "优先传搜索结果的 candidate_id，也可传用户提供的完整 URL",
+             {"candidate_id": {"type": "string", "description": "候选结果里的 id"},
+              "url": {"type": "string", "description": "用户直接提供的完整 http(s) URL"},
+              "lang": {"type": "string", "description": "zh 或 en"}}, []),
+    _oa_tool("summarize_landing_page_patterns",
+             "汇总已拆解页面的共性、关键词和 offer 设计，并生成两个方向不同的原创 HTML 落地页",
+             {"brand": {"type": "string", "description": "自己的品牌名，可空"},
+              "offer": {"type": "string", "description": "自己的 offer，可空，空时使用占位表达"},
+              "audience": {"type": "string", "description": "目标人群，可空"},
+              "lang": {"type": "string", "description": "zh 或 en"}}, []),
+    _oa_tool("list_cloudflare_landing_resources",
+             "只读列出 Cloudflare 可选域名、现有 Pages 项目和域名映射。用户准备发布但没指定域名时先调用",
+             {"query": {"type": "string", "description": "按域名关键词筛选，可空"},
+              "limit": {"type": "integer", "description": "最多返回多少个域名，默认50，最多100"}}, []),
+    _oa_tool("propose_publish_landing_pages",
+             "登记把两个已生成页面发布为 Cloudflare Pages A/B 版本的待办。新域名自动建项目，旧域名复用；"
+             "这是外部写操作，只登记，必须等用户下一条消息确认后再 confirm_action",
+             {"domain": {"type": "string", "description": "本次选择的域名或子域名，不带路径"},
+              "slug": {"type": "string", "description": "实验路径名，如 roof-260902"},
+              "cta_url": {"type": "string", "description": "用户原样提供的 ClickFlare HTTPS CTA Click URL，严禁编造"},
+              "tracking_script": {"type": "string", "description": "用户原样提供的 ClickFlare Lander Tracking Script，严禁编造或改写"},
+              "variant_a_file": {"type": "string", "description": "生成结果中 A 版的 file；可空则用最近生成页"},
+              "variant_b_file": {"type": "string", "description": "生成结果中 B 版的 file；可空则用最近生成页"},
+              "allow_replace": {"type": "boolean",
+                                "description": "整站覆盖发布。默认 false。**只有用户明确说了「覆盖发布」才可以传 true** —— "
+                                               "发布是整站替换,本地历史目录丢失时这一下会删掉线上所有旧实验,"
+                                               "ClickFlare 里的 Lander 会指向 404。绝不许自己替用户决定"}},
+             ["domain", "slug", "cta_url", "tracking_script"]),
     _oa_tool("decompose_creative",
              "拆解一张广告素材:看懂它的版式、画面、文字层、配色、CTA 和文案角度。"
              "用户想知道某条广告为什么好、怎么设计的时候调它。只接受搜索结果里出现过的地址",
@@ -2875,6 +3356,8 @@ OPENAI_TOOL_SCHEMAS = [
 # 工具名 → 真实函数 的对照表(ChatGPT 说要调哪个,我们就去执行哪个)
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
+    search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
+    list_cloudflare_landing_resources, propose_publish_landing_pages,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
@@ -2938,10 +3421,9 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
                                     for tc in tool_calls]})
         for tc in tool_calls:
             _emit("status", text=_tool_label(tc["name"]))
-            fn = OPENAI_TOOL_FUNCS.get(tc["name"])
             try:
                 args = json.loads(tc["arguments"] or "{}")
-                result = fn(**args) if fn else {"error": f"未知工具 {tc['name']}"}
+                result = _tool_call(tc["name"], args)
             except Exception as e:
                 result = {"error": str(e)}
             msgs.append({"role": "tool", "tool_call_id": tc["id"],
@@ -2979,8 +3461,10 @@ def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, 
     上游只有这个字段能说明为什么(截断?被安全策略拦了?)。原来完全没读它,
     于是那种情况只能回一句"没有返回文字",用户和日志都拿不到任何线索。
     """
+    schemas = [s for s in OPENAI_TOOL_SCHEMAS
+               if _tool_allowed(s.get("function", {}).get("name", ""))]
     if not streaming:
-        r = client.chat.completions.create(model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS)
+        r = client.chat.completions.create(model=model, messages=msgs, tools=schemas)
         m = r.choices[0].message
         return (m.content or "",
                 [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or ""}
@@ -2989,7 +3473,7 @@ def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, 
 
     parts, slots, finish = [], {}, ""
     for chunk in client.chat.completions.create(
-            model=model, messages=msgs, tools=OPENAI_TOOL_SCHEMAS, stream=True):
+            model=model, messages=msgs, tools=schemas, stream=True):
         if not chunk.choices:
             continue
         if chunk.choices[0].finish_reason:
@@ -3237,7 +3721,7 @@ def _brain_error(e: Exception) -> tuple[int, str]:
     return 500, f"出了点问题:{e}"
 
 
-def _new_turn() -> None:
+def _new_turn(mode: str = "campaign") -> None:
     """每条用户消息开始时要做的三件事(两个接口共用)。
 
     **必须在起线程 / copy_context() 之前调**,否则设的上下文带不进线程。
@@ -3248,6 +3732,7 @@ def _new_turn() -> None:
         seq = _REQUEST_SEQ
     CURRENT_SEQ.set(seq)            # 保险丝:区分"登记"和"确认"是不是同一条消息
     CURRENT_EXECUTED.set([])        # 本轮"真实执行台账",一轮一份
+    CURRENT_CHAT_MODE.set(mode if mode in {"campaign", "creative", "landing"} else "campaign")
     load_env_file()                 # 现读 .env:刚填的钥匙不用重启就生效
 
 
@@ -3258,7 +3743,7 @@ def chat(req: ChatRequest):
     流式版本见 /api/chat/stream。这个保留着当兜底 —— 流式一旦被中间的
     反向代理缓冲住(nginx 默认会),前端可以退回来用这个。
     """
-    _new_turn()
+    _new_turn(req.mode)
     try:
         return _finalize(_route_brain(req), req.lang)
     except Exception as e:
@@ -3279,7 +3764,7 @@ def chat_stream(req: ChatRequest):
 
     大脑那几个函数是同步阻塞的,所以丢到线程里跑,靠队列把事件递出来。
     """
-    _new_turn()
+    _new_turn(req.mode)
 
     q: "queue.Queue" = queue.Queue()
     ctx = contextvars.copy_context()     # 把当前用户的凭据等上下文带进线程

@@ -16,18 +16,24 @@
 配额:Pro 5000 次/天 + 120 次/分钟的瞬时上限
 """
 
+import json
 import os
+import time
 from datetime import date, timedelta
 
 import httpx
 
-TIMEOUT = 30.0
+TIMEOUT = 45.0
 BASE_URL = "https://openadlibrary.com"
 ADS_PATH = "/api/v1/ads"
+MCP_URL = "https://mcp.openadlibrary.com/mcp"
 
 # 每分钟 120 次是硬上限,批量任务要留间隔。我们是用户点一次查一次,
 # 但以后要做批量拆解的话,别忘了这条。
 BURST_PER_MINUTE = 120
+_LANDING_SEARCH_CACHE: dict[tuple, tuple[float, dict]] = {}
+_LANDING_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_SCREENSHOT_CHECK_CACHE: dict[str, tuple[float, bool]] = {}
 
 HOWTO = ("拿 key 的办法:登录 openadlibrary.com → Settings → API keys → 新建一个,"
          "**它只在创建时显示一次**,复制下来。key 以 `oal_` 开头。"
@@ -109,12 +115,171 @@ def raw_search(**params) -> dict:
     """
     if not is_configured():
         raise OpenAdLibraryError("还没配置 OpenAdLibrary 的 API key。" + HOWTO)
-    with httpx.Client(timeout=TIMEOUT, trust_env=False) as c:
-        resp = c.get(BASE_URL + ADS_PATH, params=params, headers=_headers())
+    try:
+        with httpx.Client(timeout=TIMEOUT, trust_env=False) as c:
+            resp = c.get(BASE_URL + ADS_PATH, params=params, headers=_headers())
+    except httpx.TimeoutException as e:
+        raise OpenAdLibraryError("OpenAdLibrary 关键词搜索超时。它的全文索引当前响应较慢。") from e
+    except httpx.HTTPError as e:
+        raise OpenAdLibraryError(f"连接 OpenAdLibrary 失败:{str(e)[:120]}") from e
     data = _check(resp)
     if isinstance(data, dict) and data.get("__error"):
         raise OpenAdLibraryError(data["__error"])
     return data
+
+
+def _json_tail(text: str) -> dict:
+    """MCP 文本块前面会带一句标题，从第一个 JSON 大括号开始解析。"""
+    raw = str(text or "")
+    start = raw.find("{")
+    if start < 0:
+        return {"__error": f"MCP 没返回 JSON:{raw[:160]}"}
+    try:
+        return json.loads(raw[start:])
+    except Exception:
+        return {"__error": f"MCP 返回无法解析:{raw[:160]}"}
+
+
+def mcp_call(name: str, arguments: dict | None = None, timeout: float = 25.0) -> dict:
+    """调用 OpenAdLibrary 的只读 MCP 工具，主要用于落地页语料。"""
+    if not is_configured():
+        raise OpenAdLibraryError("还没配置 OpenAdLibrary 的 API key。" + HOWTO)
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments or {}}}
+    headers = {**_headers(), "Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    try:
+        with httpx.Client(timeout=timeout, trust_env=False) as c:
+            resp = c.post(MCP_URL, headers=headers, json=payload)
+    except httpx.TimeoutException as e:
+        raise OpenAdLibraryError(f"OpenAdLibrary 的 {name} 查询超时") from e
+    except httpx.HTTPError as e:
+        raise OpenAdLibraryError(f"连接 OpenAdLibrary MCP 失败:{str(e)[:120]}") from e
+    data = _check(resp)
+    if data.get("__error"):
+        raise OpenAdLibraryError(data["__error"])
+    if data.get("error"):
+        raise OpenAdLibraryError(str(data["error"].get("message") or data["error"])[:200])
+    blocks = ((data.get("result") or {}).get("content") or [])
+    for block in blocks:
+        if block.get("type") == "text":
+            parsed = _json_tail(block.get("text") or "")
+            if parsed.get("__error"):
+                continue
+            return parsed
+    return {"__error": "OpenAdLibrary MCP 没有返回可用文字数据"}
+
+
+def landing_page_info(domain: str) -> dict:
+    """读取一个落地页域名的抓取次数、截图和关联广告数。"""
+    domain = (domain or "").strip().lower()
+    cached = _LANDING_INFO_CACHE.get(domain)
+    if cached and time.time() - cached[0] < 1800:
+        return dict(cached[1])
+    d = mcp_call("get_landing_page", {"finalDomain": domain}, timeout=12)
+    shot = str(d.get("screenshotUrl") or "")
+    if shot.startswith("/"):
+        shot = BASE_URL + shot
+    d["screenshotUrl"] = shot
+    _LANDING_INFO_CACHE[domain] = (time.time(), dict(d))
+    return d
+
+
+def screenshot_available(url: str) -> bool:
+    """上游偶尔返回已经失效的截图地址；展示前快速确认，避免聊天里出现破图。"""
+    if not str(url or "").startswith(("http://", "https://")):
+        return False
+    cached = _SCREENSHOT_CHECK_CACHE.get(url)
+    if cached and time.time() - cached[0] < 600:
+        return cached[1]
+    try:
+        with httpx.Client(timeout=10, follow_redirects=True, trust_env=False) as c:
+            with c.stream("GET", url) as resp:
+                ok = resp.status_code == 200 and (resp.headers.get("content-type") or "").startswith("image/")
+                _SCREENSHOT_CHECK_CACHE[url] = (time.time(), ok)
+                return ok
+    except Exception:
+        _SCREENSHOT_CHECK_CACHE[url] = (time.time(), False)
+        return False
+
+
+def search_landing_candidates(keyword: str, count: int = 8, country: str = "US",
+                              active_only: bool = True, min_days: int = 0) -> dict:
+    """为落地页研究做的一次轻量搜索。
+
+    全文索引本身常要近 30 秒；旧实现一次取 50 条并翻 3 页，会稳定撞超时/503。
+    这里限定 adtext、只查一页、最多 16 条，再在本地筛国家和排序。
+    """
+    count = max(1, min(int(count or 8), 12))
+    cache_key = ((keyword or "").strip().lower(), count, (country or "").upper(),
+                 bool(active_only), int(min_days or 0))
+    cached = _LANDING_SEARCH_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < 900:
+        return dict(cached[1])
+    query = (keyword or "").strip()
+    page_size = max(8, min(count * 2, 16))
+    words = [word for word in query.split() if len(word) > 2]
+    attempts = [(query, page_size)]
+    # OpenAdLibrary 的全文索引会间歇性 503。先改用更短的品类主词和更小候选池，
+    # 最后再用 1 条的最小精确查询兜底。认证/额度错误则绝不重试。
+    if words:
+        fallback_query = words[0]
+        attempts.append((fallback_query, 4 if fallback_query != query else 1))
+    if query and attempts[-1] != (query, 1):
+        attempts.append((query, 1))
+    last_error = None
+    data = None
+    used_query = query
+    used_page_size = page_size
+    for attempt_query, attempt_size in attempts:
+        params = {"search": attempt_query, "scope": "adtext",
+                  "pageSize": attempt_size, "page": 1, "sort": "placements"}
+        if active_only:
+            params["status"] = "active"
+        try:
+            data = raw_search(**params)
+            used_query = attempt_query
+            used_page_size = attempt_size
+            break
+        except OpenAdLibraryError as e:
+            last_error = e
+            message = str(e)
+            if not any(mark in message for mark in ("HTTP 503", "暂时不可用", "超时")):
+                raise
+    if data is None:
+        # 上游短时抖动时，旧的成功结果比直接让聊天失败更有用；同时明确标记为缓存。
+        if cached:
+            stale = dict(cached[1])
+            stale["数据状态"] = "OpenAdLibrary 实时查询失败，使用上次成功缓存"
+            return stale
+        raise last_error or OpenAdLibraryError("OpenAdLibrary 落地页搜索暂时不可用")
+    rows = data.get("data") or []
+    pool, seen = [], set()
+    for raw in rows:
+        one = _normalize(raw)
+        marker = str(one.get("image_url") or raw.get("id") or "")
+        if not marker or marker in seen or not _relevant(one, keyword):
+            continue
+        seen.add(marker)
+        pool.append(one)
+    want_geo = (country or "").strip().upper()
+    if want_geo:
+        pool = [x for x in pool if not x.get("geos") or want_geo in x.get("geos", [])]
+    if min_days:
+        pool = [x for x in pool if (x.get("投放天数") or 0) >= int(min_days)]
+    pool.sort(key=lambda x: (-(x.get("版位数") or 0), -(x.get("投放天数") or 0)))
+    result = {"results": pool[:count], "query": keyword, "总匹配数": data.get("total"),
+              "候选池": f"轻量查询 1 页、{len(rows)} 条，保留 {len(pool)} 条相关候选",
+              "筛选": ("只看在投中" if active_only else "含已停投")
+                      + (f" / {want_geo}" if want_geo else " / 不限国家")}
+    if used_query != query:
+        result["数据状态"] = f"精确查询暂时不可用，已自动降级为品类主词 {used_query}"
+        result["候选池"] += f"；503 后自动改查主词 {used_query}"
+    elif used_page_size == 1 and page_size != 1:
+        result["数据状态"] = "常规查询暂时不可用，已用最小精确查询自动恢复"
+        result["候选池"] += "；503 后自动缩小为 1 条精确查询"
+    _LANDING_SEARCH_CACHE[cache_key] = (time.time(), dict(result))
+    return result
 
 
 def validate(api_key: str = "") -> tuple[bool, str]:
@@ -187,6 +352,14 @@ def _normalize(item: dict) -> dict:
     img = str(item.get("imageUrl") or "")
     if img.startswith("/"):
         img = BASE_URL + img
+    landing_url = ""
+    # 只认语义明确的字段；通用 `url` 可能是广告详情页，不能冒充真实落地页。
+    for k in ("landingUrl", "landingURL", "landingPageUrl", "landingPageURL",
+              "clickUrl", "clickURL", "destinationUrl", "destinationURL", "finalUrl"):
+        v = str(item.get(k) or "").strip()
+        if v.startswith(("http://", "https://")):
+            landing_url = v
+            break
     return {
         "image_url": img,
         "thumbnail": img,
@@ -195,6 +368,7 @@ def _normalize(item: dict) -> dict:
         "author": str(item.get("advertiserName") or item.get("advertiserDomain")
                       or item.get("trafficSource") or "(未知广告主)")[:60],
         "落地页域名": str(item.get("landingDomain") or ""),
+        "落地页链接": landing_url,
         "media_type": "IMAGE",          # 平台目前只回 NATIVE 图片广告
         "width": 0, "height": 0,        # 平台不给尺寸,下载时才知道
         "first_seen": str(first or "")[:10] or None,

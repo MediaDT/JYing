@@ -19,6 +19,16 @@ import traceback
 PASSED, FAILED = [], []
 
 
+def _read_file(path: str) -> str:
+    import pathlib
+    return pathlib.Path(path).read_text()
+
+
+def _no_comments(src: str) -> str:
+    """读源码做判断前先剥注释 —— 注释里正当地写着这些名字,直接搜会误命中(踩过多次)。"""
+    return "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("#"))
+
+
 def check(name: str, fn):
     """跑一个检查项,不管成败都继续往下跑,最后统一汇总。"""
     try:
@@ -222,6 +232,283 @@ def test_pure_logic():
         if empty["落地页域名"] != "":
             bad.append("平台没给落地页时居然编了一个")
         return bad or True
+
+    def t_landing_search_is_lightweight():
+        """落地页搜索不能再回到 50 条×3 页；全文索引会因此稳定超时/503。"""
+        import openadlibrary_client as oal
+        seen = {}
+        original = oal.raw_search
+        oal._LANDING_SEARCH_CACHE.clear()
+        def fake(**params):
+            seen.update(params)
+            return {"total": 1, "data": [{
+                "id": "a", "headline": "Roof repair nearby", "imageUrl": "/a.webp",
+                "landingDomain": "roof.example", "placements": 9, "geos": ["US"],
+                "isActive": True, "firstSeenAt": "2026-01-01T00:00:00Z",
+                "lastSeenAt": "2026-02-01T00:00:00Z"}]}
+        try:
+            oal.raw_search = fake
+            result = oal.search_landing_candidates("roof repair", count=8, country="US")
+        finally:
+            oal.raw_search = original
+            oal._LANDING_SEARCH_CACHE.clear()
+        bad = []
+        if seen.get("scope") != "adtext" or seen.get("page") != 1:
+            bad.append(f"没有限定 adtext/单页:{seen}")
+        if int(seen.get("pageSize") or 99) > 16:
+            bad.append(f"候选池又开太大:{seen.get('pageSize')}")
+        if not result.get("results"):
+            bad.append("轻量搜索没有保留相关结果")
+        return bad or True
+
+    def t_landing_search_retries_503():
+        """精确全文搜索 503 时应自动缩小查询，不应把第三方错误直接丢给聊天。"""
+        import openadlibrary_client as oal
+        calls = []
+        original = oal.raw_search
+        oal._LANDING_SEARCH_CACHE.clear()
+        def fake(**params):
+            calls.append(dict(params))
+            if len(calls) == 1:
+                raise oal.OpenAdLibraryError("OpenAdLibrary 暂时不可用(HTTP 503)")
+            return {"total": 1, "data": [{
+                "id": "b", "headline": "Roof repair estimate", "imageUrl": "/b.webp",
+                "landingDomain": "retry.example", "placements": 7, "geos": ["US"],
+                "isActive": True, "firstSeenAt": "2026-01-01T00:00:00Z",
+                "lastSeenAt": "2026-02-01T00:00:00Z"}]}
+        try:
+            oal.raw_search = fake
+            result = oal.search_landing_candidates("roof repair", count=8, country="US")
+        finally:
+            oal.raw_search = original
+            oal._LANDING_SEARCH_CACHE.clear()
+        bad = []
+        if len(calls) != 2:
+            bad.append(f"503 后没有且只重试一次:{calls}")
+        if len(calls) > 1 and (calls[1].get("search") != "roof" or calls[1].get("pageSize") != 4):
+            bad.append(f"降级查询没有缩小:{calls[1]}")
+        if not result.get("results") or "自动降级" not in result.get("数据状态", ""):
+            bad.append(f"重试成功后没有返回候选/状态:{result}")
+        return bad or True
+
+    def t_landing_search_has_last_resort():
+        """常规和主词查询都 503 时，还有最小精确查询这一级兜底。"""
+        import openadlibrary_client as oal
+        calls = []
+        original = oal.raw_search
+        oal._LANDING_SEARCH_CACHE.clear()
+        def fake(**params):
+            calls.append(dict(params))
+            if len(calls) < 3:
+                raise oal.OpenAdLibraryError("OpenAdLibrary 暂时不可用(HTTP 503)")
+            return {"total": 1, "data": [{
+                "id": "c", "headline": "Roof repair quote", "imageUrl": "/c.webp",
+                "landingDomain": "last.example", "placements": 4, "geos": ["US"]}]}
+        try:
+            oal.raw_search = fake
+            result = oal.search_landing_candidates("roof repair", count=8, country="US")
+        finally:
+            oal.raw_search = original
+            oal._LANDING_SEARCH_CACHE.clear()
+        bad = []
+        if len(calls) != 3 or calls[-1].get("search") != "roof repair" or calls[-1].get("pageSize") != 1:
+            bad.append(f"最后一级不是最小精确查询:{calls}")
+        if not result.get("results") or "最小精确查询" not in result.get("数据状态", ""):
+            bad.append(f"最后一级成功后未正常返回:{result}")
+        return bad or True
+
+    check("竞品 API 参数仍是实测可用口径", t_competitor_params_verified)
+    check("竞品字段映射没有把域名/素材编错", t_competitor_normalize)
+    check("落地页搜索限制为 adtext 单页小候选池", t_landing_search_is_lightweight)
+    check("落地页搜索遇到 503 会缩小查询重试", t_landing_search_retries_503)
+    check("落地页搜索连续 503 仍有最小查询兜底", t_landing_search_has_last_resort)
+
+    def t_cloudflare_landing_template():
+        """CTA 与追踪脚本必须由代码精确注入，不能让模型猜地址或改脚本。"""
+        import cloudflare_pages as cfp
+        source = ('<html><body><a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
+                  '<a href="[[CLICKFLARE_CTA_URL]]">Again</a>'
+                  '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+        script = '<script src="https://track.example/cf/lander.js"></script>'
+        out, count = cfp.inject_tracking(source, "https://track.example/cf/click/1", script)
+        bad = []
+        if count != 2 or out.count("https://track.example/cf/click/1") != 2:
+            bad.append("没有把所有 CTA 精确替换")
+        if script not in out or "[[CLICKFLARE" in out or "<!--<script" in out:
+            bad.append("追踪脚本没有正确替换注释占位符")
+        try:
+            cfp.inject_tracking("<html></html>", "https://track.example/cf/click/1", script)
+            bad.append("缺少 CTA 占位符的旧页面居然允许发布")
+        except cfp.CloudflarePagesError:
+            pass
+        return bad or True
+
+    def t_cloudflare_domain_projects_are_dynamic():
+        """项目名按域名稳定生成；换域名就换项目，而不是读一个固定 LANDING_DOMAIN。"""
+        import cloudflare_pages as cfp
+        first = cfp.project_name_for_domain("roof.example.com")
+        same = cfp.project_name_for_domain("https://roof.example.com/")
+        other = cfp.project_name_for_domain("solar.example.com")
+        bad = []
+        if first != same:
+            bad.append("同一域名没有复用同一个项目名")
+        if first == other:
+            bad.append("不同域名生成了同一个项目名")
+        if len(first) > 58 or not first.startswith("landing-"):
+            bad.append(f"Pages 项目名不合法:{first}")
+        return bad or True
+
+    def t_cloudflare_publish_confirmation_gate():
+        """发布会创建项目/改域名，必须隔一条用户消息确认，且脚本不能回显。"""
+        import uuid
+        import agent_server as srv
+        import cloudflare_pages as cfp
+        uid = "smoke-cloudflare"
+        suffix = uuid.uuid4().hex[:8]
+        names = [f"{suffix}-a.html", f"{suffix}-b.html"]
+        source = ('<html><body><a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
+                  '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+        paths = [srv.lp.GENERATED_DIR / name for name in names]
+        original_list, original_publish, original_zone = cfp.list_resources, cfp.publish_ab, cfp.owned_zone
+        user_token = srv.CURRENT_USER_ID.set(uid)
+        mode_token = srv.CURRENT_CHAT_MODE.set("landing")
+        seq_token = srv.CURRENT_SEQ.set(81001)
+        aid = ""
+        try:
+            for path in paths:
+                path.write_text(source, encoding="utf-8")
+            srv._LANDING_PAGES_BY_USER[uid] = [{"file": names[0]}, {"file": names[1]}]
+            cfp.list_resources = lambda *args, **kwargs: {
+                "zones": [{"name": "example.com"}], "projects": [],
+                "domain_project_mappings": {}}
+            cfp.owned_zone = lambda domain: "example.com"
+            cfp.publish_ab = lambda *args, **kwargs: {
+                "done": True, "created": {"variant_a_url": "https://lp.example.com/test/a/",
+                                             "variant_b_url": "https://lp.example.com/test/b/"}}
+            proposed = srv.propose_publish_landing_pages(
+                "lp.example.com", "test", "https://track.example/cf/click/1",
+                '<script src="https://track.example/lander.js"></script>')
+            aid = proposed.get("action_id", "")
+            same_turn = srv.confirm_action(aid)
+            pending = srv.list_pending_actions()
+            srv.CURRENT_SEQ.set(81002)
+            executed = srv.confirm_action(aid)
+            bad = []
+            if not aid or "保险丝" not in same_turn.get("error", ""):
+                bad.append("同一条消息内发布没有被保险丝拦截")
+            if "https://track.example/lander.js" in str(pending):
+                bad.append("待办列表回显了完整 Tracking Script")
+            if not executed.get("done") or aid in srv.PENDING_ACTIONS:
+                bad.append(f"下一条确认没有执行成功:{executed}")
+            return bad or True
+        finally:
+            cfp.list_resources, cfp.publish_ab, cfp.owned_zone = original_list, original_publish, original_zone
+            if aid:
+                srv.PENDING_ACTIONS.pop(aid, None)
+                srv._save_actions()
+            srv._LANDING_PAGES_BY_USER.pop(uid, None)
+            for path in paths:
+                path.unlink(missing_ok=True)
+            srv.CURRENT_SEQ.reset(seq_token)
+            srv.CURRENT_CHAT_MODE.reset(mode_token)
+            srv.CURRENT_USER_ID.reset(user_token)
+
+    check("Cloudflare 发布模板精确注入 ClickFlare", t_cloudflare_landing_template)
+    check("Cloudflare Pages 项目按域名动态生成和复用", t_cloudflare_domain_projects_are_dynamic)
+    check("Cloudflare A/B 发布经过二次确认保护", t_cloudflare_publish_confirmation_gate)
+
+    # ===== 整站替换的护栏 =====
+    # `wrangler pages deploy <目录>` 是**整站替换**,而那个目录在本地 data/ 里,
+    # data/ 不进 git。它一丢(换机器/重装/没备份),项目名还能靠域名 hash 认回来,
+    # 但本地没有历史实验目录 → 这一次部署会把线上所有旧实验删掉,
+    # 而 ClickFlare 里的 Lander 还指着老地址 —— 买来的流量落到 404 上,钱照花。
+    def t_replace_guard():
+        import shutil
+        import tempfile
+        from pathlib import Path as _P
+        import cloudflare_pages as cfp
+
+        tmp = _P(tempfile.mkdtemp(prefix="lpguard-"))
+        keep = (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._project_exists,
+                cfp._ensure_project, cfp._ensure_domain, cfp._wrangler_deploy,
+                cfp.owned_zone, cfp._api)
+        try:
+            cfp.SITES_DIR, cfp.MAPPING_FILE = tmp / "sites", tmp / "map.json"
+            made, uploaded = set(), []
+            cfp._api = lambda *a, **k: {"success": True, "result": []}
+            cfp.owned_zone = lambda d: "example.com"
+            cfp._project_exists = lambda n: n in made
+            cfp._ensure_project = lambda n: (n not in made) and (made.add(n) or True)
+            cfp._ensure_domain = lambda p, d: {"name": d, "status": "active"}
+            cfp._wrangler_deploy = lambda d, p, s2: (
+                uploaded.append(sorted(str(x.relative_to(d)) for x in _P(d).rglob("*.html")))
+                or "https://x.pages.dev")
+
+            page = ('<html><body><a href="[[CLICKFLARE_CTA_URL]]">go</a>'
+                    '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+            fa, fb = tmp / "a.html", tmp / "b.html"
+            fa.write_text(page); fb.write_text(page)
+            cta = "https://t.example.com/cf/click/1"
+            scr = '<script src="https://t.example.com/l.js"></script>'
+
+            cfp.publish_ab("lp.example.com", "one", fa, fb, cta, scr)
+            cfp.publish_ab("lp.example.com", "two", fa, fb, cta, scr)
+            if len([x for x in uploaded[-1] if "/" in x]) != 4:
+                return f"同域名第二次发布把第一个实验弄丢了:{uploaded[-1]}"
+
+            # 模拟 data/ 丢失:目录和映射都没了,但 Cloudflare 上项目还在
+            shutil.rmtree(cfp.SITES_DIR)
+            cfp.MAPPING_FILE.unlink()
+            try:
+                cfp.publish_ab("lp.example.com", "three", fa, fb, cta, scr)
+                return "本地历史丢了还照发不误 —— 线上旧实验会被静默删掉"
+            except cfp.CloudflarePagesError as e:
+                if "整站替换" not in str(e):
+                    return f"拦住了但没说清原因:{str(e)[:80]}"
+
+            # 用户明确同意「覆盖发布」时要放行
+            cfp.publish_ab("lp.example.com", "three", fa, fb, cta, scr, allow_replace=True)
+
+            # 根路径:不许自动跳转、也不许把实验清单公开
+            root = (cfp.SITES_DIR / next(iter(made)) / "index.html").read_text()
+            if "http-equiv" in root.lower():
+                return "根路径还在自动跳转(裸访问会算到 A 版头上,审核也只看到跳转页)"
+            if "three" in root:
+                return "根路径把在跑的实验清单公开了"
+            return None
+        finally:
+            (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._project_exists, cfp._ensure_project,
+             cfp._ensure_domain, cfp._wrangler_deploy, cfp.owned_zone, cfp._api) = keep
+            shutil.rmtree(tmp, ignore_errors=True)
+    check("本地历史丢失时拒绝整站覆盖(除非用户明确同意)", t_replace_guard)
+
+    # 发布是**不可逆的外部写操作**:后端还在传、前端已经说"等太久了",
+    # 用户很可能再确认一次 → 发布两遍。所以上传超时必须小于前端的 180 秒。
+    def t_upload_timeout():
+        import cloudflare_pages as cfp
+        if cfp.UPLOAD_TIMEOUT_S >= 180:
+            return f"上传超时 {cfp.UPLOAD_TIMEOUT_S}s 不小于前端的 180s,用户会以为失败而重复确认"
+        src = _no_comments(_read_file("cloudflare_pages.py"))
+        if "timeout=UPLOAD_TIMEOUT_S" not in src:
+            return "常量定义了但没真的用上"
+        return None
+    check("发布上传超时小于前端等待上限", t_upload_timeout)
+
+    # 提案阶段就要把覆盖风险查出来,和占位符检查一个道理:
+    # 不能等用户点了头、真要上传时才发现"这一下会删掉线上的旧页面"
+    def t_risk_checked_at_propose():
+        import inspect
+        import agent_server as srv
+        src = _no_comments(inspect.getsource(srv.propose_publish_landing_pages))
+        if "replace_risk" not in src:
+            return "提案阶段没查覆盖风险"
+        if "allow_replace" not in src:
+            return "提案没有把用户的覆盖意图带下去"
+        i_risk, i_reg = src.find("replace_risk"), src.find("PENDING_ACTIONS[action_id]")
+        if i_reg >= 0 and i_risk > i_reg:
+            return "先登记了待办才查风险,顺序反了"
+        return None
+    check("提案阶段就查出整站覆盖风险", t_risk_checked_at_propose)
 
 
     # 竞品 key 按人存。换平台之后 key 不会过期了,但"每人各贴各的"这条仍然要守。
