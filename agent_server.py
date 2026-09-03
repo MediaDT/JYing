@@ -1196,7 +1196,8 @@ def _generated_landing_file(filename: str) -> Path:
 def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
                                    tracking_script: str, variant_a_file: str = "",
                                    variant_b_file: str = "",
-                                   allow_replace: bool = False) -> dict:
+                                   allow_replace: bool = False,
+                                   tracking_script_b: str = "") -> dict:
     """登记 Cloudflare Pages A/B 发布待办；用户下一条消息确认后才真正发布。
 
     allow_replace:**只有用户明确说了「覆盖发布」才允许传 true**。
@@ -1207,6 +1208,9 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
         domain = cfp.normalize_domain(domain)
         slug = cfp.normalize_slug(slug)
         cfp.validate_clickflare(cta_url, tracking_script)
+        # B 版有自己的脚本时,同样要校验(留空 = 两版共用 A 的那段)
+        if str(tracking_script_b or "").strip():
+            cfp.validate_clickflare(cta_url, tracking_script_b)
         latest = _landing_pages()
         if not variant_a_file and len(latest) >= 1:
             variant_a_file = str(latest[0].get("file") or "")
@@ -1257,6 +1261,7 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
         "slug": slug,
         "cta_url": cta_url.strip(),
         "tracking_script": tracking_script.strip(),
+        "tracking_script_b": str(tracking_script_b or "").strip(),
         "variant_a_file": file_a.name,
         "variant_b_file": file_b.name,
         "variant_a_sha256": hashlib.sha256(file_a.read_bytes()).hexdigest(),
@@ -1283,7 +1288,9 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
             "A版": f"https://{domain}/{slug}/a/",
             "B版": f"https://{domain}/{slug}/b/",
             "CTA地址": cta_url,
-            "追踪脚本": "已收到，将原样植入（内容不在聊天中回显）",
+            "追踪脚本": ("A/B 各一段,已收到,将分别原样植入（内容不在聊天中回显）"
+                       if str(tracking_script_b or "").strip()
+                       else "两版共用同一段,已收到,将原样植入（内容不在聊天中回显）"),
             "线上保留的旧实验": "、".join(risk["local_slugs"]) or "无（这是该域名的第一个实验）",
             **({"⚠️覆盖发布": "线上现有页面会被整站替换掉，这是用户明确同意的"}
                if allow_replace and risk["risky"] else {}),
@@ -1304,7 +1311,8 @@ def _execute_publish_landing_pages(action: dict) -> dict:
         return cfp.publish_ab(action["domain"], action["slug"], file_a, file_b,
                               action["cta_url"], action["tracking_script"],
                               user_id=action.get("user_id") or "",
-                              allow_replace=bool(action.get("allow_replace")))
+                              allow_replace=bool(action.get("allow_replace")),
+                              tracking_script_b=action.get("tracking_script_b") or "")
     except Exception as e:
         return {"error": str(e)[:1500]}
 
@@ -3322,6 +3330,11 @@ OPENAI_TOOL_SCHEMAS = [
               "tracking_script": {"type": "string", "description": "用户原样提供的 ClickFlare Lander Tracking Script，严禁编造或改写"},
               "variant_a_file": {"type": "string", "description": "生成结果中 A 版的 file；可空则用最近生成页"},
               "variant_b_file": {"type": "string", "description": "生成结果中 B 版的 file；可空则用最近生成页"},
+              "tracking_script_b": {"type": "string",
+                                    "description": "B 版单独的 Lander Tracking Script。"
+                                                   "**留空 = 两版共用上面那段**。"
+                                                   "只有当用户明确说「两个 Lander 的脚本不一样」并给了第二段时才填,"
+                                                   "严禁编造或改写"},
               "allow_replace": {"type": "boolean",
                                 "description": "整站覆盖发布。默认 false。**只有用户明确说了「覆盖发布」才可以传 true** —— "
                                                "发布是整站替换,本地历史目录丢失时这一下会删掉线上所有旧实验,"

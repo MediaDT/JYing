@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(128)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(129)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -50,7 +50,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(128)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(129)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -792,6 +792,12 @@ Wrangler 身份验证成功。0 个项目是正常初始状态,第一次真实�
 - **根路径是中性静态页,不跳转、也不列实验清单。** 跳转会让裸访问算到 A 版头上、
   审核抓根域名时只看到一个跳转页;列清单等于把在跑的实验公开给同行。
   A/B 的准确地址在发布结果里给用户,也存在 `data/cloudflare_sites.json`(带发布时间)。
+- **Lander Tracking Script 支持 A/B 各一段**(`tracking_script_b`,留空=共用)。
+  **尚未确认 ClickFlare 是哪种设计**:追踪器的 lander 脚本有通用一段(靠 Lander URL 区分)
+  和每个 Lander 一段(脚本里带 lander id)两种。如果是后者而两版注入同一段,
+  **B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出异常**。
+  与其赌一个不确定的前提,不如两种都支持 —— 用户在 ClickFlare 建两个 Lander 后
+  对比一下两段脚本,一样就只给一段,不一样就两段都给。
 - **A/B 共用一个 CTA Click URL**,前提是「同 Campaign、同路径、同 Offer」——
   要让 A/B 指向不同 Offer 现在做不到,得分两次发布。发布结果里已写明这条。
 - 域名绑定后可能还在签证书(`domain_status != active`),结果里会提醒**先别填进 ClickFlare**,
@@ -991,7 +997,7 @@ Tracking Script、A/B 两个生成文件。页面发布后 ClickFlare 的手工�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 128 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 129 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1033,5 +1039,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 128 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 129 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

@@ -619,6 +619,56 @@ def test_pure_logic():
         return None
     check("CTA 地址的形状要对(挡住三个地址搞混)", t_cta_url_shape)
 
+    # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
+    # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
+    # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**
+    # 与其赌一个不确定的前提,不如两种都支持。
+    def t_per_variant_script():
+        import shutil
+        import tempfile
+        from pathlib import Path as _P
+        import cloudflare_pages as cfp
+        tmp = _P(tempfile.mkdtemp(prefix="lpscript-"))
+        keep = (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._api, cfp.owned_zone, cfp._guard_domain,
+                cfp._project_exists, cfp._project_has_content, cfp._ensure_project,
+                cfp._ensure_domain, cfp._wrangler_deploy)
+        try:
+            cfp.SITES_DIR, cfp.MAPPING_FILE = tmp / "s", tmp / "m.json"
+            cfp._api = lambda *a, **k: {"success": True, "result": []}
+            cfp.owned_zone = lambda d: "example.com"
+            cfp._guard_domain = lambda d: None
+            cfp._project_exists = lambda n: False
+            cfp._project_has_content = lambda n: False
+            cfp._ensure_project = lambda n: True
+            cfp._ensure_domain = lambda p, d: {"name": d, "status": "active"}
+            cfp._wrangler_deploy = lambda d, p, s2: "https://x.pages.dev"
+            page = ('<html><body><a href="[[CLICKFLARE_CTA_URL]]">go</a>'
+                    '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+            fa, fb = tmp / "a.html", tmp / "b.html"
+            fa.write_text(page); fb.write_text(page)
+            cta = "https://trk.example.com/cf/click/1"
+            sa = '<script src="https://trk.example.com/l.js?id=AAA"></script>'
+            sb = '<script src="https://trk.example.com/l.js?id=BBB"></script>'
+
+            r = cfp.publish_ab("lp.example.com", "same", fa, fb, cta, sa)
+            proj = r["created"]["pages_project"]
+            read = lambda slug, v: (cfp.SITES_DIR / proj / slug / v / "index.html").read_text()
+            if "id=AAA" not in read("same", "a") or "id=AAA" not in read("same", "b"):
+                return "只给一段时,两版都该用它"
+
+            cfp.publish_ab("lp.example.com", "diff", fa, fb, cta, sa, tracking_script_b=sb)
+            if "id=AAA" not in read("diff", "a") or "id=BBB" in read("diff", "a"):
+                return "A 版注入的不是 A 的脚本"
+            if "id=BBB" not in read("diff", "b") or "id=AAA" in read("diff", "b"):
+                return "B 版注入的不是 B 的脚本 —— B 会上报成 A,A/B 数据全废"
+            return None
+        finally:
+            (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._api, cfp.owned_zone, cfp._guard_domain,
+             cfp._project_exists, cfp._project_has_content, cfp._ensure_project,
+             cfp._ensure_domain, cfp._wrangler_deploy) = keep
+            shutil.rmtree(tmp, ignore_errors=True)
+    check("A/B 可以各用各的追踪脚本(留空则共用)", t_per_variant_script)
+
     def t_conflict_checked_at_propose():
         import inspect
         import agent_server as srv

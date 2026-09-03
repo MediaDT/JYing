@@ -424,16 +424,25 @@ def _wrangler_deploy(directory: Path, project: str, slug: str) -> str:
 
 def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
                cta_url: str, tracking_script: str, user_id: str = "",
-               allow_replace: bool = False) -> dict:
-    """创建/复用项目，发布 A/B 两页并绑定域名。调用方必须先取得用户确认。"""
+               allow_replace: bool = False, tracking_script_b: str = "") -> dict:
+    """创建/复用项目，发布 A/B 两页并绑定域名。调用方必须先取得用户确认。
+
+    tracking_script_b:B 版单独的追踪脚本。**留空 = 两版用同一段。**
+
+    为什么要留这个口子:追踪器的 lander 脚本有两种设计 ——
+    通用一段(靠 Lander URL 区分)或每个 Lander 一段(脚本里带 lander id)。
+    如果是后者而我们两版注入同一段,**B 版会上报成 A 版,A/B 数据全废**,
+    而且页面一切正常、看不出任何异常。与其赌一个不确定的前提,不如两种都支持。
+    """
     domain, slug = normalize_domain(domain), normalize_slug(slug)
     owned_zone(domain)
     _guard_domain(domain)      # 别把一个正在跑的域名抢过来
     for path in (variant_a, variant_b):
         if not path.is_file():
             raise CloudflarePagesError(f"找不到待发布页面：{path.name}")
+    script_b = str(tracking_script_b or "").strip() or tracking_script
     html_a, count_a = inject_tracking(variant_a.read_text(encoding="utf-8"), cta_url, tracking_script)
-    html_b, count_b = inject_tracking(variant_b.read_text(encoding="utf-8"), cta_url, tracking_script)
+    html_b, count_b = inject_tracking(variant_b.read_text(encoding="utf-8"), cta_url, script_b)
 
     with _lock:
         # 本地目录是"线上有什么"的唯一依据,丢了就不能闭眼整站覆盖(见 replace_risk)
@@ -487,6 +496,7 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
             "clickflare_lander_a_url": f"https://{domain}/{slug}/a/?cpid={{campaign_id}}",
             "clickflare_lander_b_url": f"https://{domain}/{slug}/b/?cpid={{campaign_id}}",
             "cta_links_injected": {"A": count_a, "B": count_b},
+            "追踪脚本": "A/B 各用各的" if script_b != tracking_script else "两版共用同一段",
         },
         "note": (
             ("⏳ 域名还在签发证书(状态 " + str(domain_state.get("status")) + ")，"
