@@ -384,7 +384,7 @@ def test_pure_logic():
                 "domain_project_mappings": {}}
             cfp.owned_zone = lambda domain: "example.com"
             # 这条测的是"二次确认"这道关,不联网查覆盖风险和域名占用(各有专门的测试)
-            cfp.replace_risk = lambda d, s2: {"project": "landing-x", "project_exists": False,
+            cfp.replace_risk = lambda d, s2: {"project": "landing-x", "project_has_content": False,
                                               "local_slugs": [], "known_releases": [],
                                               "risky": False, "missing_locally": []}
             cfp.domain_conflict = lambda d: {"domain": d, "zone": "example.com", "records": [],
@@ -439,7 +439,7 @@ def test_pure_logic():
         tmp = _P(tempfile.mkdtemp(prefix="lpguard-"))
         keep = (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._project_exists,
                 cfp._ensure_project, cfp._ensure_domain, cfp._wrangler_deploy,
-                cfp.owned_zone, cfp._api, cfp._guard_domain)
+                cfp.owned_zone, cfp._api, cfp._guard_domain, cfp._project_has_content)
         try:
             cfp.SITES_DIR, cfp.MAPPING_FILE = tmp / "sites", tmp / "map.json"
             made, uploaded = set(), []
@@ -447,6 +447,7 @@ def test_pure_logic():
             cfp.owned_zone = lambda d: "example.com"
             cfp._guard_domain = lambda d: None      # 这条测的是覆盖风险,不是域名占用
             cfp._project_exists = lambda n: n in made
+            cfp._project_has_content = lambda n: n in made and bool(uploaded)
             cfp._ensure_project = lambda n: (n not in made) and (made.add(n) or True)
             cfp._ensure_domain = lambda p, d: {"name": d, "status": "active"}
             cfp._wrangler_deploy = lambda d, p, s2: (
@@ -488,7 +489,7 @@ def test_pure_logic():
         finally:
             (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._project_exists, cfp._ensure_project,
              cfp._ensure_domain, cfp._wrangler_deploy, cfp.owned_zone, cfp._api,
-             cfp._guard_domain) = keep
+             cfp._guard_domain, cfp._project_has_content) = keep
             shutil.rmtree(tmp, ignore_errors=True)
     check("本地历史丢失时拒绝整站覆盖(除非用户明确同意)", t_replace_guard)
 
@@ -565,6 +566,24 @@ def test_pure_logic():
         finally:
             (cfp._list_zones, cfp._api, cfp._project_exists, cfp._read_mappings) = keep
     check("不抢占已经在服务的域名(会把现有页面弄下线)", t_domain_conflict_guard)
+
+    # 「先把 Pages 项目手动建好」是个很自然的操作。空项目**没有任何内容可丢**,
+    # 把它当成"线上有东西会被删"会白白拦住第一次发布。
+    def t_empty_project_not_risky():
+        import cloudflare_pages as cfp
+        keep = (cfp._api, cfp._read_mappings)
+        try:
+            cfp._read_mappings = lambda: {}
+            for latest, want_risky, label in ((None, False, "空项目(从没部署过)"),
+                                              ({"id": "d1"}, True, "部署过东西的项目")):
+                cfp._api = lambda m, p, **kw: {"success": True, "result": {"latest_deployment": latest}}
+                got = cfp.replace_risk("lp.example.com", "exp1")["risky"]
+                if got != want_risky:
+                    return f"{label}: 期望 risky={want_risky} 实际 {got}"
+            return None
+        finally:
+            (cfp._api, cfp._read_mappings) = keep
+    check("空项目不算「会删掉线上内容」", t_empty_project_not_risky)
 
     def t_conflict_checked_at_propose():
         import inspect

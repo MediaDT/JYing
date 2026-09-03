@@ -219,7 +219,7 @@ def domain_conflict(domain: str) -> dict:
                 for r in records
                 if str(r.get("type") or "").upper() in _SERVING_TYPES and not _points_at_us(r)]
     already_ours = False
-    if blocking and _project_exists(project):
+    if blocking and _project_exists(project):   # 这里只关心"域名绑没绑",空项目也算
         bound = _api("GET", f"/accounts/{{account}}/pages/projects/{project}/domains")
         already_ours = any(str(x.get("name") or "").lower() == domain
                            for x in bound.get("result") or [])
@@ -285,14 +285,29 @@ def inject_tracking(source: str, cta_url: str, tracking_script: str) -> tuple[st
     return result, count
 
 
-def _project_exists(name: str) -> bool:
+def _project_info(name: str) -> dict | None:
+    """项目对象;不存在返回 None。"""
     try:
-        _api("GET", f"/accounts/{{account}}/pages/projects/{name}")
-        return True
+        return _api("GET", f"/accounts/{{account}}/pages/projects/{name}").get("result") or {}
     except CloudflarePagesError as e:
         if "does not exist" in str(e).lower() or "not found" in str(e).lower():
-            return False
+            return None
         raise
+
+
+def _project_exists(name: str) -> bool:
+    return _project_info(name) is not None
+
+
+def _project_has_content(name: str) -> bool:
+    """项目上**真的部署过东西**吗?
+
+    只判"项目存在"是不够的:一个刚建好、从没部署过的空项目**没有任何内容可丢**,
+    把它当成"线上有东西会被删"会白白拦住第一次发布 ——
+    而"先手动把项目建好"恰恰是个很自然的操作。
+    """
+    info = _project_info(name)
+    return bool(info and info.get("latest_deployment"))
 
 
 def _ensure_project(name: str) -> bool:
@@ -330,14 +345,15 @@ def replace_risk(domain: str, slug: str) -> dict:
     slug = normalize_slug(slug)
     project = str((_read_mappings().get(domain) or {}).get("project")
                   or project_name_for_domain(domain))
-    exists = _project_exists(project)
+    # 判据是「项目上**部署过东西**」,不是「项目存在」—— 空项目没有内容可丢
+    exists = _project_has_content(project)
     site_dir = SITES_DIR / project
     others = sorted(d.name for d in site_dir.iterdir()
                     if d.is_dir() and d.name != slug) if site_dir.is_dir() else []
     known = [str(r.get("slug")) for r in ((_read_mappings().get(domain) or {}).get("releases") or [])]
     return {
         "project": project,
-        "project_exists": exists,
+        "project_has_content": exists,
         "local_slugs": others,
         "known_releases": sorted(set(known)),
         # 项目是新建的 → 线上本来就没东西,不存在覆盖问题
