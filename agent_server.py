@@ -2380,7 +2380,9 @@ def describe_clickflare_campaign(campaign: str) -> dict:
     """看一条 campaign 现在挂着哪些落地页和 offer、权重各是多少(只读)。
 
     `campaign` 直接把用户给的 **Campaign Tracking URL** 传进来就行 ——
-    里面带 `cpid=`,代码会抠出 campaign id;也接受 24 位的 id。
+    它形如 `https://追踪域名/cf/r/<24位id>?…`(id 在**路径**里),代码会抠出来;
+    也接受 `…?cpid=<id>` 这种落地页地址,或直接给 24 位 id。
+    **抠不出来时会明确报错 —— 那时绝不许改用名字去搜是哪条 campaign。**
     **改任何投放之前都要先调它**,把现状摆给用户看。
     """
     try:
@@ -2444,7 +2446,8 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
     往新页面送。所以走和建广告相同的保险箱,而且提案里必须把
     「现在挂的是哪些 / 换成什么 / 权重多少 / offer 动不动」全列出来。
 
-    `campaign` 直接传用户给的 Campaign Tracking URL(里面带 `cpid=`)。
+    `campaign` 直接传用户给的 Campaign Tracking URL(形如 `…/cf/r/<24位id>`)。
+    **抠不出 id 就报错,不许改用名字去搜。**
     `path_name`:这条 flow 有多条启用中的 path 时才需要 —— **代码不会替用户挑**。
     """
     try:
@@ -2464,6 +2467,7 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
         "type": "swap_campaign_landers",
         "campaign_id": str(plan["campaign"].get("id") or ""),
         "campaign_name": str(plan["campaign"].get("名字") or ""),
+        "campaign_url": str(plan["campaign"].get("这条计划的投放链接") or ""),
         "flow_id": plan["flow_id"],
         "path_name": str((plan.get("path") or {}).get("名字") or ""),
         "before": plan["换之前"],
@@ -2485,6 +2489,11 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
         "action_id": action_id,
         "pending": {
             "campaign": f"{candidate['campaign_name']}({candidate['campaign_id']})",
+            # **把这条计划自己的投放链接摆出来给用户对**:名字他核对不了
+            # (账号里 50 条、名字高度相似),而他手里正好有那条链接。
+            # 实测踩过:模型抠不出 id 就改成按名字搜,搜错了计划,
+            # 差一点把买来的流量换到别人的计划上 —— 是靠肉眼比对 id 才发现的。
+            "核对用·这条计划的投放链接": candidate["campaign_url"] or "(平台没给)",
             "改的是哪条path": candidate["path_name"] or "(这条 flow 只有一条启用中的 path)",
             "现在挂着": plan["换之前"],
             "换成": plan["换之后"],
@@ -2494,6 +2503,8 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
         "note": ("这里**只登记了待办,一点都还没改**。请把上面「现在挂着」和「换成」"
                  "完整复述给用户,并明确告诉他:**确认之后立刻生效**,新页面马上开始接"
                  "买来的流量;这条 campaign 的历史转化数据会横跨两批落地页。"
+                 "**必须把「核对用·这条计划的投放链接」原样贴给用户,请他和自己手里那条比一比**"
+                 " —— 找错计划的后果是把买来的流量换到别人的计划上,而只看名字他核对不出来。"
                  "等他下一条消息明确同意,再调 confirm_action。"),
     }
 
@@ -2534,7 +2545,7 @@ def clickflare_publish_kit(campaign: str, cta_index: int = 1) -> dict:
     而粘错了页面看起来**完全正常**,要等数据不对劲才发现。现在全部从这条 campaign
     推导:追踪域名来自它的 `domain_id`,脚本来自 ClickFlare 自己的接口。
 
-    `campaign` 直接传用户给的 Campaign Tracking URL(带 `cpid=`)或 campaign id。
+    `campaign` 直接传用户给的 Campaign Tracking URL(形如 `…/cf/r/<24位id>`)或 campaign id。
     """
     try:
         kit = cfc.publish_kit(campaign, cta_index=cta_index)
@@ -3301,6 +3312,12 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "and will publicly flag a made-up one. If you have not generated the pages yet, "
                    "say so and generate them. "
                    "For publishing, call clickflare_publish_kit(campaign) first: it derives the tracking domain, "
+                   "When the user gives a tracking link, pass THAT LINK verbatim as `campaign` — "
+                   "the code deterministically extracts the id from the /cf/r/<id> path. "
+                   "**If extraction fails it errors out; NEVER fall back to searching campaigns by name** — "
+                   "there are 50 campaigns with near-identical names and picking the wrong one "
+                   "sends paid traffic to someone else's campaign. Ask for a correct link instead. "
+                   "It gets the tracking domain, "
                    "CTA Click URL and Campaign Tracking URL from ClickFlare and fetches the lander script "
                    "automatically, so do NOT ask the user for them — ask only which campaign he is running. "
                    "NEVER offer to publish without tracking code: pages missing the CTA placeholder are refused "
@@ -3323,6 +3340,12 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "编的会被当众标出来。还没生成就如实说还没生成，然后去生成。"
                    "地址一个字都不许改、更不许自己拼 host 或端口。\n"
                    "【追踪信息不用问用户】先调 clickflare_publish_kit(campaign)，"
+                   "**用户给了投放链接时，一律把那条链接原样传进 campaign 参数** —— "
+                   "代码会从 /cf/r/<id> 的路径里确定性地抠出 campaign id。"
+                   "**抠不出来会报错；那时绝不许改用 list_clickflare_campaigns 按名字搜一个顶上**，"
+                   "账号里有 50 条计划、名字高度相似，猜错就是把买来的流量换到别人的计划上。"
+                   "报错时请用户重新给一条正确的链接。挂落地页前还要把待办里"
+                   "「核对用·这条计划的投放链接」贴给他，让他和自己手里那条比一比。\n"
                    "它会从 ClickFlare 直接给出追踪域名、CTA Click URL、Campaign Tracking URL，"
                    "追踪脚本也会自动取好。你只需要向用户要**他这次要投的 Campaign Tracking URL**"
                    "(或 campaign 名字，用 list_clickflare_campaigns 找)。"
@@ -3927,12 +3950,15 @@ OPENAI_TOOL_SCHEMAS = [
              "只读:看一条 campaign 现在挂着哪些落地页和 offer、权重多少。"
              "**改任何投放之前都要先调它，把现状摆给用户看**",
              {"campaign": {"type": "string", "description":
-                 "用户给的 Campaign Tracking URL(里面带 cpid=)，或 24 位 campaign id"}},
+                 "用户给的 Campaign Tracking URL（形如 https://追踪域名/cf/r/<24位id>），"
+                 "或 24 位 campaign id。**严禁改成用名字搜索的结果**"}},
              ["campaign"]),
     _oa_tool("create_clickflare_landers",
              "把已发布的 A/B 两个地址登记成 ClickFlare 的两个 Lander。**只新增，建好也不会承接流量**；"
              "要挂进 campaign 是另一步、必须用户确认。workspace 和追踪域名由代码推导，严禁自己填",
-             {"campaign": {"type": "string", "description": "Campaign Tracking URL 或 campaign id"},
+             {"campaign": {"type": "string", "description":
+                 "Campaign Tracking URL（形如 https://追踪域名/cf/r/<24位id>）或 24 位 campaign id。"
+                 "**严禁改成用名字搜索的结果**"},
               "variant_a_url": {"type": "string", "description": "A 版正式地址"},
               "variant_b_url": {"type": "string", "description": "B 版正式地址"},
               "cta_url": {"type": "string", "description": "本次的 ClickFlare CTA Click URL，用来反查追踪域名"},
@@ -3943,7 +3969,8 @@ OPENAI_TOOL_SCHEMAS = [
              "**用户不用再手工去 ClickFlare 后台复制任何东西**，追踪脚本也会自动取好存起来。"
              "准备发布落地页时先调它",
              {"campaign": {"type": "string", "description":
-                 "用户给的 Campaign Tracking URL(带 cpid=)或 24 位 campaign id"},
+                 "用户给的 Campaign Tracking URL（形如 https://追踪域名/cf/r/<24位id>）"
+                 "或 24 位 campaign id"},
               "cta_index": {"type": "integer", "description": "CTA 出口序号，默认 1"}},
              ["campaign"]),
     _oa_tool("propose_swap_campaign_landers",

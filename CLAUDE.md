@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(168)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(174)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -54,7 +54,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(168)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(174)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -937,8 +937,13 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
 | `create_clickflare_landers(...)` | 把已发布的 A/B 地址登记成两个 Lander | **只新增**,不承接流量 |
 
 `campaign` 参数**直接把用户给的 Campaign Tracking URL 传进去**就行 ——
-里面带 `cpid=`,`campaign_id_from()` 会抠出来。这比让模型按名字猜靠谱得多
-(账号里 50 条 campaign,重名很常见);抠不出来就明确报错,**不许猜**。
+**它的真实形状是 `https://<追踪域名>/cf/r/<24位campaign_id>?…` —— id 在「路径」里,
+不在 `cpid=` 里**(2026-09-04 实测,账号里 50 条 campaign 的 `url` 字段全是这个形状;
+本文件之前写的 `cpid=` 是错的,害助手找错过一次计划)。
+`?cpid=<id>` 是**落地页**地址的形式(发布结果里给用户粘进 ClickFlare 的那条),
+`campaign_id_from()` 两种都认。顺着链接定位是**确定性**的,比让模型按名字猜靠谱得多
+(账号里 50 条,名字高度相似);抠不出来就明确报错,而且**报错措辞里写死了
+「绝不许改用名字去猜」** —— 见坑表那条,模型上次就是从这儿绕过去的。
 
 **两个值是推导出来的,不问用户也不会挑错**:
 `workspace_id` 从这条 campaign 自己读;`tracking_domain_id` 按 CTA 地址的域名反查。
@@ -1127,6 +1132,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
 | **「要几个」写死在代码里 = 用户说了不算** | `save_pages` 写死 `pages[:2]`,而且工具连「要几版」这个参数都没有 —— 用户明说「只生成一个」,照样出两个。多的那版是白花的模型钱,还逼他在两个里挑,等于没听他说话。**凡是「出 N 份」的功能,N 必须能从用户那儿一路传到底**(工具参数 → 生成提示词 → 落盘上限),漏一层就失效 |
 | **模型会举一个「例子地址」,而用户会当真** | 助手为了解释 CTA 是什么,顺手写了 `https://track.clickflare.com/click/1` 当例子 —— 那是编的,格式也不对(真的是 `/cf/click/`)。用户很可能直接拿去用。**凡是「绝不许编造」的东西,连举例都不许编**,提示词要明写这一条 |
 | **模型会许诺代码根本不允许的事** | 落地页助手说「你没有追踪代码也没关系,我先不放追踪代码把页面发出去」—— 而缺 CTA 占位符的页面**代码层直接拒绝发布**,答应了也做不到;真发出去更糟:买来的流量一条都统计不到。**代码里拦住的事,提示词里要同样明确地禁止承诺** —— 否则用户按它说的走一圈,到最后才发现是空头支票 |
+| **抠不出 id,模型会自己改成「按名字搜」** | 用户贴了投放链接 `https://trk.…/cf/r/6a0fc07a…?CALLBACK_PARAM=…`,而代码只认查询参数 `cpid=` (**这个假设本身就是错的** —— 实测 50 条 campaign 的 Campaign Tracking URL 全是 `/cf/r/<24位id>`,id 在**路径**里)。抠不出来后模型没有停下,而是改用 `list_clickflare_campaigns` 按名字搜了一条顶上 —— 把 `NewsBreak_333_Windows_20260522` 搜成了 `fb小苏苏-system1 - window replacement`,**差一点把买来的流量换到别人的计划上**。三层一起补:①解析支持路径形式;②**报错措辞里写死「绝不许改用名字去猜」**(中英提示词和 6 处工具说明也各写一遍);③待办里**回显这条计划自己的投放链接**,让用户和手里那条比一比 —— 只给名字他核对不了,这次正是靠肉眼比对 id 才发现的。凡是「模型必须精确定位一个对象」的场合,都要问一句:**定位失败时它会退到哪条路上去?** |
 | **模型会照着文件名的「形状」编一个出来** | 落地页预览的文件名是 `<8位十六进制>-version-a---<英文名>.html`。线上实测:模型这一轮**根本没调生成工具**,却照着这个形状编了个 `e7c2e391-version-a---the-interactive-estimator.html` 给用户 —— 服务器日志里只有一次 chat 请求加一条 404,盘上从没有过这个文件。用户点开只看到 `{"error":"落地页预览不存在或已过期"}`,**完全看不出是编的**,只会以为功能坏了。提示词里早写了「不许编地址」,拦不住(和「提示词管不住文案照抄」同一条)。两层代码防线:①`_finalize` 把回复里每个 `/landing-pages/xxx.html` **拿到盘上回查一遍**,编的当场盖 ⚠️ 章并列出真实存在的那几个 —— 这道要和「保险箱里有没有待办」**解耦**,老的拆穿章挂在待办分支下,保险箱一空就什么都抓不到;②404 别甩 JSON,给一张说人话的页面并把真实预览列成可点的链接,用户不用回聊天里追问 |
 | **提案里给的地址,用户一定会点** | 发布提案的表格里把还没发布的 A/B 地址标成「A版 正式网址」,用户当场点了过去 —— 拿到 `ERR_NAME_NOT_RESOLVED`,以为出错了。其实那个域名的 **DNS 记录要等确认发布那一刻才创建**,打不开是**对的**。`note` 里虽然写了「尚未创建项目、改 DNS」,但模型渲染成表格时那句话离得远、用户也不会去读。**把话写进键名里**(`A版(确认发布后才存在,现在打不开)`),模型就没法再把它说成「正式网址」。凡是「确认后才生效」的两阶段流程,提前给出去的地址/编号都要自带这句话 |
 | **保险箱是进程内存里的一份,外部改文件会被写回去** | `PENDING_ACTIONS` 只在 import 时`_load_actions()` 读一次,之后 `_save_actions()` 每次都把**整个内存字典**覆盖写盘。所以在另一个 python 进程里删掉两条旧待办、写好文件之后,跑着的服务下一次登记新待办时又把它们**原样写了回来**(实测:早上删掉,下午又出现在提示词里)。**要改保险箱文件,必须连着让服务重启**(本地 `touch agent_server.py` 触发 reload,线上重启 Supervisor),而且顺序是**先改文件、再触发重启**。生产上只有一个进程、也没人手改文件,所以这是给「我们自己动手清理」准备的规矩 |
@@ -1235,7 +1241,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
 - **把方案做成广告图**:`propose_make_creatives` —— AI 画**无文字**底图 +
   **代码确定性叠字**,出 1200×628 成品直接传进素材库;走确认关卡先报价(第六之十五节);
 - **ClickFlare 全通了**:接口全靠实测探出来(公开文档没有清单),
-  `check_clickflare_params.py` 随时可复查;追踪链接里的 `cpid` 直接定位 campaign,
+  `check_clickflare_params.py` 随时可复查;追踪链接里的 `/cf/r/<id>` 直接定位 campaign,
   workspace 和追踪域名由代码推导;**把 A/B 挂进 campaign 并设 50/50 也做完了**,
   走保险箱 + 指纹防覆盖,offer 不动(第六之十八节)。
 - **落地页 A/B 发布**:不用 GitHub,通过 Pages Direct Upload 发布;域名每次选择,
@@ -1256,7 +1262,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 168 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 174 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1339,9 +1345,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 168 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 174 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 168 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 174 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

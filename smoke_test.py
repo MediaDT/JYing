@@ -3102,6 +3102,108 @@ def test_execute_time_recheck():
     check("换页待办的两个 Lander 是同一个 → 执行时拦住", swap_refuses_identical_landers)
 
 
+# ============ 3.46 从投放链接认 campaign,绝不许按名字猜 ============
+
+def test_campaign_id_from_link():
+    """**实测踩过的真事**:用户把投放链接
+    `https://trk.…/cf/r/6a0fc07a5357ae0012e9b844?CALLBACK_PARAM=…` 贴进来,
+    而代码只认查询参数 `cpid=` —— 抠不出来,模型于是改成按名字搜,
+    把 `NewsBreak_333_Windows_20260522` 搜成了 `fb小苏苏-system1 - window replacement`。
+    差一点就把买来的流量换到别人的计划上。
+
+    真相是:**Campaign Tracking URL 的 id 在路径里**(`/cf/r/<24位id>`),
+    实测账号里 50 条 campaign 的 `url` 字段全是这个形状;`?cpid=` 是**落地页**地址的形式。
+    """
+    import contextvars
+    import inspect
+    import agent_server as srv
+    import clickflare_client as cfc
+
+    print("\n【3.46】从投放链接认 campaign")
+
+    ID = "6a0fc07a5357ae0012e9b844"
+
+    def reads_path_form():
+        # 平台给的真实 Campaign Tracking URL
+        u = ("https://trk.example.com/cf/r/" + ID +
+             "?CALLBACK_PARAM=__CALLBACK_PARAM__&OS=__OS__&CAMPAIGN_ID=__CAMPAIGN_ID__")
+        got = cfc.campaign_id_from(u)
+        if got != ID:
+            return "投放链接里的 id 没认出来:%r" % got
+        return True
+    check("投放链接 /cf/r/<id> 里的 campaign id 认得出", reads_path_form)
+
+    def placeholder_not_mistaken_for_id():
+        # 这条链接的查询里有 `CAMPAIGN_ID=__CAMPAIGN_ID__` —— 是**字面占位符**,
+        # 不是 id。要是把它当 id 用,查出来就是一片空
+        u = "https://trk.example.com/cf/r/" + ID + "?CAMPAIGN_ID=__CAMPAIGN_ID__"
+        if cfc.campaign_id_from(u) != ID:
+            return "被查询参数里的占位符带偏了"
+        return True
+    check("不会把 CAMPAIGN_ID=__CAMPAIGN_ID__ 占位符当成 id", placeholder_not_mistaken_for_id)
+
+    def cpid_form_still_works():
+        # 落地页地址那种形式不能因为加了新形状就失效
+        if cfc.campaign_id_from("https://lp.example.com/w/a/?cpid=" + ID) != ID:
+            return "?cpid= 这种老形式认不出来了"
+        if cfc.campaign_id_from(ID) != ID:
+            return "直接给 24 位 id 也认不出来"
+        return True
+    check("?cpid= 和裸 id 两种老写法照常认", cpid_form_still_works)
+
+    def wrong_links_are_refused():
+        for name, u in (("CTA Click URL", "https://trk.example.com/cf/click/1"),
+                        ("落地页地址", "https://lp.example.com/window-260904/a/")):
+            try:
+                got = cfc.campaign_id_from(u)
+                return "%s 竟然认出了 %r" % (name, got)
+            except Exception as e:
+                # 报错里必须明确禁止改用名字 —— 模型上次就是这么绕过去的
+                if "不许" not in str(e) and "绝不" not in str(e):
+                    return "%s 的报错没禁止改用名字去猜:%r" % (name, str(e)[:80])
+        return True
+    check("认不出时报错,并明确禁止改用名字去猜", wrong_links_are_refused)
+
+    def proposal_shows_the_link():
+        # 光给名字用户核对不了(账号里 50 条、名字高度相似),
+        # 而他手里正好有那条链接 —— 必须原样摆出来给他对。
+        # **要真调一次看返回**:只在源码里搜字符串是假通过 ——
+        # 那句话在 note 里也出现,把 pending 里那一行删掉照样绿(第一版就这么错了)。
+        link = "https://trk.example.com/cf/r/" + ID
+        real = cfc.plan_lander_swap
+        cfc.plan_lander_swap = lambda *a, **k: {
+            "flow_id": "f" * 24, "path": {"名字": "New path"},
+            "换之前": {"落地页": []}, "换之后": {"落地页": [{"id": "x", "weight": 50}]},
+            "offer有没有动": "没动", "put_body": {}, "fingerprint": "fp",
+            "campaign": {"id": ID, "名字": "NewsBreak_333_Windows", "这条计划的投放链接": link}}
+        aid = ""
+        try:
+            out = srv.propose_swap_campaign_landers(link, "a" * 24, "b" * 24)
+            aid = out.get("action_id", "")
+            pend = out.get("pending") or {}
+            if link not in str(pend):
+                return "待办里没有把这条计划的投放链接摆出来给用户核对"
+            if "投放链接" not in str(out.get("note") or ""):
+                return "note 里没要求 AI 把链接贴给用户比对"
+        finally:
+            cfc.plan_lander_swap = real
+            if aid:
+                srv.PENDING_ACTIONS.pop(aid, None)
+                srv._save_actions()
+        return True
+    check("换页待办里回显投放链接给用户比对", proposal_shows_the_link)
+
+    def prompt_forbids_name_search():
+        for lang, needle in (("zh", "绝不许改用 list_clickflare_campaigns 按名字搜"),
+                             ("en", "NEVER fall back to searching campaigns by name")):
+            sp = contextvars.Context().run(
+                lambda: (srv.CURRENT_CHAT_MODE.set("landing"), srv._system_prompt_now(lang))[1])
+            if needle not in sp:
+                return "%s 提示词里没禁止「抠不出 id 就按名字搜」" % lang
+        return True
+    check("中英提示词都禁止「抠不出 id 就按名字搜」", prompt_forbids_name_search)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3533,6 +3635,7 @@ if __name__ == "__main__":
     test_loop_guard()
     test_fake_preview_link()
     test_execute_time_recheck()
+    test_campaign_id_from_link()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

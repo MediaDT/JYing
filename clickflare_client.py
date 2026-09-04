@@ -32,6 +32,8 @@ ROOT = Path(__file__).parent
 # 否则一条消息就把上下文塞满了。
 MAX_ROWS = 60
 _OBJECT_ID = re.compile(r"^[0-9a-f]{24}$")
+# Campaign Tracking URL 的路径形状:/cf/r/<24位id>(实测,50 条 campaign 全是这样)
+_TRACK_PATH = re.compile(r"/cf/r/([0-9a-fA-F]{24})(?:/|$)")
 
 
 class ClickFlareError(Exception):
@@ -138,25 +140,43 @@ def campaign_id_from(text: str) -> str:
     """从 Campaign Tracking URL 里抠出 campaign id;也接受直接给的 id。
 
     **为什么这么设计**:用户说「我要跑这个追踪链接」时,手里有的就是那条链接。
-    链接里带着 `cpid=<campaign_id>`,顺着它定位是**确定性**的 ——
-    比让模型按名字去猜是哪个 campaign 靠谱得多(账号里有 50 条,重名很常见)。
+    顺着链接里的 id 定位是**确定性**的 —— 比让模型按名字去猜靠谱得多
+    (账号里有 50 条,名字高度相似)。实测踩过:抠不出 id 时模型自己改成按名字搜,
+    把 `NewsBreak_333_Windows_20260522` 搜成了 `fb小苏苏-system1 - window replacement`,
+    差一点就把买来的流量换到别人的计划上。所以**抠不出来就报错,措辞里明确禁止改用名字**。
+
+    两种形状都认(实测):
+      · **Campaign Tracking URL**:`https://<追踪域名>/cf/r/<24位id>?…` —— id 在**路径**里;
+      · **Lander URL**:`…?cpid=<24位id>` —— id 在查询参数里。
     """
     raw = str(text or "").strip()
     if _OBJECT_ID.match(raw.lower()):
         return raw.lower()
     parsed = urlparse(raw)
     if parsed.scheme and parsed.netloc:
+        # ① **真实的 Campaign Tracking URL 是 `/cf/r/<campaign_id>`** —— id 在**路径**里。
+        #    实测账号里 50 条 campaign 的 `url` 字段全是这个形状:
+        #    https://<追踪域名>/cf/r/661df86e6ad2fc001219914f?ad_id={{ad.id}}&...
+        #    原来只找 `cpid=`(那是**落地页**地址上挂的参数),于是真的投放链接反而抠不出来。
+        m = _TRACK_PATH.search(parsed.path or "")
+        if m:
+            return m.group(1).lower()
+        # ② `?cpid=` 仍然认:那是 Lander URL 的形式(发布结果里给用户粘进 ClickFlare 的那条)
         for name in ("cpid", "campaign_id", "campaignId"):
             values = parse_qs(parsed.query).get(name) or []
             if values and _OBJECT_ID.match(values[0].strip().lower()):
                 return values[0].strip().lower()
         raise ClickFlareError(
-            "这条链接里没有 `cpid=`,认不出是哪个 campaign。请复制 ClickFlare 里那条 "
-            "**Campaign Tracking URL**(形如 https://追踪域名/xxxx?cpid=…),"
-            "不是落地页地址、也不是 CTA Click URL。")
+            "这条链接里认不出 campaign id。ClickFlare 的 **Campaign Tracking URL** "
+            "形如 https://追踪域名/cf/r/<24位id>?…(id 在路径里),"
+            "落地页地址则是 …?cpid=<24位id>。你给的两种都不是 —— "
+            "可能是 CTA Click URL(/cf/click/1)或别的地址。"
+            "**绝对不许改用名字去猜是哪条 campaign**:账号里有 50 条、名字高度相似,"
+            "猜错就是把买来的流量换到别人的计划上。请让用户重新给一条正确的链接。")
     raise ClickFlareError(
-        f"认不出 campaign:「{raw[:60] or '(空)'}」。请给 Campaign Tracking URL,"
-        "或者 24 位的 campaign id。")
+        f"认不出 campaign:「{raw[:60] or '(空)'}」。请给 Campaign Tracking URL"
+        "(形如 https://追踪域名/cf/r/<24位id>),或者直接给 24 位的 campaign id。"
+        "**不许用名字去猜。**")
 
 
 def get_campaign(campaign: str) -> dict:
@@ -416,7 +436,11 @@ def plan_lander_swap(campaign: str, landers: list[dict], path_name: str = "",
     flow_id = _flow_id_of(campaign_doc)
     # campaign 里内嵌的 flow 可能是精简过的,改之前一律按 id 重新取一份完整的
     plan = plan_flow_lander_swap(get_flow(flow_id), ids, landers, path_name)
-    plan["campaign"] = {"id": campaign_doc.get("_id"), "名字": campaign_doc.get("name")}
+    # **把这条 campaign 自己的投放链接一起带回去**:用户手里有的就是那条链接,
+    # 光给他一个名字他没法核对(账号里 50 条,名字高度相似)。把原文摆出来,
+    # 和他粘进来的那条一比就知道有没有找错 —— 实测正是靠这个发现模型找错了计划。
+    plan["campaign"] = {"id": campaign_doc.get("_id"), "名字": campaign_doc.get("name"),
+                        "这条计划的投放链接": campaign_doc.get("url") or "(平台没给)"}
     return plan
 
 
