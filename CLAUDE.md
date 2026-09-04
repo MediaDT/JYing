@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(158)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(164)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -54,7 +54,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(158)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(164)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -764,6 +764,11 @@ Wrangler 身份验证成功。0 个项目是正常初始状态,第一次真实�
 
 - `cloudflare_pages.py`:列 Zone/项目、域名规范化、确定性项目名、创建/复用 Pages、
   Direct Upload、绑定域名、持久化映射;
+- **给出去的预览链接,代码要能回查**(`lp.preview_exists()` + `_finalize` 的 ⚠️ 章):
+  模型会照着 `<8位十六进制>-version-a---<英文名>.html` 的形状**凭空编一个**
+  (实测发生过,整轮没调生成工具)。回查不通过就当众标出来并列出盘上真实存在的几个;
+  预览路由的 404 也换成了说人话的页面,直接把真实预览列成可点链接。
+  **这道检查和保险箱里有没有待办无关**,不能挂在老的拆穿章那条分支下面。
 - `landing_lab.py`:生成的新页面必须把所有真正去 Offer 的 CTA 写成
   `href="[[CLICKFLARE_CTA_URL]]"`,并在 `</body>` 前留
   `<!--[[CLICKFLARE_LANDER_SCRIPT]]-->`;
@@ -1119,6 +1124,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
 | **「要几个」写死在代码里 = 用户说了不算** | `save_pages` 写死 `pages[:2]`,而且工具连「要几版」这个参数都没有 —— 用户明说「只生成一个」,照样出两个。多的那版是白花的模型钱,还逼他在两个里挑,等于没听他说话。**凡是「出 N 份」的功能,N 必须能从用户那儿一路传到底**(工具参数 → 生成提示词 → 落盘上限),漏一层就失效 |
 | **模型会举一个「例子地址」,而用户会当真** | 助手为了解释 CTA 是什么,顺手写了 `https://track.clickflare.com/click/1` 当例子 —— 那是编的,格式也不对(真的是 `/cf/click/`)。用户很可能直接拿去用。**凡是「绝不许编造」的东西,连举例都不许编**,提示词要明写这一条 |
 | **模型会许诺代码根本不允许的事** | 落地页助手说「你没有追踪代码也没关系,我先不放追踪代码把页面发出去」—— 而缺 CTA 占位符的页面**代码层直接拒绝发布**,答应了也做不到;真发出去更糟:买来的流量一条都统计不到。**代码里拦住的事,提示词里要同样明确地禁止承诺** —— 否则用户按它说的走一圈,到最后才发现是空头支票 |
+| **模型会照着文件名的「形状」编一个出来** | 落地页预览的文件名是 `<8位十六进制>-version-a---<英文名>.html`。线上实测:模型这一轮**根本没调生成工具**,却照着这个形状编了个 `e7c2e391-version-a---the-interactive-estimator.html` 给用户 —— 服务器日志里只有一次 chat 请求加一条 404,盘上从没有过这个文件。用户点开只看到 `{"error":"落地页预览不存在或已过期"}`,**完全看不出是编的**,只会以为功能坏了。提示词里早写了「不许编地址」,拦不住(和「提示词管不住文案照抄」同一条)。两层代码防线:①`_finalize` 把回复里每个 `/landing-pages/xxx.html` **拿到盘上回查一遍**,编的当场盖 ⚠️ 章并列出真实存在的那几个 —— 这道要和「保险箱里有没有待办」**解耦**,老的拆穿章挂在待办分支下,保险箱一空就什么都抓不到;②404 别甩 JSON,给一张说人话的页面并把真实预览列成可点的链接,用户不用回聊天里追问 |
 | **只给相对路径,模型会自己编个 host** | 落地页预览返回的是 `/landing-pages/xxx.html`,模型照着写成了 **`http://localhost:3000/...`** —— 那是用户本机另一个项目的端口,点开是那个项目的 404,完全看不出问题在哪(路由其实一直是好的)。**凡是要给用户点的地址,代码就得给完整的**:把请求的 `base_url` 存进 contextvar(设在 `call_next` 之前),返回前补成绝对地址,模型就没得编 |
 | **要用户手工复制的东西,先翻翻平台有没有接口** | ClickFlare 的 Lander Tracking Script 和 CTA Click URL,让用户来回从后台复制粘贴了很久 —— 而平台一直有 `/api/scripts/direct` 和 `/api/scripts/links`,直接给模板。是探接口时顺手翻 swagger 才看见的。**每多一样要用户手工搬运的东西,就多一处会粘错、而且粘错了看不出来的地方**;动手做「贴一次就存起来」这类缓解方案之前,先确认平台是不是根本就能自动拿 |
 | **可点的链接里混进追踪地址 = 用户一点就污染数据** | 竞品落地页表格里的域名做成可点之后,顺手会想把回复里所有链接都变可点 —— 但 ClickFlare 的 `/cf/click`、带 `cpid=` 的地址**点一下就是一次真实点击**,会记进那条 campaign 的统计,而且事后完全看不出是误点的。所以 linkify 时要挡住 `/cf/click`、`/cf/tags`、`cpid=`、`cftmid=`,降级成**纯文字**(还看得见、能复制),并用 title 说清为什么不能点。和「不自动访问追踪链接做健康检查」是同一条规矩 |
@@ -1243,7 +1249,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 158 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 164 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1297,9 +1303,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 158 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 164 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 158 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 164 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

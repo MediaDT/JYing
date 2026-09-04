@@ -14,9 +14,11 @@
 
 import contextvars
 import hashlib
+import html as _html
 import json
 import os
 import queue
+import re as _re
 import threading
 import time
 import uuid
@@ -27,7 +29,8 @@ import anthropic
 import httpx
 import openai
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               StreamingResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import errors as genai_errors
@@ -2940,7 +2943,28 @@ def landing_page_preview(filename: str):
         return JSONResponse(status_code=400, content={"error": "无效的预览文件名"})
     path = lp.GENERATED_DIR / filename
     if not path.is_file():
-        return JSONResponse(status_code=404, content={"error": "落地页预览不存在或已过期"})
+        # **别甩一句 JSON**:用户看到 `{"error":"...不存在或已过期"}` 只会以为功能坏了,
+        # 而真相多半是"这个地址是模型编的"。直接把盘上真实存在的预览列出来,
+        # 他一眼就能点到对的那个,不用再回聊天里追问。
+        real = lp.recent_previews(8)
+        items = "".join(
+            '<li><a href="/landing-pages/%s">%s</a></li>' % (r["file"], r["file"])
+            for r in real)
+        body = ("<!doctype html><meta charset=\"utf-8\">"
+                "<title>这个预览不存在</title>"
+                "<style>body{font:15px/1.7 system-ui,sans-serif;max-width:760px;"
+                "margin:48px auto;padding:0 20px;color:#222}"
+                "code{background:#f4f4f5;padding:2px 6px;border-radius:4px}"
+                "li{margin:6px 0}</style>"
+                "<h2>这个落地页预览不存在</h2>"
+                "<p>你打开的是 <code>" + _html.escape(filename) + "</code>,"
+                "服务器上没有这个文件。<b>最常见的原因是助手把地址编出来了</b>"
+                "(它这一轮其实没有真的生成页面),其次是这份预览已经被清理掉了。</p>"
+                + ("<p><b>下面是服务器上真实存在的预览</b>,点一下就能看:</p><ul>"
+                   + items + "</ul>" if real
+                   else "<p>服务器上现在<b>一个生成好的预览都没有</b>。</p>")
+                + "<p>回到聊天里说一句「重新生成落地页」,让它真跑一遍。</p>")
+        return HTMLResponse(content=body, status_code=404)
     return FileResponse(path, media_type="text/html; charset=utf-8", headers={
         "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
                                     "font-src data:; form-action 'none'; base-uri 'none'; sandbox"),
@@ -3244,6 +3268,11 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "Never copy competitor branding or claims, and never create, pause, or schedule ads. "
                    "Generate 2 variants by default for A/B; pass n_variants=1 when the user asks for only one. "
                    "Always list every preview_url verbatim so the user can open it — never rebuild the host or port. "
+                   "**NEVER write a /landing-pages/... link unless summarize_landing_page_patterns "
+                   "actually returned it in THIS turn.** Do not reuse the shape of an old filename "
+                   "and invent a new hex prefix — code checks every link you give against the disk "
+                   "and will publicly flag a made-up one. If you have not generated the pages yet, "
+                   "say so and generate them. "
                    "For publishing, call clickflare_publish_kit(campaign) first: it derives the tracking domain, "
                    "CTA Click URL and Campaign Tracking URL from ClickFlare and fetches the lander script "
                    "automatically, so do NOT ask the user for them — ask only which campaign he is running. "
@@ -3261,6 +3290,10 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "承诺和具体优惠，也严禁创建、启停广告或登记定时任务。\n"
                    "【生成落地页】默认出 2 版做 A/B；**用户说「只要一个」就传 n_variants=1**，"
                    "不许多给。生成完必须把每一版的 preview_url **原样列出来让他点开看**，"
+                   "**没有真的调用 summarize_landing_page_patterns 拿到 preview_url 之前，"
+                   "一个 /landing-pages/... 链接都不许写出来** —— 不许照着旧文件名的样子"
+                   "自己编一串十六进制。代码会把你给的每个链接拿到硬盘上回查一遍，"
+                   "编的会被当众标出来。还没生成就如实说还没生成，然后去生成。"
                    "地址一个字都不许改、更不许自己拼 host 或端口。\n"
                    "【追踪信息不用问用户】先调 clickflare_publish_kit(campaign)，"
                    "它会从 ClickFlare 直接给出追踪域名、CTA Click URL、Campaign Tracking URL，"
@@ -4197,6 +4230,39 @@ _CLAIM_KEYWORDS = [
 ]
 
 
+_PREVIEW_LINK = _re.compile(r"/landing-pages/([A-Za-z0-9._-]+\.html)")
+
+
+def _fake_preview_note(reply: str, english: bool) -> str:
+    """回复里给出的落地页预览链接,**逐个回到盘上查一遍**;编的就当场拆穿。
+
+    **为什么必须守在代码层**:线上实测,模型整轮没调任何生成工具,却照着
+    `<8位十六进制>-version-a---<英文名>.html` 这个形状编了一个链接给用户 ——
+    点开是一句 `{"error":"落地页预览不存在或已过期"}`,用户完全看不出是编的,
+    只会以为"功能坏了"。提示词里早写了"不许编地址",拦不住。
+    和写操作的 🔒/⚠️ 钢印是同一个思路(第七节)。
+    """
+    names = list(dict.fromkeys(_PREVIEW_LINK.findall(reply or "")))
+    if not names:
+        return ""
+    fake = [n for n in names if not lp.preview_exists(n)]
+    if not fake:
+        return ""
+    base = str(CURRENT_BASE_URL.get() or "").rstrip("/")
+    real = lp.recent_previews(5)
+    links = "\n".join("· %s%s" % (base, r["preview_url"]) for r in real)
+    if english:
+        head = ("⚠️ **System verification**: %d preview link(s) above do not exist on disk "
+                "(%s). Nothing was generated this turn — the link was made up. "
+                "Ask me to generate the pages again." % (len(fake), ", ".join(fake)))
+        return head + (("\n\nPreviews that really do exist:\n" + links) if real else "")
+    head = ("⚠️ **系统核验**:上面给出的预览链接有 %d 个在服务器上**根本不存在**"
+            "(%s)——**这一轮没有真的生成页面,那个地址是编的**。"
+            "请回一句「重新生成落地页」让我真跑一遍。" % (len(fake), "、".join(fake)))
+    return head + (("\n\n服务器上真实存在的预览是这几个:\n" + links) if real else
+                   "\n\n服务器上现在一个生成好的预览都没有。")
+
+
 def _finalize(reply: str, lang: str = "zh") -> dict:
     """给回复盖"系统核验"钢印:真执行了什么、有没有谎报,以代码层记录为准。
 
@@ -4219,7 +4285,9 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
                 parts.append(str(rec))   # 兼容旧格式
         label = ("🔒 **System verification** (recorded by code, not written by the AI): "
                  if english else "🔒 **系统核验**(代码层记录,非 AI 生成):")
-        return {"reply": f"{reply}\n\n---\n{label}{'; '.join(parts)}"}
+        stamped = f"{reply}\n\n---\n{label}{'; '.join(parts)}"
+        fake = _fake_preview_note(reply, english)
+        return {"reply": stamped + ("\n\n" + fake if fake else "")}
 
     # 谎报匹配不分大小写:AI 写的是 "Successfully created",关键词表里是小写
     reply_lower = reply.lower()
@@ -4232,8 +4300,14 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
                 if english else
                 f"⚠️ **系统核验**:本轮实际上没有执行任何操作,保险箱里仍有待办({ids})。"
                 f"如果上面说\"已创建/已执行\",那是 AI 的幻觉,请回复「执行待办 {ids}」重试。")
-        return {"reply": f"{reply}\n\n---\n{note}"}
+        fake = _fake_preview_note(reply, english)
+        return {"reply": f"{reply}\n\n---\n{note}" + ("\n\n" + fake if fake else "")}
 
+    # 编造的预览链接是**独立**的一道:它和保险箱里有没有待办无关,
+    # 上面两条分支都可能没命中,而链接照样是编的。
+    fake = _fake_preview_note(reply, english)
+    if fake:
+        return {"reply": f"{reply}\n\n---\n{fake}"}
     return {"reply": reply}
 
 

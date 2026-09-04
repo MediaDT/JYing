@@ -441,6 +441,30 @@ def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
     return out
 
 
+def preview_exists(filename: str) -> bool:
+    """这个预览文件真的在盘上吗?
+
+    **模型会照着 `<8位十六进制>-version-a---<英文名>.html` 这个形状编一个出来**
+    (线上实测:整轮压根没调生成工具,直接给了个链接,用户点开是 404)。
+    所以"给出去的链接"必须能被代码回查,不能只靠提示词让它别编。
+    """
+    name = str(filename or "")
+    if "/" in name or "\\" in name or not name.lower().endswith(".html"):
+        return False
+    return (GENERATED_DIR / name).is_file()
+
+
+def recent_previews(limit: int = 8) -> list[dict]:
+    """盘上真实存在的预览,新的排前面。给"编了个链接"时的兜底清单用。"""
+    try:
+        files = sorted(GENERATED_DIR.glob("*.html"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+    except Exception:
+        return []
+    return [{"file": f.name, "preview_url": "/landing-pages/" + f.name,
+             "mtime": f.stat().st_mtime} for f in files[:max(1, int(limit or 8))]]
+
+
 def _prune() -> None:
     try:
         files = sorted(GENERATED_DIR.glob("*.html"), key=lambda f: f.stat().st_mtime)

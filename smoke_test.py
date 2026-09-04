@@ -2914,6 +2914,103 @@ def test_loop_guard():
         os.environ.pop("OPENAI_API_KEY", None)
 
 
+# ============ 3.44 编造的落地页预览链接要当场拆穿 ============
+
+def test_fake_preview_link():
+    """线上实测:模型整轮**没调任何生成工具**,却照着
+    `<8位十六进制>-version-a---<英文名>.html` 这个形状编了一个链接给用户。
+    点开只有一句 `{"error":"落地页预览不存在或已过期"}` —— 用户完全看不出是编的,
+    只会以为"这个功能坏了"。提示词里早写着"不许编地址",拦不住。
+    """
+    import agent_server as srv
+    import landing_lab as lp
+
+    print("\n【3.44】编造的落地页预览链接")
+
+    made_up = "deadbeef-version-a---this-file-never-existed.html"
+    real = lp.recent_previews(1)
+
+    def stamps_fake_link():
+        out = srv._finalize("两版做好了:\n· /landing-pages/" + made_up, "zh")["reply"]
+        if "系统核验" not in out:
+            return "编的链接没被拆穿"
+        if made_up not in out:
+            return "没点名是哪个链接编的"
+        if "是编的" not in out:
+            return "话说得太含糊,用户看不出这是幻觉"
+        return True
+    check("回复里给了不存在的预览链接 → 当场拆穿", stamps_fake_link)
+
+    def real_link_not_flagged():
+        # 误伤比漏判更糟:真链接被打上"这是编的",用户就再也不信这个提示了
+        if not real:
+            return None                     # 盘上没有预览,这条跳过
+        out = srv._finalize("看这里 /landing-pages/" + real[0]["file"], "zh")["reply"]
+        if "系统核验" in out:
+            return "真实存在的链接被误判成编造的"
+        return True
+    check("真实存在的链接不会被误伤", real_link_not_flagged)
+
+    def independent_of_pending_box():
+        # 老的 ⚠️ 拆穿章只在"保险箱里还有待办"时才触发。编链接和待办**毫无关系**,
+        # 挂在那条分支下面的话,保险箱一空就什么都抓不到了。
+        import inspect
+        src = _no_comments(inspect.getsource(srv._finalize))
+        if src.count("_fake_preview_note(") < 3:
+            return "只在部分分支上查了链接,另外的分支漏掉"
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()          # 保险箱空着,老的拆穿章不会触发
+        try:
+            out = srv._finalize("好了:/landing-pages/" + made_up, "zh")["reply"]
+        finally:
+            srv.PENDING_ACTIONS.update(saved)
+        if made_up not in out or "系统核验" not in out:
+            return "保险箱空着时抓不到编造的链接"
+        return True
+    check("保险箱空着也照样抓(和待办无关)", independent_of_pending_box)
+
+    def four_o_four_is_helpful():
+        # 甩一句 JSON 等于把用户扔在死胡同里:他不知道是编的还是过期的,也不知道下一步
+        r = srv.landing_page_preview(made_up)
+        if r.status_code != 404:
+            return "状态码不是 404"
+        body = r.body.decode()
+        if "error" in body[:40] and "<" not in body[:40]:
+            return "还在甩 JSON,没给人话"
+        if "编出来" not in body:
+            return "没告诉用户最可能的原因是助手编了地址"
+        for row in lp.recent_previews(3):
+            if row["file"] not in body:
+                return "没把盘上真实存在的预览列出来给他点"
+        return True
+    check("404 页面说人话,并列出真实存在的预览", four_o_four_is_helpful)
+
+    def path_traversal_still_blocked():
+        # 加了兜底清单别顺手把目录穿越也放开了
+        if lp.preview_exists("../../.env"):
+            return "preview_exists 放行了目录穿越"
+        if lp.preview_exists("x.html/../../etc/passwd"):
+            return "preview_exists 放行了目录穿越"
+        if lp.preview_exists("notes.txt"):
+            return "非 .html 也算存在"
+        return True
+    check("回查函数挡得住目录穿越", path_traversal_still_blocked)
+
+    def prompt_forbids_inventing():
+        # 提示词不是防线(它拦不住,这次就是证明),但两种语言都得写上 ——
+        # 少写一边,那个语言下模型连"这事不许干"都不知道
+        import contextvars
+        for lang, needle in (("zh", "一个 /landing-pages/... 链接都不许写出来"),
+                             ("en", "NEVER write a /landing-pages/... link")):
+            ctx = contextvars.Context()
+            sp = ctx.run(lambda: (srv.CURRENT_CHAT_MODE.set("landing"),
+                                  srv._system_prompt_now(lang))[1])
+            if needle not in sp:
+                return "%s 的落地页提示词里没写「不许自己编预览链接」" % lang
+        return True
+    check("中英提示词都写了不许自己编预览链接", prompt_forbids_inventing)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3343,6 +3440,7 @@ if __name__ == "__main__":
     test_dash_range()
     test_empty_reply()
     test_loop_guard()
+    test_fake_preview_link()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()
