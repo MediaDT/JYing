@@ -1020,6 +1020,12 @@ def test_pure_logic():
             "type": "swap_campaign_landers", "campaign_name": "X", "flow_id": "a" * 24,
             "put_body": {"flow": {"transition": "302"}}, "fingerprint": "f",
             "user_id": "", "seq": 1}
+        # **这条测试会真的走到 confirm_action -> apply_flow**(保险丝拦不住:
+        # CURRENT_SEQ 默认 0,和待办里的 seq=1 不相等)。不挡住的话,冒烟跑一次
+        # 就往用户真实的 ClickFlare 账号发一次请求 —— 测试不许碰真实数据。
+        import clickflare_client as cfc
+        real_apply = cfc.apply_flow
+        cfc.apply_flow = lambda *a, **k: {"done": True, "已经生效": True, "flow_id": "test"}
         try:
             for want in srv.LANDING_ACTION_TYPES:
                 if want not in ("publish_landing_pages", "swap_campaign_landers"):
@@ -1046,6 +1052,7 @@ def test_pure_logic():
             finally:
                 srv.CURRENT_CHAT_MODE.reset(m)
         finally:
+            cfc.apply_flow = real_apply
             srv.PENDING_ACTIONS.pop(aid, None)
             srv._save_actions()
         return None
@@ -2738,6 +2745,175 @@ def _src_no_comments(path: str) -> str:
 # ============ 3.45 按人隔离:别人的东西不能串过来 ============
 
 
+# ============ 3.43 「别再烧下去了」闸门 ============
+
+def test_loop_guard():
+    """模型在工具循环里原地打转时,要能自己停下来,而不是转满十轮把钱烧完。
+
+    **必须真跑一遍 `ask_openai`**,不能只搜源码里有没有那几个名字 ——
+    闸门写对了但没接进循环,搜源码照样全绿(踩过:linkifyBubble 那条)。
+    """
+    import contextvars
+    import inspect
+    import os
+    import agent_server as srv
+
+    print("\n【3.43】绕住了就停下(别一直烧钱)")
+
+    # 没钥匙时 openai.OpenAI() 构造就会抛,和闸门无关 —— 补一把假的,跑完还原
+    _had = os.environ.get("OPENAI_API_KEY")
+    os.environ.setdefault("OPENAI_API_KEY", "sk-smoke-test-not-a-real-key")
+
+    class Msg:
+        def __init__(self, content=""):
+            self.content = content
+
+    def run_with_stub(reply_fn):
+        """把 `_openai_once` 换成假的,数一数它被调了几次。"""
+        calls = []
+
+        def fake_once(client, model, msgs, streaming):
+            calls.append(model)
+            return reply_fn(len(calls))
+
+        real = srv._openai_once
+        srv._openai_once = fake_once
+        ctx = contextvars.copy_context()          # 闸片是 contextvar,一轮一份
+
+        def go():
+            srv.CURRENT_GUARD.set(srv.LoopGuard())
+            return srv.ask_openai([srv.ChatMessage(role="user", content="查一下")], "zh")
+        try:
+            return ctx.run(go), calls
+        finally:
+            srv._openai_once = real
+
+    def tc(name, args_json, idx=0):
+        return {"id": "c%d" % idx, "name": name, "arguments": args_json}
+
+    # ---- ① 同一个工具 + 同一份参数反复调 → 停 ----
+    def stops_on_repeat():
+        out, calls = run_with_stub(
+            lambda n: ("", [tc("__fake_tool__", '{"search": "roof"}', n)], "tool_calls", (0, 0)))
+        if "停下来" not in out:
+            return "没有停,或者停了但没说人话:%r" % out[:120]
+        if len(calls) >= srv.MAX_TOOL_ROUNDS:
+            return "一直转到轮数上限才停(%d 轮),重复检测没起作用" % len(calls)
+        if len(calls) != srv.TOOL_REPEAT_LIMIT:
+            return "应该在第 %d 次同样的调用就停,实际问了 %d 轮" % (
+                srv.TOOL_REPEAT_LIMIT, len(calls))
+        return True
+    check("同一个工具+同一份参数调到第 3 次 → 立刻停", stops_on_repeat)
+
+    # ---- ② 参数不一样就不算打转(别误伤正常的多步查询) ----
+    def different_args_not_flagged():
+        out, calls = run_with_stub(
+            lambda n: ("", [tc("__fake_tool__", '{"page": %d}' % n, n)], "tool_calls", (0, 0)))
+        if len(calls) != srv.MAX_TOOL_ROUNDS:
+            return "参数每次都不同却提前停了(只跑了 %d 轮)" % len(calls)
+        if "停下来" not in out:
+            return "转满轮数也没停:%r" % out[:120]
+        return True
+    check("参数不同 = 正常的多步查询,不误判成打转", different_args_not_flagged)
+
+    # ---- ③ 花费到顶 → 停(而且要比轮数上限先踩到) ----
+    def stops_on_budget():
+        big = srv.TURN_TOKEN_BUDGET // 3 + 1        # 三轮就超
+        out, calls = run_with_stub(
+            lambda n: ("", [tc("__fake_tool__", '{"page": %d}' % n, n)], "tool_calls",
+                       (big // 2, big // 2)))
+        if len(calls) >= srv.MAX_TOOL_ROUNDS:
+            return "花费闸门没生效,一直转到轮数上限"
+        if "额度" not in out:
+            return "停是停了,但没说是花费到顶:%r" % out[:120]
+        if "万 token" not in out:
+            return "没有如实报出花了多少"
+        return True
+    check("这条消息的花费到顶 → 停,并报出花了多少", stops_on_budget)
+
+    # ---- ④ 上游不给用量时,绝不假装在管钱 ----
+    def no_usage_no_fake_number():
+        g = srv.LoopGuard()
+        g.rounds = 3
+        if g.usage_seen:
+            return "什么都没记就说自己拿到用量了"
+        say = g.spent()
+        if "查不到" not in say:
+            return "上游没给用量,却报了一个数出来:%r" % say
+        # 花费闸门此时必须失效(否则 tokens 恒为 0,永远不触发,或者更糟:瞎估)
+        g.tokens_in = 10 ** 9
+        if g.before_round() == "tokens":
+            return "没拿到真实用量却拿估算数去踩闸门"
+        return True
+    check("拿不到用量时如实说查不到,不编数字也不假装在管钱", no_usage_no_fake_number)
+
+    # ---- ⑤ 两条大脑路径都要装(只修一边等于没修) ----
+    def both_brains_guarded():
+        for fn, name in ((srv.ask_openai, "ask_openai"), (srv._gemini_loop, "_gemini_loop")):
+            src = _no_comments(inspect.getsource(fn))
+            for needle in ("before_round(", "note_call(", "guard.message("):
+                if needle not in src:
+                    return "%s 里没有 %s" % (name, needle)
+            if "range(10)" in src:
+                return "%s 还留着写死的 range(10)" % name
+        return True
+    check("Gemini 和 ofox 两条路都装了闸门", both_brains_guarded)
+
+    # ---- ⑥ 用量在 choices 为空的那个 chunk 上,必须抢在 continue 之前读 ----
+    def usage_read_before_continue():
+        src = _no_comments(inspect.getsource(srv._openai_once))
+        i_usage = max(src.find("took(chunk)"), src.find("chunk.usage"))
+        i_skip = src.find("if not chunk.choices")
+        if i_usage < 0:
+            return "流式路径根本没读用量"
+        if i_skip < 0 or i_usage > i_skip:
+            return "读用量排在 `if not chunk.choices: continue` 后面 —— 永远读不到"
+        return True
+    check("流式的用量抢在 `choices 为空就跳过` 之前读", usage_read_before_continue)
+
+    # ---- ⑦ 闸片按请求隔离(不能所有人共用一份) ----
+    def guard_is_per_request():
+        # 两个坑:
+        # ① **要留着对象本身比,不能比 id()** —— 第一个闸片在这里已经没人引用了,
+        #    回收之后第二个很可能分到同一个地址,id 相等,测试就误报;
+        # ② **要用 `Context()` 而不是 `copy_context()`** —— 后者会把外面已经
+        #    设过的值一起继承过来,于是两份都是同一个,被上一个测试的残留骗过去。
+        seen = []
+        for _ in range(2):
+            contextvars.Context().run(
+                lambda: (srv._new_turn("campaign"), seen.append(srv._guard())))
+        if seen[0] is seen[1]:
+            return "两个请求拿到的是同一份闸片,A 的轮数会算到 B 头上"
+        seen[0].rounds = 7
+        if seen[1].rounds != 0:
+            return "两份闸片的状态串了"
+        if contextvars.Context().run(srv.CURRENT_GUARD.get) is not None:
+            return "闸片用了可变对象当 ContextVar 的默认值(所有请求会共用一份)"
+        return True
+    check("闸片按请求隔离,不是全局一份", guard_is_per_request)
+
+    # ---- ⑧ 停下来那句话要能让人知道下一步干嘛 ----
+    def message_is_actionable():
+        for lang in ("zh", "en"):
+            g = srv.LoopGuard()
+            g.rounds, g.stop = 5, "rounds"
+            g.add_usage(6800, 8000)
+            m = g.message(lang)
+            if len(m) < 80:
+                return "%s 版太短,等于只说了句'已中止'" % lang
+            if "token" not in m.lower():
+                return "%s 版没告诉用户花了多少" % lang
+        zh = srv.LoopGuard()
+        zh.rounds, zh.stop = 5, "rounds"
+        if "你可以" not in zh.message("zh"):
+            return "中文版没给下一步该怎么办"
+        return True
+    check("停下来时说清楚:发生了什么 / 花了多少 / 下一步", message_is_actionable)
+
+    if _had is None:
+        os.environ.pop("OPENAI_API_KEY", None)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3166,6 +3342,7 @@ if __name__ == "__main__":
     test_css_vars()
     test_dash_range()
     test_empty_reply()
+    test_loop_guard()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

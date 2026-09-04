@@ -2414,7 +2414,7 @@ def create_clickflare_landers(campaign: str, variant_a_url: str, variant_b_url: 
 
 def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: str,
                                   weight_a: int = 50, weight_b: int = 50,
-                                  path_name: str = "") -> dict:
+                                  path_name: str = "", allow_identical: bool = False) -> dict:
     """登记「把这条 campaign 的落地页换成 A/B 两个」的待办;用户下一条消息确认才真改。
 
     **这是全项目风险最高的一个写操作**:改完**立刻生效**,当场就在拿买来的流量
@@ -2430,7 +2430,8 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
     except (TypeError, ValueError):
         return {"error": "权重要是整数,比如各 50。"}
     try:
-        plan = cfc.plan_lander_swap(campaign, landers, path_name=path_name)
+        plan = cfc.plan_lander_swap(campaign, landers, path_name=path_name,
+                                    allow_identical=allow_identical)
     except Exception as e:
         return {"error": str(e)[:500]}
     if plan.get("offer有没有动") != "没动":
@@ -2446,6 +2447,7 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
         "after": plan["换之后"],
         "put_body": plan["put_body"],
         "fingerprint": plan["fingerprint"],
+        "expect_landers": [str(x.get("id")) for x in landers],
         "user_id": CURRENT_USER_ID.get(),
         "seq": _seq(),
     }
@@ -2477,12 +2479,21 @@ def _execute_swap_campaign_landers(action: dict) -> dict:
     """真改。执行前会拿指纹再比一次 —— 登记之后被人在后台动过就停下不写。"""
     try:
         result = cfc.apply_flow(action.get("flow_id", ""), action.get("put_body") or {},
-                                expect_fingerprint=action.get("fingerprint", ""))
+                                expect_fingerprint=action.get("fingerprint", ""),
+                                expect_landers=action.get("expect_landers") or [])
     except Exception as e:
-        return {"error": str(e)[:500]}
+        # 走到这儿说明 **PUT 本身没发出去或被拒**(指纹不符、网络断、平台报错)——
+        # 线上没有变化,重试是安全的。写成功之后的失败不会走到这里:
+        # apply_flow 从 PUT 那一行往后自己兜住,返回 done=True 加一条警告。
+        return {"error": str(e)[:500],
+                "note": "**投放没有被改动**(改动请求没发出去)。可以查清原因后重新登记。"}
     result["切换时间"] = sched.both_times(sched.now_beijing())
+    warn = result.get("⚠️回查失败") or result.get("⚠️对不上")
     result["note"] = ("已生效。**从这一刻起买来的流量走新落地页** —— 这条 campaign 的"
-                      "转化数据从现在开始跨两批页面,复盘时记得以上面这个切换时间为界。")
+                      "转化数据从现在开始跨两批页面,复盘时记得以上面这个切换时间为界。"
+                      + ("" if not warn else
+                         " ⚠️ 但是:" + warn + " **务必把这句原样告诉用户,并强调不要重试** —— "
+                         "改已经发出去了,再确认一次只会把事情弄乱。"))
     return result
 
 
@@ -3274,9 +3285,14 @@ def _system_prompt_now(lang: str = "zh") -> str:
             if a.get("type") == "create_campaign":
                 what = f"create ad \"{a.get('campaign_name')}\"" if english else f"新建广告「{a.get('campaign_name')}」"
             elif a.get("type") == "swap_campaign_landers":
-                what = (f"swap campaign \"{a.get('campaign_name')}\" landers to A/B 50/50"
+                # **权重要照实说,不能写死 50/50** —— 这句是每轮注进提示词的,
+                # 模型跨轮全靠它记住待办内容。用户明明定的是 70/30,
+                # 这里说成各 50%,他复述给用户听的就是错的,而他自己无从发现。
+                ws = "/".join(str(x.get("weight")) for x in
+                              ((a.get("after") or {}).get("落地页") or [])) or "?"
+                what = (f"swap campaign \"{a.get('campaign_name')}\" landers to A/B {ws}"
                         if english else
-                        f"把 campaign「{a.get('campaign_name')}」的落地页换成 A/B 各 50%")
+                        f"把 campaign「{a.get('campaign_name')}」的落地页换成 A/B({ws})")
             elif a.get("type") == "publish_landing_pages":
                 what = (f"publish landing A/B to {a.get('domain')}/{a.get('slug')}"
                         if english else f"发布落地页 A/B 到 {a.get('domain')}/{a.get('slug')}")
@@ -3353,6 +3369,158 @@ BRAIN_RETRIES = int(os.environ.get("BRAIN_RETRIES", "1"))
 # 用户看到的是「等太久了」,而模型其实一直在正常干活。
 # 必须**小于前端的 IDLE_TIMEOUT_MS(5 分钟)**:后端先失败,才能把真实原因说出来。
 GEN_TIMEOUT_S = float(os.environ.get("GEN_TIMEOUT_S", "240"))
+
+# ---- 「别再烧下去了」闸门 ----------------------------------------------------
+# 模型有时会在工具循环里原地打转:查一次、想一想、再用**一模一样的条件**查一次,
+# 永远得不出结论。用户那头只看到"正在查…"转个不停,而每转一轮都是一次完整的
+# 模型调用 —— 实测一轮 ≈ 6.8K 输入 + 7~9K 输出,推理型模型的输出占成本约 89%,
+# 十轮下来一条消息就能花掉一两美元,**而且什么答案都没有**。
+# 所以这里守三条,任何一条踩到就立刻停,并如实告诉用户停在哪、花了多少。
+MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "10"))
+# 同一个工具 + 完全相同的参数,调到第几次算"绕住了"。
+# 2 次可能是一次正常重试(上次超时或报错),3 次就是没在往前走了。
+TOOL_REPEAT_LIMIT = int(os.environ.get("TOOL_REPEAT_LIMIT", "3"))
+# 一条用户消息累计允许用掉多少 token(输入 + 输出 + 看不见的思考)。
+# 按一轮 ≈ 15K 估,10 万大约是第 6~7 轮的位置 —— 正常问答 1~3 轮根本碰不到,
+# 而真绕住的时候能在花掉一半之前就掐住。填 0 = 不限。
+TURN_TOKEN_BUDGET = int(os.environ.get("TURN_TOKEN_BUDGET", "100000"))
+
+
+class LoopGuard:
+    """一轮用户消息的刹车片。三条判据任一命中就停下。
+
+    **为什么不能只靠 `for _ in range(10)`**:那个上限只数轮数,不看内容也不看花费。
+    模型用同样的参数查第三遍时它一声不吭,非要等满十轮才停;而十轮的钱早就花完了,
+    最后还只甩一句"轮数过多,请换个问法" —— 用户既不知道发生了什么,也不知道花了多少。
+    """
+
+    def __init__(self) -> None:
+        self.rounds = 0
+        self.calls: dict[str, int] = {}   # 工具签名 → 调过几次
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.usage_seen = False           # 上游到底给没给用量(没给就别装作在管钱)
+        self.stop = ""                    # 命中的判据
+        self.detail = ""                  # 命中时的补充信息(比如是哪个工具在打转)
+        self.detail_en = ""
+
+    # ---- 记账 ----
+    @property
+    def tokens(self) -> int:
+        return self.tokens_in + self.tokens_out
+
+    def add_usage(self, prompt: int, completion: int) -> None:
+        """记一轮的用量。上游没给就别记 —— 见 `usage_seen`。"""
+        if not prompt and not completion:
+            return
+        self.usage_seen = True
+        self.tokens_in += int(prompt or 0)
+        self.tokens_out += int(completion or 0)
+
+    # ---- 判据 ----
+    def before_round(self) -> str:
+        """开下一轮之前问一句:还能继续吗?返回空串 = 可以。"""
+        self.rounds += 1
+        if self.rounds > MAX_TOOL_ROUNDS:
+            self.stop = "rounds"
+            return self.stop
+        # **只有真拿到用量才判花费**。上游不给用量时(有些中转不返回 usage),
+        # 本地估不出模型的思考 token —— 那才是大头,估出来的数会小得离谱,
+        # 拿它当闸门等于没有闸门。宁可这条不生效,也不能给人"已经管住了"的错觉。
+        if TURN_TOKEN_BUDGET and self.usage_seen and self.tokens > TURN_TOKEN_BUDGET:
+            self.stop = "tokens"
+            return self.stop
+        return ""
+
+    def note_call(self, name: str, args) -> str:
+        """记一次工具调用。返回非空 = 这个调用重复太多次,该停了。"""
+        try:
+            key = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True,
+                                          default=str)
+        except Exception:
+            key = name + "|" + str(args)
+        self.calls[key] = self.calls.get(key, 0) + 1
+        if self.calls[key] >= TOOL_REPEAT_LIMIT:
+            self.stop = "repeat"
+            # 中英各存一份:`_tool_label` 出的是中文标签,英文模式下直接用工具原名,
+            # 不然英文回复里会冒出一句中文,用户以为是乱码。
+            self.detail = "%s,连着第 %d 次,条件一模一样" % (_tool_label(name), self.calls[key])
+            self.detail_en = "%s, %d times in a row with identical arguments" % (
+                name, self.calls[key])
+            return self.stop
+        return ""
+
+    # ---- 收尾 ----
+    def spent(self, english: bool = False) -> str:
+        """花了多少,说人话。上游没给用量就如实说查不到,不许编一个数出来。"""
+        if english:
+            if not self.usage_seen:
+                return "%d model calls (this provider returns no usage data)" % self.rounds
+            return ("%d model calls, roughly %.0fK tokens (%.0fK in + %.0fK out/thinking)"
+                    % (self.rounds, self.tokens / 1000,
+                       self.tokens_in / 1000, self.tokens_out / 1000))
+        if not self.usage_seen:
+            return "问了 %d 轮模型(这家中转没有返回用量,具体多少查不到)" % self.rounds
+        return ("问了 %d 轮模型,大约 %.1f 万 token(输入 %.0fK + 输出/思考 %.0fK)"
+                % (self.rounds, self.tokens / 10000,
+                   self.tokens_in / 1000, self.tokens_out / 1000))
+
+    def message(self, lang: str = "zh") -> str:
+        """给用户的交代。
+
+        **不能只说"已中止"** —— 那是死胡同:用户不知道发生了什么、花了多少、
+        下一步该干嘛,多半会原样再发一次,于是再烧一遍。
+        """
+        english = str(lang).lower().startswith("en")
+        print("[guard] 中止:%s rounds=%d tokens=%d+%d %s"
+              % (self.stop, self.rounds, self.tokens_in, self.tokens_out, self.detail),
+              flush=True)
+        br = "\n\n"
+        if english:
+            why = {
+                "repeat": ("I kept running the exact same lookup over and over (%s) "
+                           "and getting the same thing back — I was going in circles, "
+                           "not making progress." % (self.detail_en or self.detail)),
+                "rounds": ("I went %d rounds of looking things up without reaching "
+                           "a conclusion." % (self.rounds - 1)),
+                "tokens": ("This one question has already used up its budget without "
+                           "reaching a conclusion."),
+            }.get(self.stop, "I stopped making progress.")
+            return ("⚠️ **I stopped on purpose — going further would just cost money "
+                    "for nothing.**" + br
+                    + "**What happened:** " + why + br
+                    + "**Spent on this message:** " + self.spent(True) + "." + br
+                    + "**What you can do:**\n"
+                    + "· Be more specific (name the campaign, or give a date range);\n"
+                    + "· Or split it into two smaller questions and ask them one at a time.")
+        why = {
+            "repeat": ("我连着用**一模一样的条件**去查同一样东西(%s),每次拿回来的都一样"
+                       " —— 说明我卡住了,没有在往前走。" % self.detail),
+            "rounds": "我查了 %d 轮还是没能得出结论。" % (self.rounds - 1),
+            "tokens": "这一条问题已经用掉了它的额度,还是没能得出结论。",
+        }.get(self.stop, "我没有继续往前走了。")
+        return ("⚠️ **我主动停下来了 —— 再问下去只是白花钱。**" + br
+                + "**发生了什么**:" + why + br
+                + "**这一条消息花掉**:" + self.spent() + "。" + br
+                + "**你可以这样做**:\n"
+                + "· 把问题说得更具体一点(带上计划名字、或者一个日期范围);\n"
+                + "· 或者把它拆成两个小问题,一个一个问。")
+
+
+CURRENT_GUARD: contextvars.ContextVar = contextvars.ContextVar("adbot_guard", default=None)
+
+
+def _guard() -> "LoopGuard":
+    """这一轮的刹车片。
+
+    **不能用可变对象当 ContextVar 的默认值** —— 那样所有请求会共用同一份,
+    A 的轮数会算到 B 头上,等于没隔离(和 CURRENT_EXECUTED 是同一个坑)。
+    """
+    g = CURRENT_GUARD.get()
+    if g is None:
+        g = LoopGuard()
+        CURRENT_GUARD.set(g)
+    return g
 
 # ===== Gemini 的超时与熔断 =====
 # 实测(2026-08-26,开发机):`generativelanguage.googleapis.com` 的 TLS 握手 16ms、
@@ -3471,8 +3639,25 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
     contents = list(contents)
     retried_empty = False        # 空回复只原地重试一次
 
-    for _ in range(10):   # 设个上限防转圈
+    guard = _guard()
+    while True:
+        # **每轮开始前先问闸门**:轮数到顶 / 这条消息的花费到顶 → 立刻停,
+        # 并把"停在哪、花了多少、下一步怎么办"如实告诉用户(见 LoopGuard)。
+        if guard.before_round():
+            _emit("reset")
+            return guard.message(lang)
         texts, calls, model_parts = [], [], []
+        usage = [0, 0]
+
+        def take_usage(obj):
+            """记这一轮的 token 用量。流式时每个 chunk 都带**累计值**,
+            所以是覆盖不是累加 —— 累加会算出好几倍,闸门会提前误踩。"""
+            u = getattr(obj, "usage_metadata", None)
+            if u is None:
+                return
+            usage[0] = int(getattr(u, "prompt_token_count", 0) or 0)
+            usage[1] = (int(getattr(u, "candidates_token_count", 0) or 0)
+                        + int(getattr(u, "thoughts_token_count", 0) or 0))
 
         def take(part):
             """收下模型吐出来的一个 part。
@@ -3492,12 +3677,15 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
         if streaming:
             for chunk in client.models.generate_content_stream(
                     model=model, contents=contents, config=cfg):
+                take_usage(chunk)
                 for part in _gemini_parts(chunk):
                     take(part)
         else:
             resp = client.models.generate_content(model=model, contents=contents, config=cfg)
+            take_usage(resp)
             for part in _gemini_parts(resp):
                 take(part)
+        guard.add_usage(usage[0], usage[1])
 
         if not calls:
             out = "".join(texts)
@@ -3522,6 +3710,9 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
         # 替它执行,把结果贴回去,再让它接着想
         result_parts = []
         for fc in calls:
+            # 同一个工具 + 同一份参数反复调 = 它在原地打转,别再往下执行了
+            if guard.note_call(fc.name, dict(fc.args or {})):
+                return guard.message(lang)
             _emit("status", text=_tool_label(fc.name))
             try:
                 result = _tool_call(fc.name, dict(fc.args or {}))
@@ -3530,8 +3721,6 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
             result_parts.append(genai_types.Part.from_function_response(
                 name=fc.name, response={"result": result}))
         contents.append(genai_types.Content(role="user", parts=result_parts))
-
-    return "(工具调用轮数过多,已中止,请换个问法)"
 
 # ============ 大脑 B:ChatGPT(OpenAI) ============
 # ChatGPT 的工具调用是"手动挡":要给每个工具写 JSON 说明书,并自己跑调用循环。
@@ -3707,7 +3896,10 @@ OPENAI_TOOL_SCHEMAS = [
               "weight_a": {"type": "integer", "description": "A 的权重，默认 50"},
               "weight_b": {"type": "integer", "description": "B 的权重，默认 50，两者相加必须是 100"},
               "path_name": {"type": "string", "description":
-                  "这条 flow 有多条启用中的 path 时才要填，代码不会替用户挑；只有一条时留空"}},
+                  "这条 flow 有多条启用中的 path 时才要填，代码不会替用户挑；只有一条时留空"},
+              "allow_identical": {"type": "boolean", "description":
+                  "两个 Lander 指向同一个网址时才用得上。默认 false。"
+                  "**只有用户明确说要做 A/A 测试才传 true**，严禁自己带上"}},
              ["campaign", "lander_a_id", "lander_b_id"]),
     _oa_tool("propose_publish_landing_pages",
              "登记把两个已生成页面发布为 Cloudflare Pages A/B 版本的待办。新域名自动建项目，旧域名复用；"
@@ -3812,11 +4004,18 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
     streaming = CURRENT_EMIT.get() is not None
 
     retried_empty = False        # 空回复只原地重试一次,别把额度耗在死循环上
-    for _ in range(10):  # 工具调用循环:一轮没答完就继续,设个上限防转圈
+    guard = _guard()
+    while True:
+        # 每轮开始前先问闸门(轮数 / 花费),见 Gemini 那条路上的同一段说明
+        if guard.before_round():
+            _emit("reset")
+            return guard.message(lang)
         content, tool_calls, finish, ok_model = "", [], "", None
         for model in models_to_try:
             try:
-                content, tool_calls, finish = _openai_once(client, model, msgs, streaming)
+                content, tool_calls, finish, usage = _openai_once(
+                    client, model, msgs, streaming)
+                guard.add_usage(usage[0], usage[1])
                 ok_model = model
                 break
             except openai.NotFoundError:
@@ -3849,15 +4048,28 @@ def ask_openai(messages: list[ChatMessage], lang: str = "zh") -> str:
                                                   "arguments": tc["arguments"]}}
                                     for tc in tool_calls]})
         for tc in tool_calls:
-            _emit("status", text=_tool_label(tc["name"]))
+            # 参数解析要单独兜住:解析失败时**照旧把错误告诉模型**,
+            # 不能改成"用空参数调一遍"—— 那会让它以为查了个寂寞,还可能真发出去。
+            bad = ""
             try:
                 args = json.loads(tc["arguments"] or "{}")
-                result = _tool_call(tc["name"], args)
+                if not isinstance(args, dict):
+                    raise ValueError("参数不是一个对象")
             except Exception as e:
-                result = {"error": str(e)}
+                args, bad = tc["arguments"], "参数解析失败:%s" % e
+            # 同一个工具 + 同一份参数反复调 = 它在原地打转,别再往下执行了
+            if guard.note_call(tc["name"], args):
+                return guard.message(lang)
+            _emit("status", text=_tool_label(tc["name"]))
+            if bad:
+                result = {"error": bad}
+            else:
+                try:
+                    result = _tool_call(tc["name"], args)
+                except Exception as e:
+                    result = {"error": str(e)}
             msgs.append({"role": "tool", "tool_call_id": tc["id"],
                          "content": json.dumps(result, ensure_ascii=False)})
-    return "(工具调用轮数过多,已中止,请换个问法)"
 
 
 def _empty_reply_msg(finish: str, lang: str = "zh") -> str:
@@ -3880,8 +4092,15 @@ def _empty_reply_msg(finish: str, lang: str = "zh") -> str:
             "请把问题再发一次;如果反复这样,换个说法、或者把问题拆小一点再问。")
 
 
-def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, list, str]:
-    """问一轮 OpenAI/ofox,返回 (文字, 工具调用清单, finish_reason)。
+# 有的中转不认 `stream_options`(流式要用量必须靠它)。碰过一次 400 就记下来,
+# 之后不再发这个参数 —— 而不是每轮都撞一次墙。拿不到用量时花费闸门自动失效
+# (见 LoopGuard.before_round 里的说明),轮数和重复调用两道照常管用。
+_STREAM_USAGE_OK = True
+
+
+def _openai_once(client, model: str, msgs: list,
+                 streaming: bool) -> tuple[str, list, str, tuple]:
+    """问一轮 OpenAI/ofox,返回 (文字, 工具调用清单, finish_reason, (输入token, 输出token))。
 
     流式时边收边把文字播报出去;工具调用是分片来的(名字和参数会拆成好几块),
     要按 index 拼起来才完整。
@@ -3892,17 +4111,45 @@ def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, 
     """
     schemas = [s for s in OPENAI_TOOL_SCHEMAS
                if _tool_allowed(s.get("function", {}).get("name", ""))]
+    def took(obj) -> tuple:
+        """从响应里抠出用量。**思考 token 已经含在 completion_tokens 里**
+        (实测一次聊天回复输出 7~9K,而屏幕上只有几百字,差额就是思考),
+        所以这里不用再单独加一遍。"""
+        u = getattr(obj, "usage", None)
+        if u is None:
+            return (0, 0)
+        return (int(getattr(u, "prompt_tokens", 0) or 0),
+                int(getattr(u, "completion_tokens", 0) or 0))
+
     if not streaming:
         r = client.chat.completions.create(model=model, messages=msgs, tools=schemas)
         m = r.choices[0].message
         return (m.content or "",
                 [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments or ""}
                  for tc in (m.tool_calls or [])],
-                r.choices[0].finish_reason or "")
+                r.choices[0].finish_reason or "",
+                took(r))
 
-    parts, slots, finish = [], {}, ""
-    for chunk in client.chat.completions.create(
-            model=model, messages=msgs, tools=schemas, stream=True):
+    global _STREAM_USAGE_OK
+    kw = {"stream_options": {"include_usage": True}} if _STREAM_USAGE_OK else {}
+    try:
+        stream = client.chat.completions.create(
+            model=model, messages=msgs, tools=schemas, stream=True, **kw)
+    except openai.BadRequestError as e:
+        # 只在确实是这个参数被拒时降级,别把别的 400 也当成"不支持用量"吞掉
+        if not kw or "stream_options" not in str(e):
+            raise
+        print("[brain] 这家中转不支持 stream_options,之后不再要用量", flush=True)
+        _STREAM_USAGE_OK = False
+        stream = client.chat.completions.create(
+            model=model, messages=msgs, tools=schemas, stream=True)
+
+    parts, slots, finish, usage = [], {}, "", (0, 0)
+    for chunk in stream:
+        # **用量在最后一个 chunk 上,而那个 chunk 的 choices 是空的** ——
+        # 要抢在下面 `continue` 之前读,不然永远读不到。
+        if getattr(chunk, "usage", None):
+            usage = took(chunk)
         if not chunk.choices:
             continue
         if chunk.choices[0].finish_reason:
@@ -3922,7 +4169,7 @@ def _openai_once(client, model: str, msgs: list, streaming: bool) -> tuple[str, 
                     slot["name"] += tc.function.name
                 if tc.function.arguments:
                     slot["arguments"] += tc.function.arguments
-    return "".join(parts), [slots[i] for i in sorted(slots)], finish
+    return "".join(parts), [slots[i] for i in sorted(slots)], finish, usage
 
 
 def ask_claude(messages: list[ChatMessage], lang: str = "zh") -> str:
@@ -4162,6 +4409,7 @@ def _new_turn(mode: str = "campaign") -> None:
         seq = _REQUEST_SEQ
     CURRENT_SEQ.set(seq)            # 保险丝:区分"登记"和"确认"是不是同一条消息
     CURRENT_EXECUTED.set([])        # 本轮"真实执行台账",一轮一份
+    CURRENT_GUARD.set(LoopGuard())  # 本轮的刹车片(轮数 / 重复调用 / 花费),一轮一份
     CURRENT_CHAT_MODE.set(mode if mode in {"campaign", "creative", "landing"} else "campaign")
     load_env_file()                 # 现读 .env:刚填的钥匙不用重启就生效
 

@@ -337,16 +337,42 @@ def _flow_put_body(flow_doc: dict) -> dict:
 
 
 def _iter_paths(paths_obj: dict):
-    """遍历 flow 里所有的 path,返回 (分组名, 序号, path 本身)。"""
+    """遍历 flow 里所有真正的 path,返回 (定位, path 本身)。
+
+    **`rulePaths` 底下装的是「规则」,不是 path** —— 每条规则自己还带一个
+    `paths` 数组,真正的 path 嵌在里面一层(swagger 里 rulePaths.paths[] 的键是
+    `{name, conditions, conditionsJoinOperator, enabled, paths}`,而
+    defaultPaths.paths[] 才是带 `destination` 的那种)。
+    照 defaultPaths 的形状一视同仁地遍历,会把规则当成 path 报出来,
+    而规则底下真正的 path 一条都看不见 —— 用规则分流的 campaign 就没法换落地页,
+    报的还是一句看不懂的「这条 path 的类型是 None」。
+
+    `定位` 是一串键/下标,`_path_at()` 照着它能取回同一个对象。
+    """
     for group_name, group in (paths_obj or {}).items():
         if not isinstance(group, dict):
             continue
-        for idx, path in enumerate(group.get("paths") or []):
-            if isinstance(path, dict):
-                yield group_name, idx, path
+        for idx, item in enumerate(group.get("paths") or []):
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("paths"), list):          # 这是一条规则
+                for jdx, path in enumerate(item["paths"]):
+                    if isinstance(path, dict):
+                        yield (group_name, "paths", idx, "paths", jdx), path
+            else:
+                yield (group_name, "paths", idx), item
 
 
-def plan_lander_swap(campaign: str, landers: list[dict], path_name: str = "") -> dict:
+def _path_at(paths_obj: dict, locator: tuple):
+    """按 `_iter_paths` 给的定位取回那个 path(用来在 put_body 上改同一条)。"""
+    node = paths_obj
+    for key in locator:
+        node = node[key]
+    return node
+
+
+def plan_lander_swap(campaign: str, landers: list[dict], path_name: str = "",
+                     allow_identical: bool = False) -> dict:
     """算出「把这条 campaign 的落地页换成这几个」之后 flow 应该长什么样。
 
     **只算,不写。** 返回里带着 before/after、警告,以及执行时要 PUT 的完整 body
@@ -366,11 +392,25 @@ def plan_lander_swap(campaign: str, landers: list[dict], path_name: str = "") ->
     for ident in ids:
         if not _OBJECT_ID.match(ident):
             raise ClickFlareError(f"落地页 id 格式不对:{ident[:30]}")
-    known = {str(x.get("id")) for x in list_landings(limit=100000)["landings"]}
-    missing = [i for i in ids if i not in known]
+    rows = {str(x.get("id")): x for x in list_landings(limit=100000)["landings"]}
+    missing = [i for i in ids if i not in rows]
     if missing:
         raise ClickFlareError(f"ClickFlare 里找不到这些落地页:{missing} —— "
                               "先用 create_clickflare_landers 建好再挂。")
+    # **两个 id 不同、但指向同一个网址,照样是假 A/B。**
+    # 地址这一行就在手边(上面那份清单每条都带 url),比一比不花钱。
+    # 账号里有 900 多个 Lander,重复建同一个地址很常见;而跑起来两个网址都正常、
+    # 数据照常上报,唯一后果是「胜者只是噪音」—— 从外面完全看不出来。
+    # 和发布落地页那道 allow_identical 是同一条规矩,只是这一步花的是真钱。
+    urls = [str(rows[i].get("url") or "").strip().rstrip("/").lower() for i in ids]
+    dup = [u for u in set(urls) if u and urls.count(u) > 1]
+    if dup and not allow_identical:
+        raise ClickFlareError(
+            f"这两个 Lander 指向的是同一个网址({dup[0]}),id 不同而已。"
+            "这样分流出去,两边跑的是同一个页面 —— 钱照花、数据照上报,"
+            "但分出来的「胜者」只是噪音,而且从外面完全看不出来。"
+            "要么换成两个真正不同的页面;确实要做 A/A 测试(验证分流准不准)"
+            "就明确说一句,再带 allow_identical=true。")
 
     campaign_doc = get_campaign(campaign)
     flow_id = _flow_id_of(campaign_doc)
@@ -388,22 +428,22 @@ def plan_flow_lander_swap(flow_doc: dict, ids: list[str], landers: list[dict],
     「改哪一条 path」「兄弟 path 会不会被整体替换清掉」这些要命的地方。
     """
     flow_id = str(flow_doc.get("_id") or "")
-    candidates = [(g, i, p) for g, i, p in _iter_paths(flow_doc.get("paths") or {})
+    candidates = [(loc, p) for loc, p in _iter_paths(flow_doc.get("paths") or {})
                   if p.get("enabled", True)]
     if path_name:
-        candidates = [c for c in candidates if str(c[2].get("name") or "") == path_name]
+        candidates = [c for c in candidates if str(c[1].get("name") or "") == path_name]
     if not candidates:
         raise ClickFlareError("这条 flow 里没有启用中的 path" +
                               (f"叫「{path_name}」" if path_name else "") + ",没法挂落地页。")
     if len(candidates) > 1:
-        names = "、".join(f"{g}/{p.get('name')}" for g, _, p in candidates)
+        names = "、".join(f"{loc[0]}/{p.get('name')}" for loc, p in candidates)
         raise ClickFlareError(
             f"这条 flow 有 {len(candidates)} 条启用中的 path({names}),"
             "**不能替用户挑**要改哪一条。请把 path 的名字告诉我再来。")
-    group_name, idx, current = candidates[0]
+    locator, current = candidates[0]
 
     body = _flow_put_body(flow_doc)
-    target = body["paths"][group_name]["paths"][idx]
+    target = _path_at(body["paths"], locator)
     old_kind = target.get("destination")
     old_block = dict(target.get(old_kind) or {})
     offers = copy.deepcopy(old_block.get("offers") or [])
@@ -435,7 +475,7 @@ def plan_flow_lander_swap(flow_doc: dict, ids: list[str], landers: list[dict],
     names = _name_lookup()
     return {
         "flow_id": flow_id,
-        "path": {"分组": group_name, "序号": idx, "名字": current.get("name")},
+        "path": {"位置": "/".join(str(x) for x in locator), "名字": current.get("name")},
         "换之前": {"类型": old_kind,
                  "落地页": [_row(x, names["landings"]) for x in before_landers] or "(没有落地页,直接跳 offer)",
                  "offer": [_row(x, names["offers"]) for x in offers]},
@@ -449,7 +489,8 @@ def plan_flow_lander_swap(flow_doc: dict, ids: list[str], landers: list[dict],
     }
 
 
-def apply_flow(flow_id: str, put_body: dict, expect_fingerprint: str = "") -> dict:
+def apply_flow(flow_id: str, put_body: dict, expect_fingerprint: str = "",
+               expect_landers: list[str] | None = None) -> dict:
     """把算好的 flow 写回去。**这一下会立刻改变正在花钱的投放。**
 
     写之前拿指纹再比一次:登记之后如果有人在 ClickFlare 后台动过这条 flow,
@@ -464,14 +505,33 @@ def apply_flow(flow_id: str, put_body: dict, expect_fingerprint: str = "") -> di
             raise ClickFlareError(
                 "没有改。这条 flow 在登记之后被改过了(可能有人在 ClickFlare 后台动过)。"
                 "写回去会把那个改动整个覆盖掉 —— 请重新看一遍现状再登记。")
+
     _api("PUT", f"/api/flows/{str(flow_id).lower()}", json_body=put_body)
-    after = get_flow(str(flow_id).lower())
+    # ===== 从这一行往后,线上**已经改了**。=====
+    # 后面任何一步失败都**绝不能**说成「没改成」:回查只是个 GET,它超时/500
+    # 和「投放没换过去」是两码事。说成失败的后果很具体:用户以为流量还在老页面上,
+    # 而 100% 的付费流量其实已经走了新的;他还会去再确认一次,而那时指纹
+    # 已经因为**我们自己刚写的这一下**对不上了,系统会告诉他「有人在后台动过」——
+    # 让他去找一个根本没碰过的同事。
+    expected = [str(x).lower() for x in (expect_landers or [])]
+    result = {"done": True, "已经生效": True, "flow_id": flow_id}
+    try:
+        after = get_flow(str(flow_id).lower())
+    except Exception as e:
+        result["⚠️回查失败"] = (f"改已经写进去了,但回查这一下没成功({str(e)[:120]})。"
+                             "**不要重试**,请到 ClickFlare 后台核对一眼。")
+        return result
+
     landed = []
-    for _, _, path in _iter_paths(after.get("paths") or {}):
+    for _, path in _iter_paths(after.get("paths") or {}):
         block = path.get(path.get("destination")) or {}
-        landed.extend(block.get("landers") or [])
-    return {"done": True, "flow_id": flow_id,
-            "写完回查到的落地页": landed or "(一个都没有 —— 不对劲,请到后台核对)"}
+        landed.extend(str(x.get("id")).lower() for x in (block.get("landers") or []))
+    result["写完回查到的落地页"] = landed or "(一个都没有)"
+    # **回查要真的核对**,不能「非空就算成功」——那等于没查
+    if expected and not set(expected).issubset(set(landed)):
+        result["⚠️对不上"] = (f"写完回查,线上挂着的是 {landed},而我们要换成的是 {expected}。"
+                            "改**已经发出去了**,但结果和预期不一致,请立刻到后台核对。")
+    return result
 
 
 # ---------------------------------------------------------------- 脚本和地址(不用再让用户贴)
