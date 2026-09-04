@@ -125,6 +125,7 @@ _TOOL_LABELS = {
     "list_clickflare_campaigns": "正在读取 ClickFlare 的 campaign…",
     "describe_clickflare_campaign": "正在看这条 campaign 现在挂着什么…",
     "create_clickflare_landers": "正在把 A/B 两版登记进 ClickFlare…",
+    "propose_swap_campaign_landers": "正在核对这条 campaign 现在挂着什么…",
     "propose_publish_landing_pages": "正在登记 A/B 页面发布待办…",
     "my_ad_categories": "正在看你的账户在投什么品类…",
     "platform_kind": "正在判断这是哪类投放平台…",
@@ -1809,16 +1810,32 @@ def _find_duplicate(candidate: dict) -> str:
     return ""
 
 
+# 每个工作室能看见、能确认的待办类型。**加新的待办类型时只改这里** ——
+# 原来三处(待办清单 / 提示词注入 / confirm_action 的模式闸门)各写死一个字符串,
+# 漏改任何一处的表现都不一样:待办登记得了却看不见、或者确认时被拒。
+CREATIVE_ACTION_TYPES = ("make_creatives",)
+LANDING_ACTION_TYPES = ("publish_landing_pages", "swap_campaign_landers")
+
+
+def _mode_action_types(mode: str) -> tuple:
+    if mode == "creative":
+        return CREATIVE_ACTION_TYPES
+    if mode == "landing":
+        return LANDING_ACTION_TYPES
+    return ()
+
+
+
 def list_pending_actions() -> dict:
     """查看保险箱:所有已登记、还没执行的待办(含编号 action_id)。
     用户确认后若不记得编号,先用这个查,严禁重新登记同一件事。"""
     mode = CURRENT_CHAT_MODE.get()
     visible = [(aid, a) for aid, a in PENDING_ACTIONS.items()
                if mode == "campaign"
-               or (mode == "creative" and a.get("type") == "make_creatives")
-               or (mode == "landing" and a.get("type") == "publish_landing_pages")]
+               or a.get("type") in _mode_action_types(mode)]
     return {"pending_actions": [
-        {"action_id": aid, **{k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b") else v)
+        {"action_id": aid, **{k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b")
+                                    else "[已算好，不回显]" if k == "put_body" else v)
                               for k, v in a.items() if k != "seq"}}
         for aid, a in visible
     ] or "保险箱是空的,没有待执行的待办"}
@@ -2175,6 +2192,8 @@ def confirm_action(action_id: str) -> dict:
             result = _execute_make_creatives(action)
         elif action.get("type") == "publish_landing_pages":
             result = _execute_publish_landing_pages(action)
+        elif action.get("type") == "swap_campaign_landers":
+            result = _execute_swap_campaign_landers(action)
         else:
             # 一次可能要改好几个对象(开启广告要三层一起开)。逐个改、逐个记账,
             # 有失败的也要如实说明是哪一个 —— 别让用户以为全成了。
@@ -2203,7 +2222,8 @@ def confirm_action(action_id: str) -> dict:
             _save_actions()
         else:
             _executed().append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
-        safe_action = {k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b") else v)
+        safe_action = {k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b")
+                                    else "[已算好，不回显]" if k == "put_body" else v)
                        for k, v in action.items() if k != "seq"}
         return {"executed": safe_action,
                 **(result if isinstance(result, dict) else {"detail": result})}
@@ -2348,6 +2368,80 @@ def create_clickflare_landers(campaign: str, variant_a_url: str, variant_b_url: 
     }
 
 
+def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: str,
+                                  weight_a: int = 50, weight_b: int = 50,
+                                  path_name: str = "") -> dict:
+    """登记「把这条 campaign 的落地页换成 A/B 两个」的待办;用户下一条消息确认才真改。
+
+    **这是全项目风险最高的一个写操作**:改完**立刻生效**,当场就在拿买来的流量
+    往新页面送。所以走和建广告相同的保险箱,而且提案里必须把
+    「现在挂的是哪些 / 换成什么 / 权重多少 / offer 动不动」全列出来。
+
+    `campaign` 直接传用户给的 Campaign Tracking URL(里面带 `cpid=`)。
+    `path_name`:这条 flow 有多条启用中的 path 时才需要 —— **代码不会替用户挑**。
+    """
+    try:
+        landers = [{"id": lander_a_id, "weight": int(weight_a)},
+                   {"id": lander_b_id, "weight": int(weight_b)}]
+    except (TypeError, ValueError):
+        return {"error": "权重要是整数,比如各 50。"}
+    try:
+        plan = cfc.plan_lander_swap(campaign, landers, path_name=path_name)
+    except Exception as e:
+        return {"error": str(e)[:500]}
+    if plan.get("offer有没有动") != "没动":
+        return {"error": "算出来的新配置动了 offer —— 这是 bug,已经停下,没有改任何东西。"}
+
+    candidate = {
+        "type": "swap_campaign_landers",
+        "campaign_id": str(plan["campaign"].get("id") or ""),
+        "campaign_name": str(plan["campaign"].get("名字") or ""),
+        "flow_id": plan["flow_id"],
+        "path_name": str((plan.get("path") or {}).get("名字") or ""),
+        "before": plan["换之前"],
+        "after": plan["换之后"],
+        "put_body": plan["put_body"],
+        "fingerprint": plan["fingerprint"],
+        "user_id": CURRENT_USER_ID.get(),
+        "seq": _seq(),
+    }
+    dup = _find_duplicate(candidate)
+    if dup:
+        return {"action_id": dup,
+                "note": f"相同的待办已经存在(编号 {dup}),请复述后等用户确认,不要重新登记。"}
+    action_id = uuid.uuid4().hex[:8]
+    PENDING_ACTIONS[action_id] = candidate
+    _save_actions()
+    return {
+        "action_id": action_id,
+        "pending": {
+            "campaign": f"{candidate['campaign_name']}({candidate['campaign_id']})",
+            "改的是哪条path": candidate["path_name"] or "(这条 flow 只有一条启用中的 path)",
+            "现在挂着": plan["换之前"],
+            "换成": plan["换之后"],
+            "offer": "一个字都不动",
+            **({"⚠️必须讲给用户": plan["warnings"]} if plan.get("warnings") else {}),
+        },
+        "note": ("这里**只登记了待办,一点都还没改**。请把上面「现在挂着」和「换成」"
+                 "完整复述给用户,并明确告诉他:**确认之后立刻生效**,新页面马上开始接"
+                 "买来的流量;这条 campaign 的历史转化数据会横跨两批落地页。"
+                 "等他下一条消息明确同意,再调 confirm_action。"),
+    }
+
+
+def _execute_swap_campaign_landers(action: dict) -> dict:
+    """真改。执行前会拿指纹再比一次 —— 登记之后被人在后台动过就停下不写。"""
+    try:
+        result = cfc.apply_flow(action.get("flow_id", ""), action.get("put_body") or {},
+                                expect_fingerprint=action.get("fingerprint", ""))
+    except Exception as e:
+        return {"error": str(e)[:500]}
+    result["切换时间"] = sched.both_times(sched.now_beijing())
+    result["note"] = ("已生效。**从这一刻起买来的流量走新落地页** —— 这条 campaign 的"
+                      "转化数据从现在开始跨两批页面,复盘时记得以上面这个切换时间为界。")
+    return result
+
+
 def list_schedules() -> dict:
     """查看所有定时任务(含下次执行时间、上次执行结果)。"""
     tasks = sched.list_tasks()
@@ -2382,6 +2476,7 @@ NEWSBREAK_TOOLS = [
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
+    propose_swap_campaign_landers,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -3086,13 +3181,16 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    + "\n".join(f"- {m}" for m in sched.recent_runs))
     visible_actions = {aid: a for aid, a in PENDING_ACTIONS.items()
                        if mode == "campaign"
-                       or (mode == "creative" and a.get("type") == "make_creatives")
-                       or (mode == "landing" and a.get("type") == "publish_landing_pages")}
+                       or a.get("type") in _mode_action_types(mode)}
     if visible_actions:
         lines = []
         for aid, a in visible_actions.items():
             if a.get("type") == "create_campaign":
                 what = f"create ad \"{a.get('campaign_name')}\"" if english else f"新建广告「{a.get('campaign_name')}」"
+            elif a.get("type") == "swap_campaign_landers":
+                what = (f"swap campaign \"{a.get('campaign_name')}\" landers to A/B 50/50"
+                        if english else
+                        f"把 campaign「{a.get('campaign_name')}」的落地页换成 A/B 各 50%")
             elif a.get("type") == "publish_landing_pages":
                 what = (f"publish landing A/B to {a.get('domain')}/{a.get('slug')}"
                         if english else f"发布落地页 A/B 到 {a.get('domain')}/{a.get('slug')}")
@@ -3124,6 +3222,7 @@ LANDING_TOOL_NAMES = {
     "decompose_landing_page", "summarize_landing_page_patterns",
     "list_cloudflare_landing_resources", "propose_publish_landing_pages",
     "list_clickflare_campaigns", "describe_clickflare_campaign", "create_clickflare_landers",
+    "propose_swap_campaign_landers",
     "confirm_action", "cancel_action", "list_pending_actions",
 }
 
@@ -3143,8 +3242,8 @@ def _tool_call(name: str, args: dict) -> dict:
         return {"error": "当前工作室不能执行这项投放操作。请切换到投放助手。"}
     if CURRENT_CHAT_MODE.get() in ("creative", "landing") and name in ("confirm_action", "cancel_action"):
         action = PENDING_ACTIONS.get(str(args.get("action_id") or ""))
-        expected = "make_creatives" if CURRENT_CHAT_MODE.get() == "creative" else "publish_landing_pages"
-        if not action or action.get("type") != expected:
+        allowed = _mode_action_types(CURRENT_CHAT_MODE.get())
+        if not action or action.get("type") not in allowed:
             label = "素材" if CURRENT_CHAT_MODE.get() == "creative" else "落地页"
             return {"error": f"{label}工作室不能确认或取消其它工作区的待办。"}
     fn = OPENAI_TOOL_FUNCS.get(name)
@@ -3495,6 +3594,18 @@ OPENAI_TOOL_SCHEMAS = [
               "cta_url": {"type": "string", "description": "本次的 ClickFlare CTA Click URL，用来反查追踪域名"},
               "name_prefix": {"type": "string", "description": "Lander 命名前缀，一般用实验名，可空"}},
              ["campaign", "variant_a_url", "variant_b_url", "cta_url"]),
+    _oa_tool("propose_swap_campaign_landers",
+             "登记「把这条 campaign 的落地页换成 A/B 两个、各 50%」的待办。"
+             "**这是外部写操作且确认后立刻生效**——只登记，必须完整复述现状与改动、"
+             "等用户下一条消息明确同意后才能 confirm_action。offer 不会动",
+             {"campaign": {"type": "string", "description": "Campaign Tracking URL(带 cpid=)或 campaign id"},
+              "lander_a_id": {"type": "string", "description": "A 版 Lander 的 id(create_clickflare_landers 返回的)"},
+              "lander_b_id": {"type": "string", "description": "B 版 Lander 的 id"},
+              "weight_a": {"type": "integer", "description": "A 的权重，默认 50"},
+              "weight_b": {"type": "integer", "description": "B 的权重，默认 50，两者相加必须是 100"},
+              "path_name": {"type": "string", "description":
+                  "这条 flow 有多条启用中的 path 时才要填，代码不会替用户挑；只有一条时留空"}},
+             ["campaign", "lander_a_id", "lander_b_id"]),
     _oa_tool("propose_publish_landing_pages",
              "登记把两个已生成页面发布为 Cloudflare Pages A/B 版本的待办。新域名自动建项目，旧域名复用；"
              "这是外部写操作，只登记，必须等用户下一条消息确认后再 confirm_action",
@@ -3572,6 +3683,7 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
+    propose_swap_campaign_landers,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,

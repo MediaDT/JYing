@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -162,10 +164,36 @@ def get_campaign(campaign: str) -> dict:
     return _api("GET", f"/api/campaigns/{campaign_id_from(campaign)}")
 
 
+def _flow_id_of(campaign_doc: dict) -> str:
+    """从 campaign 上取 flow_id。
+
+    **不能只看内嵌的 `flow`** —— 实测:老的 campaign 会把整个 flow 内嵌返回,
+    而**刚建出来的 campaign 只有 `flow_id`,没有 `flow`**。只认内嵌的话,
+    新建的 campaign 一律报「读不到 flow」。(这个是拿临时 campaign 跑出来的。)
+    """
+    embedded = campaign_doc.get("flow")
+    if isinstance(embedded, dict) and embedded.get("_id"):
+        return str(embedded["_id"])
+    if campaign_doc.get("flow_id"):
+        return str(campaign_doc["flow_id"])
+    raise ClickFlareError("这条 campaign 上既没有 flow 也没有 flow_id,没法改落地页。")
+
+
+def _flow_of(campaign_doc: dict) -> dict:
+    """拿这条 campaign 的完整 flow(内嵌的就用内嵌的,只有 id 就去取)。"""
+    embedded = campaign_doc.get("flow")
+    if isinstance(embedded, dict) and embedded.get("paths"):
+        return embedded
+    try:
+        return get_flow(_flow_id_of(campaign_doc))
+    except ClickFlareError:
+        return {}
+
+
 def describe_campaign(campaign: str) -> dict:
     """把一条 campaign 现在挂着什么讲清楚 —— 改之前先让用户看见现状。"""
     data = get_campaign(campaign)
-    flow = data.get("flow") or {}
+    flow = _flow_of(data)
     names = _name_lookup()
     paths_out = []
     for group_name, group in (flow.get("paths") or {}).items():
@@ -272,3 +300,175 @@ def delete_landing(landing_id: str) -> bool:
         raise ClickFlareError("landing_id 格式不对。")
     _api("DELETE", f"/api/landings/{str(landing_id).lower()}")
     return True
+
+
+# ---------------------------------------------------------------- 改 flow(会立刻影响投放)
+
+def get_flow(flow_id: str) -> dict:
+    if not _OBJECT_ID.match(str(flow_id or "").lower()):
+        raise ClickFlareError("flow_id 格式不对(应该是 24 位十六进制)。")
+    return _api("GET", f"/api/flows/{str(flow_id).lower()}")
+
+
+def flow_fingerprint(flow_doc: dict) -> str:
+    """给 flow 的「内容」算个指纹,用来判断登记之后有没有被别人改过。
+
+    只取 PUT 会覆盖的那两块(`flow` / `paths`)—— `updated_at` 这类字段
+    不该参与比较,否则平台自己刷一下时间戳就误判成「被人改过」。
+    """
+    import hashlib
+    body = _flow_put_body(flow_doc)
+    blob = json.dumps(body, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _flow_put_body(flow_doc: dict) -> dict:
+    """从 GET 回来的完整文档里取出 PUT 需要的那两块。
+
+    **PUT 是整体替换,不是打补丁** —— `paths` 必须整块搬过去(里面除了
+    `defaultPaths` 还可能有 `rulePaths` 规则分流),只 PUT 一半等于把另一半清空。
+    """
+    flow = dict(flow_doc.get("flow") or {})
+    keep = {k: flow[k] for k in ("workspace_id", "name", "transition", "notes") if k in flow}
+    if not keep.get("name") or not keep.get("transition"):
+        raise ClickFlareError("这条 flow 缺 name 或 transition,不敢往回写 —— "
+                              "PUT 是整体替换,漏字段会把它清空。")
+    return {"flow": keep, "paths": copy.deepcopy(flow_doc.get("paths") or {})}
+
+
+def _iter_paths(paths_obj: dict):
+    """遍历 flow 里所有的 path,返回 (分组名, 序号, path 本身)。"""
+    for group_name, group in (paths_obj or {}).items():
+        if not isinstance(group, dict):
+            continue
+        for idx, path in enumerate(group.get("paths") or []):
+            if isinstance(path, dict):
+                yield group_name, idx, path
+
+
+def plan_lander_swap(campaign: str, landers: list[dict], path_name: str = "") -> dict:
+    """算出「把这条 campaign 的落地页换成这几个」之后 flow 应该长什么样。
+
+    **只算,不写。** 返回里带着 before/after、警告,以及执行时要 PUT 的完整 body
+    和当前 flow 的指纹 —— 执行前会拿指纹再比一次,期间被人改过就停下。
+
+    `landers`:`[{"id": ..., "weight": 50}, ...]`,权重加起来必须是 100。
+    **`offers` 一个字都不动。**
+    """
+    total = sum(int(x.get("weight") or 0) for x in landers)
+    if len(landers) < 1:
+        raise ClickFlareError("至少要给一个落地页。")
+    if total != 100:
+        raise ClickFlareError(f"权重加起来要正好 100,现在是 {total}。")
+    ids = [str(x.get("id") or "").lower() for x in landers]
+    if len(set(ids)) != len(ids):
+        raise ClickFlareError("同一个落地页被放了两次 —— 那不是 A/B,是把流量分给同一页。")
+    for ident in ids:
+        if not _OBJECT_ID.match(ident):
+            raise ClickFlareError(f"落地页 id 格式不对:{ident[:30]}")
+    known = {str(x.get("id")) for x in list_landings(limit=100000)["landings"]}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise ClickFlareError(f"ClickFlare 里找不到这些落地页:{missing} —— "
+                              "先用 create_clickflare_landers 建好再挂。")
+
+    campaign_doc = get_campaign(campaign)
+    flow_id = _flow_id_of(campaign_doc)
+    # campaign 里内嵌的 flow 可能是精简过的,改之前一律按 id 重新取一份完整的
+    plan = plan_flow_lander_swap(get_flow(flow_id), ids, landers, path_name)
+    plan["campaign"] = {"id": campaign_doc.get("_id"), "名字": campaign_doc.get("name")}
+    return plan
+
+
+def plan_flow_lander_swap(flow_doc: dict, ids: list[str], landers: list[dict],
+                          path_name: str = "") -> dict:
+    """`plan_lander_swap` 的核心:只跟 flow 打交道,不碰 campaign。
+
+    单独拆出来是为了**能脱离真实投放测试** —— 拿一条临时 flow 就能验
+    「改哪一条 path」「兄弟 path 会不会被整体替换清掉」这些要命的地方。
+    """
+    flow_id = str(flow_doc.get("_id") or "")
+    candidates = [(g, i, p) for g, i, p in _iter_paths(flow_doc.get("paths") or {})
+                  if p.get("enabled", True)]
+    if path_name:
+        candidates = [c for c in candidates if str(c[2].get("name") or "") == path_name]
+    if not candidates:
+        raise ClickFlareError("这条 flow 里没有启用中的 path" +
+                              (f"叫「{path_name}」" if path_name else "") + ",没法挂落地页。")
+    if len(candidates) > 1:
+        names = "、".join(f"{g}/{p.get('name')}" for g, _, p in candidates)
+        raise ClickFlareError(
+            f"这条 flow 有 {len(candidates)} 条启用中的 path({names}),"
+            "**不能替用户挑**要改哪一条。请把 path 的名字告诉我再来。")
+    group_name, idx, current = candidates[0]
+
+    body = _flow_put_body(flow_doc)
+    target = body["paths"][group_name]["paths"][idx]
+    old_kind = target.get("destination")
+    old_block = dict(target.get(old_kind) or {})
+    offers = copy.deepcopy(old_block.get("offers") or [])
+    warnings = []
+    if old_kind == "offers_only":
+        warnings.append(
+            "⚠️ 这条 campaign 现在是**直接跳 offer、不经过落地页**的。"
+            "挂上落地页等于改变整条漏斗的形状,转化率会明显变化(不一定变好),"
+            "而且和历史数据不可比。确认前请务必跟用户说清楚。")
+    elif old_kind != "landers_offers":
+        raise ClickFlareError(
+            f"这条 path 的类型是 `{old_kind}`,不是「落地页 + offer」也不是「只有 offer」,"
+            "换落地页的逻辑不适用。请到 ClickFlare 后台手工处理。")
+    if not offers:
+        raise ClickFlareError("这条 path 上一个 offer 都没有 —— 挂了落地页流量也无处可去。")
+
+    before_landers = copy.deepcopy(old_block.get("landers") or [])
+    target.pop(old_kind, None)
+    target["destination"] = "landers_offers"
+    target["landers_offers"] = {
+        "landers": [{"id": i, "weight": int(x.get("weight"))} for i, x in zip(ids, landers)],
+        "offers": offers,
+    }
+    if before_landers:
+        warnings.append(
+            "⚠️ 这条 campaign 的历史数据会**横跨两批落地页** —— 换之后再看这条的"
+            "转化率,前后是两个不同的页面。要干净的对比,得另建一条 campaign 跑新页面。")
+
+    names = _name_lookup()
+    return {
+        "flow_id": flow_id,
+        "path": {"分组": group_name, "序号": idx, "名字": current.get("name")},
+        "换之前": {"类型": old_kind,
+                 "落地页": [_row(x, names["landings"]) for x in before_landers] or "(没有落地页,直接跳 offer)",
+                 "offer": [_row(x, names["offers"]) for x in offers]},
+        "换之后": {"类型": "landers_offers",
+                 "落地页": [_row(x, names["landings"]) for x in target["landers_offers"]["landers"]],
+                 "offer": [_row(x, names["offers"]) for x in offers]},
+        "offer有没有动": "没动" if offers == (old_block.get("offers") or []) else "❗动了(这是 bug)",
+        "warnings": warnings,
+        "put_body": body,
+        "fingerprint": flow_fingerprint(flow_doc),
+    }
+
+
+def apply_flow(flow_id: str, put_body: dict, expect_fingerprint: str = "") -> dict:
+    """把算好的 flow 写回去。**这一下会立刻改变正在花钱的投放。**
+
+    写之前拿指纹再比一次:登记之后如果有人在 ClickFlare 后台动过这条 flow,
+    我们手里这份 body 是照着旧状态算的,写回去等于把他的改动**静默抹掉**
+    (PUT 是整体替换)。所以对不上就停,不写。
+    """
+    if not _OBJECT_ID.match(str(flow_id or "").lower()):
+        raise ClickFlareError("flow_id 格式不对。")
+    if expect_fingerprint:
+        now = flow_fingerprint(get_flow(flow_id))
+        if now != expect_fingerprint:
+            raise ClickFlareError(
+                "没有改。这条 flow 在登记之后被改过了(可能有人在 ClickFlare 后台动过)。"
+                "写回去会把那个改动整个覆盖掉 —— 请重新看一遍现状再登记。")
+    _api("PUT", f"/api/flows/{str(flow_id).lower()}", json_body=put_body)
+    after = get_flow(str(flow_id).lower())
+    landed = []
+    for _, _, path in _iter_paths(after.get("paths") or {}):
+        block = path.get(path.get("destination")) or {}
+        landed.extend(block.get("landers") or [])
+    return {"done": True, "flow_id": flow_id,
+            "写完回查到的落地页": landed or "(一个都没有 —— 不对劲,请到后台核对)"}

@@ -938,6 +938,142 @@ def test_pure_logic():
         return None
     check("A/B 同址的检查排在联网之前", t_clickflare_ab_check_is_free)
 
+    # 换落地页会**立刻改变正在花钱的投放**,是全项目风险最高的写操作。
+    # 这几条守的是算新 flow 那一步:PUT 是整体替换,算错一点就是线上出事。
+    def t_flow_lander_swap_plan():
+        import clickflare_client as cfc
+        L1, L2, OF = "1" * 24, "2" * 24, "9" * 24
+
+        def mkflow(paths):
+            return {"_id": "f" * 24, "flow": {"name": "f", "transition": "302",
+                                              "workspace_id": "w" * 24},
+                    "paths": paths, "updated_at": "x"}
+
+        def path(name, dest="landers_offers", landers=(L1,), enabled=True):
+            d = {"name": name, "destination": dest, "enabled": enabled,
+                 "transition": "302", "weight": 100}
+            d[dest] = ({"landers": [{"id": i, "weight": 100 // max(1, len(landers))} for i in landers],
+                        "offers": [{"id": OF, "weight": 100}]} if dest == "landers_offers"
+                       else {"offers": [{"id": OF, "weight": 100}]})
+            return d
+
+        real_names = cfc._name_lookup
+        cfc._name_lookup = lambda: {"landings": {}, "offers": {}}
+        try:
+            want = [{"id": L1, "weight": 50}, {"id": L2, "weight": 50}]
+            # ① 多条启用中的 path → 必须拒绝,不许替用户挑
+            two = mkflow({"defaultPaths": {"paths": [path("a"), path("b")]}})
+            try:
+                cfc.plan_flow_lander_swap(two, [L1, L2], want)
+                return "有两条启用的 path 却自己挑了一条"
+            except cfc.ClickFlareError as e:
+                if "不能替用户挑" not in str(e):
+                    return f"拦住了但理由不对:{str(e)[:60]}"
+            # ② 指名之后要改对那一条,**兄弟 path 必须原样留着**(PUT 是整体替换)
+            plan = cfc.plan_flow_lander_swap(two, [L1, L2], want, path_name="b")
+            got = plan["put_body"]["paths"]["defaultPaths"]["paths"]
+            if len(got) != 2:
+                return "兄弟 path 被整体替换弄丢了"
+            if got[0]["landers_offers"]["landers"] != [{"id": L1, "weight": 100}]:
+                return "改错了 path —— 动到了 keep 的那条"
+            if [x["id"] for x in got[1]["landers_offers"]["landers"]] != [L1, L2]:
+                return "指定的那条没被改成 A/B"
+            if plan["offer有没有动"] != "没动":
+                return "offer 被动了"
+            if got[1]["landers_offers"]["offers"] != [{"id": OF, "weight": 100}]:
+                return "offer 内容变了"
+            # ③ 只有一条 path 时可以不指名
+            one = mkflow({"defaultPaths": {"paths": [path("only")]}})
+            if not cfc.plan_flow_lander_swap(one, [L1, L2], want)["put_body"]:
+                return "只有一条 path 时反而算不出来"
+            # ④ 原来是「直接跳 offer」的,要明确警告漏斗形状变了
+            direct = mkflow({"defaultPaths": {"paths": [path("d", dest="offers_only")]}})
+            warn = cfc.plan_flow_lander_swap(direct, [L1, L2], want)["warnings"]
+            if not any("漏斗" in w for w in warn):
+                return "从『直接跳 offer』改成挂落地页,没有警告漏斗形状变了"
+            # ⑤ 一个 offer 都没有 → 挂了落地页流量也无处可去
+            empty = mkflow({"defaultPaths": {"paths": [{
+                "name": "x", "destination": "landers_offers", "enabled": True,
+                "landers_offers": {"landers": [], "offers": []}}]}})
+            try:
+                cfc.plan_flow_lander_swap(empty, [L1, L2], want)
+                return "一个 offer 都没有也照算"
+            except cfc.ClickFlareError:
+                pass
+            # ⑥ 只给 flow_id、没有内嵌 flow 的 campaign 也要认得(新建的就是这样)
+            if cfc._flow_id_of({"flow_id": "c" * 24}) != "c" * 24:
+                return "campaign 只有 flow_id 时认不出来"
+            if cfc._flow_id_of({"flow": {"_id": "d" * 24}}) != "d" * 24:
+                return "内嵌 flow 时认不出来"
+        finally:
+            cfc._name_lookup = real_names
+        return None
+    check("换落地页:只改指定那条 path,兄弟 path 和 offer 都不动", t_flow_lander_swap_plan)
+
+    # 三处闸门原来各写死一个 "publish_landing_pages" 字符串,加一种待办漏一处
+    # 就是「登记得了但看不见」或「确认时被拒」——而且直接调函数测不出来,
+    # 必须走真正的工具分发层 _tool_call。
+    def t_studio_action_gates():
+        import agent_server as srv
+        aid = "__smoke_gate__"
+        srv.PENDING_ACTIONS[aid] = {
+            "type": "swap_campaign_landers", "campaign_name": "X", "flow_id": "a" * 24,
+            "put_body": {"flow": {"transition": "302"}}, "fingerprint": "f",
+            "user_id": "", "seq": 1}
+        try:
+            for want in srv.LANDING_ACTION_TYPES:
+                if want not in ("publish_landing_pages", "swap_campaign_landers"):
+                    return f"落地页待办类型清单里多了没预期的:{want}"
+            m = srv.CURRENT_CHAT_MODE.set("landing")
+            try:
+                listed = str(srv.list_pending_actions())
+                if aid not in listed:
+                    return "落地页工作室看不见自己登记的换页待办"
+                if '"transition"' in listed:
+                    return "待办清单把整坨 put_body 回显出来了"
+                if "[已算好" not in listed:
+                    return "put_body 没有脱敏标记"
+                r = srv._tool_call("confirm_action", {"action_id": aid})
+                if "不能确认" in str(r.get("error", "")):
+                    return "落地页工作室确认自己的换页待办被拒了"
+            finally:
+                srv.CURRENT_CHAT_MODE.reset(m)
+            m = srv.CURRENT_CHAT_MODE.set("creative")
+            try:
+                r = srv._tool_call("confirm_action", {"action_id": aid})
+                if "不能确认" not in str(r.get("error", "")):
+                    return "素材工作室居然能确认换落地页的待办"
+            finally:
+                srv.CURRENT_CHAT_MODE.reset(m)
+        finally:
+            srv.PENDING_ACTIONS.pop(aid, None)
+            srv._save_actions()
+        return None
+    check("换页待办:落地页工作室看得见也确认得了,素材工作室碰不到", t_studio_action_gates)
+
+    def t_swap_tool_registered():
+        import agent_server as srv, inspect
+        n = "propose_swap_campaign_landers"
+        bad = []
+        if not any(f.__name__ == n for f in srv.NEWSBREAK_TOOLS):
+            bad.append("不在 Gemini 工具清单")
+        if n not in srv.OPENAI_TOOL_FUNCS:
+            bad.append("不在 OPENAI_TOOL_FUNCS")
+        if not any(t["function"]["name"] == n for t in srv.OPENAI_TOOL_SCHEMAS):
+            bad.append("没有 OpenAI schema")
+        if n not in srv.LANDING_TOOL_NAMES:
+            bad.append("落地页模式里用不了")
+        if n not in srv._TOOL_LABELS:
+            bad.append("没有进度文案")
+        for k, prm in inspect.signature(srv.OPENAI_TOOL_FUNCS.get(n, lambda: None)).parameters.items():
+            if prm.annotation in (list, dict):
+                bad.append(f"参数 {k} 标了裸 {prm.annotation.__name__}")
+        # 换落地页必须两阶段:propose 只登记,execute 单独一个函数
+        if not hasattr(srv, "_execute_swap_campaign_landers"):
+            bad.append("没有单独的执行函数(说明没走保险箱)")
+        return bad or True
+    check("换落地页的工具五处都注册了、且走两阶段", t_swap_tool_registered)
+
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
     # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**

@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(138)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(141)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -53,7 +53,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(138)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(141)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -941,15 +941,33 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
 **建好的 Lander 还不会承接任何流量** —— 要等它被挂进 campaign 的 flow 才算数。
 那一步会**立刻改变正在花钱的投放**,属于写操作,必须走保险箱,**还没做**(第三步)。
 
-### 第三步(改 campaign 的 flow)动手前必须想清楚的
+### 第三步:把 A/B 挂进 campaign(已完成)
 
-1. **立刻生效**:换上去的页面有毛病,当场就在烧钱往坏页面送。必须走保险箱,
-   提案里要列清「现在挂的是哪些 / 换成什么 / 权重多少 / offer 动不动」;
-2. **数据会混**:同一条 campaign 换了落地页,历史转化率就横跨两批页面了。
-   要么记下切换时间,要么新建 campaign 跑新页面 —— **让用户选,别替他定**;
-3. **offer 绝对不动**,只改 `landers` 数组;
-4. `PUT /api/flows/{id}` 是**整体替换**,不是打补丁 —— 要先 GET 回来改完再 PUT,
-   漏字段就等于把它清空了(和 Cloudflare Pages 那条「整站替换」同一类风险)。
+`propose_swap_campaign_landers` → `confirm_action`,和建广告同一套保险箱。
+**这是全项目风险最高的写操作:确认完立刻生效,当场就拿买来的流量往新页面送。**
+
+- **`PUT /api/flows/{id}` 是整体替换,不是打补丁。** 先 GET 回来,**整块**搬 `paths`
+  (里面除了 `defaultPaths` 还可能有 `rulePaths` 规则分流),只改目标那一条 path。
+  只 PUT 一半等于把另一半清空 —— 和 Cloudflare Pages 那条「整站替换」同一类风险。
+  冒烟测试里专门造了「两条 path,只改第二条」来守兄弟 path 不被弄丢。
+- **offer 一个字都不动**,只换 `landers` 数组。代码算完会自查一遍,动了就中止。
+- **多条启用中的 path 就明确报错让用户指名**,绝不替他挑(和 22 个 workspace 同一条规矩)。
+- **指纹防覆盖**:登记时记下 flow 的 SHA-256(只算 `flow`+`paths`,不含 `updated_at`,
+  否则平台刷个时间戳就误判)。执行前再比一次 —— 期间有人在 ClickFlare 后台动过就**停下不写**,
+  因为整体替换会把他的改动静默抹掉。
+- **数据会混,提案里必须讲**:同一条 campaign 换了落地页,历史转化率就横跨两批页面。
+  默认是**原地替换**(用户要的就是「用在我正在跑的这条上」),执行结果里带**切换时间**
+  (北京+美东),复盘以它为界。要干净的对比就另建一条 campaign —— 提案里写明了,让用户选。
+- 原来是 `offers_only`(直接跳 offer、不经过落地页)的 campaign 也能挂,
+  但会额外警告「这改的是整条漏斗的形状,转化率会变且和历史不可比」。
+
+### 三处闸门要用同一份清单(`LANDING_ACTION_TYPES`)
+
+待办清单、提示词注入、`_tool_call` 里 confirm/cancel 的模式闸门 —— 这三处原来各自
+写死字符串 `"publish_landing_pages"`。加了 `swap_campaign_landers` 之后漏改任何一处,
+表现都不一样:**待办登记得了却在清单里看不见** / AI 跨轮忘了编号也没处查 /
+**确认时被「本工作室不能确认其它工作区的待办」拒掉**。现在统一走 `_mode_action_types()`,
+**加新待办类型只改 `LANDING_ACTION_TYPES` / `CREATIVE_ACTION_TYPES` 这两行。**
 
 ## 七、写操作护栏(核心安全设计,不许绕过)
 
@@ -1026,6 +1044,7 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
 | **花钱的步骤要排在最后** | 生图 $0.20/张。踩了两次:一次卡在给文件起名(`_re` 没导入)、一次卡在上传缺 `mediaName` —— **两次都是图已生成、钱已付才失败**,那张就白花了。**所有免费又可能失败的准备工作(起名、校验、查余额)必须排在付费调用之前**,付过钱的产物还要先落盘再做后续 |
 | **按公开单价算的成本会差很远** | 按 ofox 报的 `output_image` 单价 × 官方 token 数算出一张 $0.05,**实测 $0.203,差 4 倍**。报低了用户以为很便宜,批量生成才发现烧了不少。**成本一律拿账单实测校正**(记余额→生成→再记余额),别信算出来的 |
 | **测试用 index() 找源码会命中注释** | 守"文件名要排在 `cr.render()` 之前"那条测试,`src.index("cr.render(")` 先命中了**注释里**写的 `cr.render()`,于是误报。和之前 `minDaysRunning` 在 docstring 里被搜到是同一类。**读源码做判断前先把注释/docstring 剥掉** |
+| **同一个判断散在三处,加一种就漏一处** | 「这个工作室能看见/能确认哪些待办」原来在三处各写死一个字符串 `publish_landing_pages`:待办清单、提示词注入、`_tool_call` 的模式闸门。加了第二种待办后**三处全漏**,而且三处的表现完全不同 —— 登记成功却在清单里看不见、AI 跨轮忘了编号没处查、确认时被「不能确认其它工作区的待办」拒掉。更阴的是**直接调 `confirm_action()` 测不出来**:那道闸门在 `_tool_call` 里,测试必须走真正的工具分发层才碰得到(和「锁了输入框不等于锁住了发送」同一类)。**这类清单要收成一份常量**,加新类型只改那一行 |
 | **别猜接口路径名,先找 swagger** | ClickFlare 的落地页接口叫 `/api/landings`,而所有人(包括它自己的界面)都管这东西叫 **lander** —— `/api/landers`、`/api/lander`、`/api/lp`、`/api/landing-pages` 全是 404,猜了十几次没中。真正解决问题的是 `GET /api/swagger.json`(200,54 个接口全在里面)。**探一个没有公开文档的 API,第一件事是找它的 spec 端点**(`/swagger.json`、`/openapi.json`、`/api/docs`),别从资源名开始猜 |
 | **认证头对不对,看 404 还是 401** | 探认证方式时:用对了头 → 路径不对返回 **404「Path not found」**(过了认证、卡在路由);用错了头 → 一律 **401「not authorized」**(没走到路由)。所以拿一个**已知不存在的路径**去打,能拿到 404 的那个头就是对的 —— 比逐个试「哪个能返回 200」快得多,而且不需要先知道任何真实路径 |
 | **LRU 淘汰别把刚放进去的那条算进候选** | 脚本库满 40 个要丢「最久没用的」,排序键是 `last_used_at` —— 而刚存进来的那条这个字段**是空的**,空串排最前 → **刚存就被自己淘汰掉**,接着读它直接 `KeyError`,而落盘的已经是「没有这条」的版本,**重贴多少次都是同样的错,这个账号再也加不进新域名**。顺带淘汰顺序整个是反的(真正最老的反而留着)。两条规矩:①候选里**排除刚插入的那个键**;②没用过的条目拿**存入时间**当「最近使用」,别让空串参与排序 |
@@ -1123,9 +1142,10 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
   代码层查文案照抄(第六之十三节);
 - **把方案做成广告图**:`propose_make_creatives` —— AI 画**无文字**底图 +
   **代码确定性叠字**,出 1200×628 成品直接传进素材库;走确认关卡先报价(第六之十五节);
-- **ClickFlare 接进来了(只读 + 建 Lander)**:接口全靠实测探出来(公开文档没有清单),
+- **ClickFlare 全通了**:接口全靠实测探出来(公开文档没有清单),
   `check_clickflare_params.py` 随时可复查;追踪链接里的 `cpid` 直接定位 campaign,
-  workspace 和追踪域名由代码推导(第六之十八节)。**改 campaign 的 flow 还没做。**
+  workspace 和追踪域名由代码推导;**把 A/B 挂进 campaign 并设 50/50 也做完了**,
+  走保险箱 + 指纹防覆盖,offer 不动(第六之十八节)。
 - **落地页 A/B 发布**:不用 GitHub,通过 Pages Direct Upload 发布;域名每次选择,
   新域名自动建项目、旧域名复用;ClickFlare CTA/脚本确定性注入,发布走二次确认;
   **追踪脚本每个追踪域名只贴一次**(脚本库,按人存),**CTA 域名和脚本域名对不上直接拒**,
@@ -1141,7 +1161,7 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 138 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 141 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1169,9 +1189,7 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
 **接下来(按优先级)**:
 1. ~~建计划向导端到端验收~~ ✅ 已完成(2026-08-05 聊天版建成 `gutter-0805` 三层);
 2. 真接第二个平台(Nextdoor / Meta):现在只是注册表占位,按第六之二节最后那三步做;
-3. **ClickFlare 第三步:把 A/B 挂进 campaign 并设 50/50**(`PUT /api/flows/{id}`)——
-   这是唯一还没做的一环,做完「发布落地页 → 接进追踪 → 填回 NewsBreak」就闭环了。
-   四条注意事项见第六之十八节末尾;
+3. ~~ClickFlare 第三步:把 A/B 挂进 campaign 并设 50/50~~ ✅ 已完成(2026-09-04);
 4. 补齐 Claude 那一级的工具支持(现在 `BRAIN=claude` 只能闲聊,见第八节坑表);
 5. 调预算等更多写操作(需先在 qx-ad-bot 里查 update 接口的 payload 格式);
 6. ~~流式回复(边想边出字)~~ ✅ 已完成(2026-08-14);把 README 推广给团队。
@@ -1196,9 +1214,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 138 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 141 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 138 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 141 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。
