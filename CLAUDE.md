@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(141)、`node frontend_test.js`(61)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(141)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -53,7 +53,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(141)+ `frontend_test.js` 多会话(61)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(141)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -1045,6 +1045,8 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
 | **按公开单价算的成本会差很远** | 按 ofox 报的 `output_image` 单价 × 官方 token 数算出一张 $0.05,**实测 $0.203,差 4 倍**。报低了用户以为很便宜,批量生成才发现烧了不少。**成本一律拿账单实测校正**(记余额→生成→再记余额),别信算出来的 |
 | **测试用 index() 找源码会命中注释** | 守"文件名要排在 `cr.render()` 之前"那条测试,`src.index("cr.render(")` 先命中了**注释里**写的 `cr.render()`,于是误报。和之前 `minDaysRunning` 在 docstring 里被搜到是同一类。**读源码做判断前先把注释/docstring 剥掉** |
 | **同一个判断散在三处,加一种就漏一处** | 「这个工作室能看见/能确认哪些待办」原来在三处各写死一个字符串 `publish_landing_pages`:待办清单、提示词注入、`_tool_call` 的模式闸门。加了第二种待办后**三处全漏**,而且三处的表现完全不同 —— 登记成功却在清单里看不见、AI 跨轮忘了编号没处查、确认时被「不能确认其它工作区的待办」拒掉。更阴的是**直接调 `confirm_action()` 测不出来**:那道闸门在 `_tool_call` 里,测试必须走真正的工具分发层才碰得到(和「锁了输入框不等于锁住了发送」同一类)。**这类清单要收成一份常量**,加新类型只改那一行 |
+| **可点的链接里混进追踪地址 = 用户一点就污染数据** | 竞品落地页表格里的域名做成可点之后,顺手会想把回复里所有链接都变可点 —— 但 ClickFlare 的 `/cf/click`、带 `cpid=` 的地址**点一下就是一次真实点击**,会记进那条 campaign 的统计,而且事后完全看不出是误点的。所以 linkify 时要挡住 `/cf/click`、`/cf/tags`、`cpid=`、`cftmid=`,降级成**纯文字**(还看得见、能复制),并用 title 说清为什么不能点。和「不自动访问追踪链接做健康检查」是同一条规矩 |
+| **测「新函数」不等于测「它被接上了」** | 给回复里的域名加可点链接,测试直接调 `linkifyBubble()` 全绿 —— 而把 `renderBubble` 里那一行调用**删掉,测试照样全绿**。函数写对了、根本没被调用,页面上什么都不会变。**必须再补一条走真正入口的测试**(这里是 `renderBubble`)。和「闸门在 `_tool_call` 里,直接调 `confirm_action()` 测不出来」是同一类 |
 | **别猜接口路径名,先找 swagger** | ClickFlare 的落地页接口叫 `/api/landings`,而所有人(包括它自己的界面)都管这东西叫 **lander** —— `/api/landers`、`/api/lander`、`/api/lp`、`/api/landing-pages` 全是 404,猜了十几次没中。真正解决问题的是 `GET /api/swagger.json`(200,54 个接口全在里面)。**探一个没有公开文档的 API,第一件事是找它的 spec 端点**(`/swagger.json`、`/openapi.json`、`/api/docs`),别从资源名开始猜 |
 | **认证头对不对,看 404 还是 401** | 探认证方式时:用对了头 → 路径不对返回 **404「Path not found」**(过了认证、卡在路由);用错了头 → 一律 **401「not authorized」**(没走到路由)。所以拿一个**已知不存在的路径**去打,能拿到 404 的那个头就是对的 —— 比逐个试「哪个能返回 200」快得多,而且不需要先知道任何真实路径 |
 | **LRU 淘汰别把刚放进去的那条算进候选** | 脚本库满 40 个要丢「最久没用的」,排序键是 `last_used_at` —— 而刚存进来的那条这个字段**是空的**,空串排最前 → **刚存就被自己淘汰掉**,接着读它直接 `KeyError`,而落盘的已经是「没有这条」的版本,**重贴多少次都是同样的错,这个账号再也加不进新域名**。顺带淘汰顺序整个是反的(真正最老的反而留着)。两条规矩:①候选里**排除刚插入的那个键**;②没用过的条目拿**存入时间**当「最近使用」,别让空串参与排序 |
@@ -1128,7 +1130,8 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
   没素材可让 `recommend_creatives` 从**本账户历史广告**里挑效果好的复用,
   但必须讲清"用了什么、为什么、想改直接说";返回里的 `defaults_used` 列出哪些是系统定的,
   📎按钮 / 直接粘贴图片上传中转,命名按落地页类型走规范(见第六之十节),建好默认全 OFF;
-- 前端:全屏 UI(渐变主题/头像气泡/快捷提问/动画)、Markdown 表格渲染、**素材图点击放大**、输入法回车修复、
+- 前端:全屏 UI(渐变主题/头像气泡/快捷提问/动画)、Markdown 表格渲染、**素材图点击放大**、
+  **回复里的域名可点开**(新标签;但**追踪链接故意不可点** —— 点一下就是一次真实点击、污染统计)、输入法回车修复、
   **聊天记录按账号存服务器**(`data/chats/<uid>.json`,换电脑登录同一账号还在;左栏多会话)、
   **中英文切换**(顶栏 🌐,界面 + AI 回复语言一起切,选择会记住)、
   **每段对话各跑各的**(切走了后台照样跑完,回复写回它自己;左栏橙点=生成中/蓝点=跑完没看,见第六之十六节)、
@@ -1161,7 +1164,7 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 141 + 前端 61 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 141 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1218,5 +1221,5 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 141 / 前端 61 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 141 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

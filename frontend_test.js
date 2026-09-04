@@ -413,6 +413,99 @@ console.log("\n【Z2】切走又切回来之后才失败:那句话不能凭空�
                               String(x.text).indexOf("切来切去的问题") >= 0));
 }
 
+console.log("【L】回复里的域名要能点开,而追踪链接绝不许可点");
+{
+  // 竞品落地页表格里的域名是 `www.x.com` 这种反引号内容,marked 渲染成 <code>,
+  // 本身不可点。而点一下 ClickFlare 的 /cf/click 就是一次**真实点击**,会污染
+  // 那条 campaign 的统计、事后还看不出是误点的。两件事必须一起守。
+  const app = boot({});
+  const linkify = app.win.linkify;
+  const isTracking = app.win.tracking;
+
+  // linkifyBubble 只用到 querySelectorAll / 建节点 / 替换,搭个够用的小 DOM 就行
+  const mkCode = (text) => ({
+    tagName: "CODE", className: "", title: "", textContent: text,
+    children: [], parentNode: null,
+    querySelector() { return this.children.length ? this.children[0] : null; },
+    appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+  });
+  const mkLink = (href, text) => ({
+    tagName: "A", attrs: { href }, textContent: text, parentNode: null,
+    getAttribute(k) { return this.attrs[k]; },
+    setAttribute(k, v) { this.attrs[k] = v; },
+  });
+  const mkBubble = (codes, links) => {
+    const parent = { replaced: [], replaceChild(nw, old) { this.replaced.push([old, nw]); } };
+    (links || []).forEach((a) => { a.parentNode = parent; });
+    return { _parent: parent,
+             querySelectorAll(sel) { return sel === "code" ? (codes || []) : (links || []); } };
+  };
+
+  t("linkifyBubble 拿得到(说明初始化没中断)", typeof linkify === "function");
+
+  const c1 = mkCode("www.leaffilterusa.com");
+  linkify(mkBubble([c1], []));
+  const a1 = c1.children[0];
+  // mock 的 tagName 不像真 DOM 那样自动大写,比较时统一一下
+  t("裸域名变成了链接", !!a1 && String(a1.tagName).toUpperCase() === "A");
+  t("自动补上 https", !!a1 && a1.href === "https://www.leaffilterusa.com", a1 && a1.href);
+  t("新标签打开,不顶掉聊天页", !!a1 && a1.target === "_blank");
+  t("带 noopener(新标签打开的安全要求)", !!a1 && /noopener/.test(a1.rel || ""));
+
+  const c2 = mkCode("https://www.homebuddy.com/roof");
+  linkify(mkBubble([c2], []));
+  t("整条 http(s) 地址原样可点",
+    c2.children.length === 1 && c2.children[0].href === "https://www.homebuddy.com/roof");
+
+  // 追踪链接:一个都不许变成可点的
+  ["https://trk.example.com/cf/click/1",
+   "https://trk.example.com/abc?cpid=aaaa",
+   "https://trk.example.com/cf/tags/xyz"].forEach((u) => {
+    t("认得出是追踪链接:" + u.slice(8, 40), isTracking(u) === true);
+    const c = mkCode(u);
+    linkify(mkBubble([c], []));
+    t("没被变成可点的:" + u.slice(8, 40), c.children.length === 0);
+    t("标成不可点并说明原因", c.className === "no-click" && !!c.title);
+  });
+
+  // 模型自己写的 markdown 链接若指向追踪地址,要降级成纯文字(还看得见、能复制)
+  const bad = mkLink("https://trk.example.com/cf/click/1", "点这里");
+  const b4 = mkBubble([], [bad]);
+  linkify(b4);
+  t("指向追踪地址的链接被换掉了", b4._parent.replaced.length === 1);
+  const swapped = b4._parent.replaced.length ? b4._parent.replaced[0][1] : null;
+  t("换成纯文字,内容没丢",
+    !!swapped && String(swapped.tagName).toUpperCase() === "CODE" && swapped.textContent === "点这里");
+
+  const ok = mkLink("/landing-pages/abc.html", "预览 A 版");
+  linkify(mkBubble([], [ok]));
+  t("普通链接照常,但新标签打开", ok.attrs.target === "_blank");
+  t("普通链接也带 noopener", /noopener/.test(ok.attrs.rel || ""));
+
+  // **最要紧的一条:linkify 真的被接进渲染流程了吗。**
+  // 上面那些都是直接调 linkify 测的 —— 把 renderBubble 里那一行删掉,它们照样全绿。
+  // 所以必须走真正的渲染入口验一次(和「闸门在 _tool_call 里,直接调函数测不出来」同一类)。
+  {
+    // 浏览器里 window.marked 和裸 marked 是同一个;Node 的模拟里要两边都设
+    const realMarked = global.window.marked, realBare = global.marked;
+    global.window.marked = global.marked = { parse: (x) => x };
+    const c = mkCode("www.leaffilterusa.com");
+    const bubble = { innerHTML: "", _parent: null,
+                     querySelectorAll(sel) { return sel === "code" ? [c] : []; } };
+    app.win.render(bubble, "随便什么文字 `www.leaffilterusa.com`");
+    t("renderBubble 里真的调了 linkify(不是只有函数存在)", c.children.length === 1);
+    global.window.marked = realMarked; global.marked = realBare;
+  }
+
+  // 表格里全是 id、数字、字段名 —— 别把它们当域名
+  ["8,960", "landers_offers", "6620e4845b7d5a001272ec97", "cta_count", "30 天", "1.88%"]
+    .forEach((x) => {
+      const c = mkCode(x);
+      linkify(mkBubble([c], []));
+      t("没把「" + x + "」当成域名", c.children.length === 0);
+    });
+}
+
 console.log(`\n结果:${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
 

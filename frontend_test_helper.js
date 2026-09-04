@@ -165,7 +165,7 @@ module.exports = function boot(store, opts) {
   // 把页面脚本里的函数捞出来,好让测试能直接调(模拟"用户点了某个按钮之后")
   const exposed = {};
   new Function("__expose", js + "\n;try{__expose.refreshPlatformBinding=refreshPlatformBinding;"
-               + "__expose.clearNotBound=clearNotBound;__expose.send=send;__expose.convs=()=>conversations;__expose.cached=()=>cachedConvs;__expose.push=pushToServer;__expose.history=()=>history;__expose.running=()=>running;__expose.unread=()=>unread;__expose.live=()=>({typing:liveTyping,stream:liveStream});}catch(e){}")(exposed);
+               + "__expose.clearNotBound=clearNotBound;__expose.send=send;__expose.convs=()=>conversations;__expose.cached=()=>cachedConvs;__expose.push=pushToServer;__expose.history=()=>history;__expose.running=()=>running;__expose.unread=()=>unread;__expose.live=()=>({typing:liveTyping,stream:liveStream});__expose.linkify=linkifyBubble;__expose.tracking=looksLikeTracking;__expose.render=renderBubble;}catch(e){}")(exposed);
   return { registry, win: exposed, textLog: () => textLog, convs: () => JSON.parse(store["adbot-conversations"] || "[]"),
            curId: () => store["adbot-current-conv"] };
 };

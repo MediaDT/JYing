@@ -222,6 +222,12 @@
   .bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 
   /* "正在思考"动画 */
+  /* 回复里的域名/链接。做成看得出来能点,但不抢眼(表格里一片蓝会很吵) */
+  .bubble a.domain-link { color: inherit; text-decoration: underline;
+    text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
+  .bubble a.domain-link:hover { color: var(--accent1); text-decoration-style: solid; }
+  /* 追踪链接被降级成纯文字:点一下就是一次真实点击,会污染统计 */
+  .bubble code.no-click { opacity: .85; cursor: not-allowed; }
   /* 推荐素材会以 Markdown 图片的形式插进回复里 —— 不限宽的话
      4096px 的原图会把整个聊天布局撑爆 */
   .bubble img {
@@ -901,6 +907,75 @@
             .replace(/&lt;br\s*\/?&gt;/gi, "<br>");
   }
 
+  // 回复里的域名要能点开 —— 看完竞品落地页的表格,下一步自然是想去看看对方那一页。
+  // marked 会把 `www.x.com` 这种反引号内容渲染成 <code>,本身不可点,所以在这里补上。
+  //
+  // **两条规矩,后一条是硬的**:
+  // ① 一律新标签打开(target=_blank + rel=noopener),别把正在聊天的这一页顶掉;
+  // ② **追踪链接绝不许变成可点的** —— 点一下 ClickFlare 的 /cf/click 就是一次
+  //    **真实点击**,会污染那条 campaign 的统计,而且事后根本看不出来是误点的。
+  //    宁可让用户自己复制粘贴,也不能替他制造假数据。
+  //    (CLAUDE.md 第六之十七节:不自动访问追踪链接,同一条道理。)
+  var HOSTNAME_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
+  var URL_RE = /^https?:\/\/[^\s"'<>]+$/i;
+  var TRACKING_HINTS = ["/cf/click", "/cf/tags", "cpid=", "cftmid="];
+
+  function looksLikeTracking(s) {
+    var t = String(s || "").toLowerCase();
+    for (var i = 0; i < TRACKING_HINTS.length; i++) {
+      if (t.indexOf(TRACKING_HINTS[i]) >= 0) return true;
+    }
+    return false;
+  }
+
+  function noClickHint() {
+    return lang === "en"
+      ? "Tracking link — left unclickable on purpose: opening it would count as a real click and pollute this campaign's stats. Copy it if you need it."
+      : "追踪链接,故意不做成可点的:点开会算成一次真实点击、污染这条 campaign 的统计。需要的话请复制。";
+  }
+
+  function linkifyBubble(bubble) {
+    // 已有的链接:统一新标签打开;是追踪链接的话降级成纯文字(仍然看得见、能复制)
+    var links = bubble.querySelectorAll ? bubble.querySelectorAll("a[href]") : [];
+    for (var i = 0; i < links.length; i++) {
+      var a = links[i];
+      var href = a.getAttribute ? a.getAttribute("href") : "";
+      if (looksLikeTracking(href) || looksLikeTracking(a.textContent)) {
+        var code = document.createElement("code");
+        code.className = "no-click";
+        code.textContent = a.textContent;
+        code.title = noClickHint();
+        if (a.parentNode) a.parentNode.replaceChild(code, a);
+        continue;
+      }
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    }
+    // 表格里的裸域名(以及整条 http(s) 地址)变成可点的
+    var codes = bubble.querySelectorAll ? bubble.querySelectorAll("code") : [];
+    for (var j = 0; j < codes.length; j++) {
+      var c = codes[j];
+      if (c.className === "no-click" || (c.querySelector && c.querySelector("a"))) continue;
+      var text = String(c.textContent || "").trim();
+      if (!text) continue;
+      if (looksLikeTracking(text)) {
+        c.className = "no-click";
+        c.title = noClickHint();
+        continue;
+      }
+      var isHost = HOSTNAME_RE.test(text);
+      if (!isHost && !URL_RE.test(text)) continue;
+      var link = document.createElement("a");
+      link.href = isHost ? "https://" + text : text;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer nofollow";
+      link.className = "domain-link";
+      link.textContent = text;
+      c.textContent = "";
+      c.appendChild(link);
+    }
+  }
+
   // 画一行消息(头像 + 气泡)。who 是 "user" / "bot" / "error"
   function addBubble(who, text) {
     const row = document.createElement("div");
@@ -930,6 +1005,7 @@
   function renderBubble(bubble, text) {
     if (window.marked) {
       bubble.innerHTML = marked.parse(escapeHtml(text), { breaks: true });
+      linkifyBubble(bubble);
     } else {
       bubble.textContent = text;
     }
