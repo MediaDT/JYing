@@ -3430,6 +3430,97 @@ def test_dns_and_rule_paths():
     check("规则开着 → 里面的 path 照常算启用中", rule_on_still_counts)
 
 
+# ============ 3.49 竞品查询的 503:是参数组合被拒,不是服务挂了 ============
+
+def test_oal_filter_combo():
+    """实测:`search=window` + `status=active` 一起发**必定 503**,而平台正文里写着
+    `That filter combination is too broad to count right now. Narrow it and try again.`
+    —— 它是在算总数那一步撑不住,**不是服务挂了**。单独用哪个都好使(实测都是 200)。
+
+    我们原来把所有 5xx 一律翻译成「暂时不可用,过几分钟再试」,于是用户按提示等 ——
+    **等多久都没用**,真正该做的是换参数。和「400 和 401/403 不能混报」同一条教训。
+    """
+    import inspect
+    import openadlibrary_client as oal
+
+    print("\n【3.49】竞品查询的 503")
+
+    class FakeResp:
+        def __init__(self, code, payload=None, text=""):
+            self.status_code, self._p, self.text = code, payload, text or ""
+
+        def json(self):
+            if self._p is None:
+                raise ValueError("no json")
+            return self._p
+
+    def passes_platform_message_through():
+        msg = "That filter combination is too broad to count right now. Narrow it and try again."
+        r = oal._check(FakeResp(503, {"statusCode": 503, "message": msg}))
+        err = str(r.get("__error") or "")
+        if msg not in err:
+            return "把平台自己的解释吞掉了:%r" % err[:90]
+        if "过几分钟再试" in err:
+            return "还在叫用户等 —— 参数组合被拒,等多久都没用"
+        return True
+    check("5xx 带了原因就把原话交出来,别说成「过几分钟再试」", passes_platform_message_through)
+
+    def keeps_generic_when_no_reason():
+        # 平台真挂了、什么都不说的时候,老话术还是对的
+        r = oal._check(FakeResp(503, None, ""))
+        if "过几分钟再试" not in str(r.get("__error") or ""):
+            return "没原因时反而不给「稍后再试」了"
+        return True
+    check("平台什么都没说时才说「过几分钟再试」", keeps_generic_when_no_reason)
+
+    def never_sends_search_with_status():
+        for fn, name in ((oal.search, "search"),
+                         (oal.search_landing_candidates, "search_landing_candidates")):
+            src = _no_comments(inspect.getsource(fn))
+            if '"status"' in src or "'status'" in src:
+                return "%s 还在往请求里塞 status(和 search 一起发必 503)" % name
+        return True
+    check("查关键词时不再发 status=active(必 503)", never_sends_search_with_status)
+
+    def active_only_is_honored_locally():
+        # **参数不发了,就必须自己筛** —— 否则返回里那句「只看在投中」是在说谎
+        rows = [{"id": "1", "isActive": True, "headline": "window replacement now",
+                 "imageUrl": "/a.webp", "placements": 9, "geos": ["US"]},
+                {"id": "2", "isActive": False, "headline": "window replacement old",
+                 "imageUrl": "/b.webp", "placements": 8, "geos": ["US"]}]
+        real = oal.raw_search
+        oal.raw_search = lambda **kw: (
+            {"error": "不该带 status"} if "status" in kw else
+            {"data": rows, "total": 2})
+        try:
+            r = oal.search("window replacement", count=5, country="US", active_only=True)
+            # **按 image_url 认,不能按 id** —— `_normalize()` 根本不保留 id,
+            # 按 id 判断的话永远是 None,把过滤器整个删掉测试照样绿(第一版就这么错了)。
+            urls = [str(x.get("image_url") or "") for x in r["results"]]
+            if any("b.webp" in u for u in urls):
+                return "停投的广告混进来了,而返回里写着「只看在投中」"
+            if len(urls) != 1 or "a.webp" not in urls[0]:
+                return "在投的那条没正确留下:%r" % urls
+            if "本地" not in str(r.get("筛选")):
+                return "没说清「在投」是本地筛出来的:%r" % r.get("筛选")
+            r2 = oal.search("window replacement", count=5, country="US", active_only=False)
+            if len(r2["results"]) != 2:
+                return "active_only=False 时没有把停投的一起给出来"
+            # **平台没给 isActive 的行要保留** —— `bool(None)` 也是 False,
+            # 把「不知道」当成「已停投」悄悄丢掉是错的(和 geos 那条同一个规矩)。
+            # 老测试的假数据正好没有这个字段,当场就被这条抓出来了。
+            unknown = [{"id": "3", "headline": "window replacement maybe",
+                        "imageUrl": "/c.webp", "placements": 7, "geos": ["US"]}]
+            oal.raw_search = lambda **kw: {"data": unknown, "total": 1}
+            r3 = oal.search("window replacement", count=5, country="US", active_only=True)
+            if len(r3["results"]) != 1:
+                return "平台没给 isActive 的行被当成停投丢掉了"
+            return True
+        finally:
+            oal.raw_search = real
+    check("「只看在投中」改由本地筛,并且如实说明", active_only_is_honored_locally)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3864,6 +3955,7 @@ if __name__ == "__main__":
     test_campaign_id_from_link()
     test_stale_years()
     test_dns_and_rule_paths()
+    test_oal_filter_combo()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

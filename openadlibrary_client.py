@@ -97,6 +97,20 @@ def _check(resp: httpx.Response) -> dict:
         return {"__error": "请求太频繁或当天配额用尽(Pro 是 5000 次/天、120 次/分钟),"
                            "过一会儿再试"}
     if c >= 500:
+        # **别把平台自己的解释吞掉。** 实测 `search=` + `status=active` 一起发会返回
+        # 503,而正文里明明白白写着 "That filter combination is too broad to count
+        # right now. Narrow it and try again." —— 那是**确定性的参数组合被拒**,
+        # 不是服务挂了。原来一律翻译成"过几分钟再试",用户等多久都没用,
+        # 而真正该做的是换个参数。和「400 和 401/403 不能混报」是同一条教训。
+        detail = ""
+        try:
+            detail = str((resp.json() or {}).get("message") or "").strip()
+        except Exception:
+            detail = resp.text[:160].strip()
+        if detail:
+            return {"__error": f"OpenAdLibrary 拒绝了这次查询(HTTP {c}):{detail} "
+                               "**这不是 key 的问题,也不一定是服务挂了** —— "
+                               "带这句原话去看是不是参数组合的问题。"}
         return {"__error": f"OpenAdLibrary 暂时不可用(HTTP {c}),**这不是 key 的问题**,过几分钟再试"}
     if c >= 400:
         return {"__error": f"请求被拒绝(HTTP {c}):{resp.text[:200]}"}
@@ -232,10 +246,9 @@ def search_landing_candidates(keyword: str, count: int = 8, country: str = "US",
     used_query = query
     used_page_size = page_size
     for attempt_query, attempt_size in attempts:
+        # **不发 status=active** —— 见 search() 里那段说明,和 `search` 一起发必 503
         params = {"search": attempt_query, "scope": "adtext",
                   "pageSize": attempt_size, "page": 1, "sort": "placements"}
-        if active_only:
-            params["status"] = "active"
         try:
             data = raw_search(**params)
             used_query = attempt_query
@@ -257,6 +270,10 @@ def search_landing_candidates(keyword: str, count: int = 8, country: str = "US",
     pool, seen = [], set()
     for raw in rows:
         one = _normalize(raw)
+        # 同样在本地筛「还在投」—— 平台的 status=active 不能和 search 一起发(必 503)。
+        # 同样只在平台**明确说了 False** 时才丢,没给字段的保留(见 search() 里的说明)。
+        if active_only and raw.get("isActive") is False:
+            continue
         marker = str(one.get("image_url") or raw.get("id") or "")
         if not marker or marker in seen or not _relevant(one, keyword):
             continue
@@ -270,7 +287,7 @@ def search_landing_candidates(keyword: str, count: int = 8, country: str = "US",
     pool.sort(key=lambda x: (-(x.get("版位数") or 0), -(x.get("投放天数") or 0)))
     result = {"results": pool[:count], "query": keyword, "总匹配数": data.get("total"),
               "候选池": f"轻量查询 1 页、{len(rows)} 条，保留 {len(pool)} 条相关候选",
-              "筛选": ("只看在投中" if active_only else "含已停投")
+              "筛选": ("只看在投中(本地筛的)" if active_only else "含已停投")
                       + (f" / {want_geo}" if want_geo else " / 不限国家")}
     if used_query != query:
         result["数据状态"] = f"精确查询暂时不可用，已自动降级为品类主词 {used_query}"
@@ -442,10 +459,13 @@ def search(keyword: str, count: int = 8, country: str = "US",
     want_geo = country.strip().upper()
     pool, seen, total = [], set(), None
     for page in range(1, pages + 1):
-        # 注意不发 geoCountry,国家在本地筛(原因见上面那段注释)
+        # 注意不发 geoCountry,国家在本地筛(原因见上面那段注释)。
+        # **`status=active` 同样不能和 `search` 一起发**:实测必定 503,
+        # 平台原话是 "That filter combination is too broad to count right now."
+        # —— 它是在算总数那一步撑不住,不是服务挂了,等多久都没用。
+        # 单独用哪个都好使,所以老办法:**能自己算的一律自己算**(每条都带 isActive),
+        # 和 geoCountry 那条是同一个处理。
         params = {"search": (keyword or "").strip(), "pageSize": per, "page": page}
-        if active_only:
-            params["status"] = "active"
         data = raw_search(**params)
         if total is None:
             total = data.get("total")
@@ -454,6 +474,15 @@ def search(keyword: str, count: int = 8, country: str = "US",
             break
         for r in rows:
             one = _normalize(r)
+            # **「只看在投的」改成在本地筛**(平台那个参数和 search 一起发必 503)。
+            # 少了这一步,返回里的「筛选:只看在投中」就是**在说谎** ——
+            # 停投的广告会混进来,而用户以为看到的都是还在跑的。
+            # **判据用原始行的 `is False`,不是规范化后的布尔** ——
+            # 平台没给这个字段时 `bool(None)` 也是 False,那会把「不知道」
+            # 当成「已停投」悄悄丢掉。和上面 geos 那条同一个规矩:
+            # 宁可多给一条待确认的,也不要因为平台没给字段就把它扔了。
+            if active_only and r.get("isActive") is False:
+                continue
             if not one["image_url"] or one["image_url"] in seen:
                 continue
             seen.add(one["image_url"])
@@ -481,7 +510,7 @@ def search(keyword: str, count: int = 8, country: str = "US",
         "候选池": (f"翻了 {pages} 页、{len(pool)} 条候选"
                    + (f",剔掉 {dropped} 条不相关的" if dropped else "")
                    + (f",其中投放≥{min_days}天的 {len(kept)} 条" if min_days else "")),
-        "筛选": ("只看在投中" if active_only else "含已停投")
+        "筛选": ("只看在投中(本地筛的)" if active_only else "含已停投")
                 + (f" / {country.upper()}" if country.strip() else " / 不限国家"),
         "sort": label + "(本地排序)",
     }

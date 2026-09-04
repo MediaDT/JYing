@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(186)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(190)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -54,7 +54,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(186)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(190)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -381,7 +381,7 @@ curl 测出来是通的,实际一句话都回不了。
 | `sort=oldest` | ✅ 有效 |
 | `sortBy` 整个参数 / `sort` 的其它值 | ❌ **静默忽略** —— 不报错、也不排序,比直接报错更难发现。所以 `SORTS` 里只暴露验证过的两个 |
 | `sortDir` | ❌ 忽略,`placements` 恒为降序 |
-| `status=active` | ✅ 有效,12892 → 1921(只看还在投的) |
+| `status=active` | ⚠️ **单独用**有效(12892 → 1921);**和 `search=` 一起发必定 503**,平台原话 `That filter combination is too broad to count right now.` —— 是算总数那一步撑不住,不是服务挂了。所以查关键词时**不发它,在本地按 `isActive` 筛** |
 | **`minDaysRunning`** | ❌ **稳定 503**,隔几秒重试三次都一样,是平台服务端的问题。**投放天数只能拿回来自己算** |
 | `mediaType=image` | ❌ 无效 |
 | **`geoCountry`** | ❌ **两种坏法交替出现**:多数时候 **503**,偶尔 **200 但返回 0 条**。只针对 503 做降级会被第二种骗过去(实测骗到了)。**国家一律拿回来自己筛**(每条都带 `geos`) |
@@ -1132,6 +1132,8 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
 | **「要几个」写死在代码里 = 用户说了不算** | `save_pages` 写死 `pages[:2]`,而且工具连「要几版」这个参数都没有 —— 用户明说「只生成一个」,照样出两个。多的那版是白花的模型钱,还逼他在两个里挑,等于没听他说话。**凡是「出 N 份」的功能,N 必须能从用户那儿一路传到底**(工具参数 → 生成提示词 → 落盘上限),漏一层就失效 |
 | **模型会举一个「例子地址」,而用户会当真** | 助手为了解释 CTA 是什么,顺手写了 `https://track.clickflare.com/click/1` 当例子 —— 那是编的,格式也不对(真的是 `/cf/click/`)。用户很可能直接拿去用。**凡是「绝不许编造」的东西,连举例都不许编**,提示词要明写这一条 |
 | **模型会许诺代码根本不允许的事** | 落地页助手说「你没有追踪代码也没关系,我先不放追踪代码把页面发出去」—— 而缺 CTA 占位符的页面**代码层直接拒绝发布**,答应了也做不到;真发出去更糟:买来的流量一条都统计不到。**代码里拦住的事,提示词里要同样明确地禁止承诺** —— 否则用户按它说的走一圈,到最后才发现是空头支票 |
+| **5xx 里可能写着确定性的原因,别一律说成「稍后再试」** | 竞品查询报 503,我们照着老规矩翻译成「暂时不可用,过几分钟再试」—— 而正文里明明写着 `That filter combination is too broad to count right now. Narrow it and try again.`,是 **`search=` + `status=active` 这个组合**被拒(单独用哪个都 200)。**等多久都没用**,该做的是换参数。5xx 也要先看正文有没有解释,有就原话交出来。和「400 和 401/403 不能混报」是同一条 |
+| **平台参数不能用时改本地筛,但「字段缺失」不等于「False」** | `status=active` 不能发了,改成本地按 `isActive` 筛。第一版写的是 `not one.get("还在投")` —— 而 `_normalize()` 里是 `bool(item.get("isActive"))`,**平台没给这个字段时也是 False**,于是「不知道在不在投」被当成「已停投」悄悄丢掉了(一条老测试的假数据正好没这个字段,当场变红抓出来的)。判据要用**原始行的 `is False`**:只有平台明确说了停投才丢。和 geos 那条「没有 geos 的条目保留」是同一个规矩:**宁可多给一条待确认的,也不要因为平台没给字段就把它扔了** |
 | **绑定自定义域名 ≠ 这个域名能访问** | `POST .../pages/projects/x/domains` 只是把名字**登记到项目上**,走 API 这条路**不会替你建 DNS 记录**(后台点的时候会,所以很容易以为它会)。实测:发布报了成功、结果里给出了 A/B 地址,而 Cloudflare 那边是 `verification_data.error_message = "CNAME record not set"`、证书 pending,浏览器打开是 `ERR_SSL_PROTOCOL_ERROR` —— **页面根本没人能访问,我们却报了成功**,买来的流量落上去全丢。解法:`_ensure_dns()` 在绑定之后建一条**代理的** CNAME 指向 `<project>.pages.dev`(不代理的话证书签不出来);目标主机名上**已经有服务型记录就一个字不动**并说清楚(和「别抢占一个已经在服务的名字」同一条)。**「发布成功」的定义必须是「打得开」**,不是「接口返回 200」 |
 | **ClickFlare 的规则关着时,里面的 path 再 enabled 也不接流量** | `rulePaths` 底下每条**规则**自己有 `enabled`,规则里面的 path 又各有一个 `enabled`。实测某条 campaign 的 US 规则是 `enabled: false`,而它里面那条 path 写着 `enabled: true` 并挂着**旧落地页** —— 只看内层的话,轻则逼用户在两条 path 里选一条,重则**把新落地页换进一条根本不接流量的规则里**,而用户以为 A/B 已经在跑。`_iter_paths()` 现在会把外层规则的开关带下来。**从 ClickFlare 后台的界面上看不出规则是开是关**(截图里那个 US 块看着和启用的一样),所以只能按接口返回的字段判断 |
 | **模型不知道今年是哪年,会用训练时那一年** | 生成的 8 个落地页里出现了 **9 次 2024**,而当时是 2026 年 —— 7 次在页脚版权、2 次在**标题文案**里(`2024 Homeowner Alert`)。根因很简单:`landing_lab` / `creative_lab` 的生成提示词里**一个字都没提今天是哪年**,模型只能用训练时的默认年份。坑表里早有「AI 不知道今天日期,必须在 system prompt 里注入」那条,但这两条生成路径走的是 `_plain_completion()`,**根本不经过 `_system_prompt_now()`** —— 老教训没覆盖到新路径。2026 年的广告页写着 2024,用户一眼看出是旧的,信任感当场没了。解法两层:①两个生成提示词都注入今年;②`fix_stale_years()` 兜底,而且**必须分两类** —— **版权声明**(`© 2024`、`Copyright 2019-2024`)形状固定、不涉及文案,**直接改对**;**正文里的年份是广告文案,只报不改**(改了等于替用户改了广告的说法),报的时候把那个年份用【】标出来。扫正文前要把版权段遮掉,否则 `2019-2026` 的起始年会误报 |
@@ -1265,7 +1267,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 186 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 190 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1348,9 +1350,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 186 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 190 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 186 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 190 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。
