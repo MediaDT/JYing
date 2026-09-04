@@ -1409,8 +1409,12 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
             "Cloudflare域名": domain,
             "Pages项目": project,
             "项目处理": "复用现有项目" if mapping else "新域名，自动创建项目",
-            "A版": f"https://{domain}/{slug}/a/",
-            "B版": f"https://{domain}/{slug}/b/",
+            # **键名里就要带上"现在打不开"**。原来叫 "A版"/"B版",模型照着渲染成
+            # 「A版 正式网址」,用户当场点了过去 —— 拿到 ERR_NAME_NOT_RESOLVED,
+            # 以为出错了。其实这个域名的 DNS 记录要等确认发布那一刻才创建,
+            # 打不开是**对的**。把话写进键名里,模型就没法把它说成"正式网址"。
+            "A版(确认发布后才存在,现在打不开)": f"https://{domain}/{slug}/a/",
+            "B版(确认发布后才存在,现在打不开)": f"https://{domain}/{slug}/b/",
             "CTA地址": cta_url,
             "追踪脚本": script_line,
             **({"⚠️脚本时效": (reused or {}).get("stale_note")}
@@ -1420,7 +1424,10 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
                if allow_replace and risk["risky"] else {}),
         },
         "note": ("这里只登记了发布待办，尚未创建项目、改 DNS 或上传页面。"
-                 "请完整复述域名、项目、A/B 地址和 CTA，等用户下一条消息明确确认后调用 confirm_action。"),
+                 "请完整复述域名、项目、A/B 地址和 CTA，等用户下一条消息明确确认后调用 confirm_action。"
+                 "**必须主动说明:上面这两个网址现在打不开是正常的** —— 这个域名的 DNS 记录"
+                 "要等你确认发布那一刻才创建。别让用户现在去点，点了只会看到"
+                 "「无法访问此网站 / ERR_NAME_NOT_RESOLVED」，会以为出错了。"),
     }
 
 

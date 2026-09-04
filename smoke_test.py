@@ -411,6 +411,15 @@ def test_pure_logic():
             srv.CURRENT_SEQ.set(81002)
             executed = srv.confirm_action(aid)
             bad = []
+            # **提案里的 A/B 地址必须自带"现在打不开"** —— 原来键名是 "A版"/"B版",
+            # 模型照着渲染成「A版 正式网址」,用户当场点过去拿到
+            # ERR_NAME_NOT_RESOLVED(DNS 记录要等确认发布那一刻才建),以为出错了。
+            # 把话写进键名里,模型就没法把它说成"正式网址"。线上实测踩到过。
+            keys = " ".join((proposed.get("pending") or {}).keys())
+            if "A版" in keys and "打不开" not in keys:
+                bad.append("提案里的 A/B 地址没写明现在打不开,用户会去点")
+            if "打不开" not in str(proposed.get("note") or ""):
+                bad.append("note 没要求 AI 主动说明这两个地址现在打不开")
             if not aid or "保险丝" not in same_turn.get("error", ""):
                 bad.append("同一条消息内发布没有被保险丝拦截")
             if "https://track.example/lander.js" in str(pending):
