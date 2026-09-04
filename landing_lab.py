@@ -310,8 +310,15 @@ def decompose_screenshot(image: bytes, mime: str, page: dict,
 
 
 def summarize(models: list[dict], brand: str = "", offer: str = "",
-              audience: str = "", lang: str = "zh") -> dict:
-    prompt = f"""下面是若干个竞品/同行落地页拆解结果。请汇总共性,再生成 2 个全新的落地页。
+              audience: str = "", lang: str = "zh", n_variants: int = 2) -> dict:
+    """汇总竞品落地页并生成 n_variants 个新页面(1 或 2)。
+
+    **要几版必须能由用户说了算。** 原来写死 2 版:用户说「只要一个」也照出两个,
+    多的那一版是白花的模型钱,而且他还要在两个里挑 —— 等于没听他说话。
+    """
+    n_variants = 2 if int(n_variants or 2) >= 2 else 1
+    many = n_variants > 1
+    prompt = f"""下面是若干个竞品/同行落地页拆解结果。请汇总共性,再生成 {n_variants} 个全新的落地页。
 
 硬规则(第 1 条最重要,不满足的页面**根本发布不出去**,等于白做):
 1. **每一个真正跳往 Offer 的 CTA,必须写成 <a href="[[CLICKFLARE_CTA_URL]]">**,
@@ -325,7 +332,8 @@ def summarize(models: list[dict], brand: str = "", offer: str = "",
    发布时由后端安全替换。
 3. 新页面必须是新的表达,不能照抄任何竞品文案、品牌、电话号码、价格、保证或样式细节。
 4. 重点分析为什么表现好:排版、文字描述、offer、表单、信任背书、CTA 节奏。
-5. 生成的两个页面要方向不同,方便 A/B test。
+5. {"生成的两个页面要方向不同,方便 A/B test。" if many else
+   "**只要 1 个页面**,别多给 —— 用户明确只要一个,多出来的那版是白花钱。"}
 6. HTML 要完整可预览,但不要引用外部 JS/CSS/图片;可以用 CSS 做干净版式。
 7. 只输出 JSON。
 
@@ -407,9 +415,11 @@ def _check_publishable(html: str) -> tuple[str, list[str]]:
     return html, problems
 
 
-def save_pages(pages: list[dict]) -> list[dict]:
+def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
+    """把生成的页面落盘。`limit` 是**这次要几版** —— 别再写死 2。"""
+    limit = max(1, min(int(limit or 2), 2))
     out = []
-    for i, p in enumerate(pages[:2], start=1):
+    for i, p in enumerate(pages[:limit], start=1):
         raw = str(p.get("html") or "").strip()
         if not raw:
             continue

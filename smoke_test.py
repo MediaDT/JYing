@@ -1194,6 +1194,67 @@ def test_pure_logic():
         return bad or True
     check("publish_kit 工具五处都注册了", t_kit_tool_registered)
 
+    # 用户说「只要一个」就该只出一个 —— 多的那版是白花的模型钱,还逼他在两个里挑。
+    def t_landing_variant_count():
+        import landing_lab as lp, agent_server as srv, inspect, tempfile
+        from pathlib import Path as _P
+        pages = [{"name": f"v{i}", "html": f"<html><body>{i}"
+                  "<a href='[[CLICKFLARE_CTA_URL]]'>go</a></body></html>"} for i in range(3)]
+        real = lp.GENERATED_DIR
+        with tempfile.TemporaryDirectory() as d:
+            lp.GENERATED_DIR = _P(d)
+            try:
+                if len(lp.save_pages(pages, limit=1)) != 1:
+                    return "要 1 版却不止 1 个"
+                if len(lp.save_pages(pages, limit=2)) != 2:
+                    return "要 2 版却不是 2 个"
+                if len(lp.save_pages(pages, limit=9)) != 2:
+                    return "上限没守住(最多 2 版)"
+            finally:
+                lp.GENERATED_DIR = real
+        # 参数要一路通到工具和 schema,不然模型根本没法传
+        if "n_variants" not in inspect.signature(srv.summarize_landing_page_patterns).parameters:
+            return "工具没有 n_variants 参数,用户说只要一个也传不下去"
+        if "n_variants" not in inspect.signature(lp.summarize).parameters:
+            return "summarize 没有 n_variants"
+        sch = [t for t in srv.OPENAI_TOOL_SCHEMAS
+               if t["function"]["name"] == "summarize_landing_page_patterns"]
+        if not sch or "n_variants" not in sch[0]["function"]["parameters"]["properties"]:
+            return "OpenAI schema 里没有 n_variants"
+        # 只要一版时,提示词要明确说别多给
+        src = lp.summarize.__doc__ or ""
+        body = inspect.getsource(lp.summarize)
+        if "只要 1 个页面" not in body:
+            return "只要一版时提示词没写清「别多给」"
+        return None
+    check("落地页要几版由用户说了算", t_landing_variant_count)
+
+    # 线上实测:助手编了个假 CTA 地址,还许诺「先不放追踪代码就发布」——
+    # 而缺 CTA 占位符的页面代码层直接拒绝,答应了也做不到。
+    def t_landing_prompt_no_false_promise():
+        import agent_server as srv
+        m = srv.CURRENT_CHAT_MODE.set("landing")   # 模式来自 contextvar,不是参数
+        try:
+            zh = srv._system_prompt_now("zh")
+            en = srv._system_prompt_now("en")
+        finally:
+            srv.CURRENT_CHAT_MODE.reset(m)
+        bad = []
+        if "clickflare_publish_kit" not in zh:
+            bad.append("中文提示词没说先调 clickflare_publish_kit(还会去问用户要)")
+        if "clickflare_publish_kit" not in en:
+            bad.append("英文提示词没说先调 clickflare_publish_kit")
+        if "先不放追踪代码" not in zh:
+            bad.append("中文提示词没禁止「先不放追踪代码就发布」这种承诺")
+        if "without tracking" not in en.lower():
+            bad.append("英文提示词没禁止无追踪发布")
+        if "n_variants=1" not in zh or "n_variants=1" not in en:
+            bad.append("提示词没说「用户只要一个就传 1」")
+        if "preview_url" not in zh or "preview_url" not in en:
+            bad.append("提示词没要求把预览地址列给用户")
+        return bad or True
+    check("落地页提示词:不问用户要追踪信息、不许承诺无追踪发布", t_landing_prompt_no_false_promise)
+
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
     # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**

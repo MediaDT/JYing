@@ -1178,26 +1178,35 @@ def decompose_landing_page(candidate_id: str = "", url: str = "", lang: str = "z
 
 
 def summarize_landing_page_patterns(brand: str = "", offer: str = "",
-                                    audience: str = "", lang: str = "zh") -> dict:
-    """汇总已拆解落地页,并生成 2 个新的 HTML 落地页草稿。
+                                    audience: str = "", lang: str = "zh",
+                                    n_variants: int = 2) -> dict:
+    """汇总已拆解落地页,并生成新的 HTML 落地页草稿。
 
     要先拆解至少 1 个真实页面;2 个以上更稳。生成结果会保存到本地,
     返回 preview_url 供用户点击预览。
+
+    `n_variants`:**用户说要几个就是几个**(1 或 2)。默认 2 是为了做 A/B;
+    他明确说「只要一个」时必须传 1 —— 多生成一版是白花的模型钱,
+    而且逼他在两个里挑,等于没听他说话。
     """
     models = list(_landing_models().values())
     if not models:
         return {"error": "还没有拆解过落地页。请先用 decompose_landing_page 拆至少 1 个页面。"}
-    out = lp.summarize(models, brand=brand, offer=offer, audience=audience, lang=lang)
+    want = 2 if int(n_variants or 2) >= 2 else 1
+    out = lp.summarize(models, brand=brand, offer=offer, audience=audience,
+                       lang=lang, n_variants=want)
     if out.get("error"):
         return out
-    pages = _absolute_previews(lp.save_pages(out.get("新落地页") or []))
+    pages = _absolute_previews(lp.save_pages(out.get("新落地页") or [], limit=want))
     out["新落地页"] = pages
     _LANDING_PAGES_BY_USER[CURRENT_USER_ID.get() or "-"] = list(pages)
     return {
         **out,
         "依据页面数": len(models),
         "不能发布的版本": [p.get("file") for p in pages if not p.get("可发布")],
-        "note": ("先总结共同规律和 offer 设计建议,再列出两个新落地页的 preview_url。"
+        "本次生成版本数": len(pages),
+        "note": (f"先总结共同规律和 offer 设计建议,再把这 {len(pages)} 版的 preview_url "
+                 "**逐条列给用户,让他能点开看**。"
                  "**preview_url 必须原样照抄,一个字都不许改** —— 尤其不许自己拼 "
                  "host 或端口(编出来的地址打开是别的东西的 404)。"
                  "提醒用户:这是可预览的 HTML 初稿,学的是结构和说服逻辑,没有复制竞品页面。"
@@ -3222,9 +3231,14 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "extracted public page text with explicit evidence limits. Extract layout, "
                    "copy, offer, trust, form and CTA patterns, then create two original HTML landing-page drafts. "
                    "Never copy competitor branding or claims, and never create, pause, or schedule ads. "
-                   "For publishing, collect the exact ClickFlare CTA URL; the lander script only needs pasting "
-                   "ONCE per tracking domain (leave tracking_script empty to reuse the stored one; "
-                   "check list_cloudflare_landing_resources to see which domains are stored). Never invent or "
+                   "Generate 2 variants by default for A/B; pass n_variants=1 when the user asks for only one. "
+                   "Always list every preview_url verbatim so the user can open it — never rebuild the host or port. "
+                   "For publishing, call clickflare_publish_kit(campaign) first: it derives the tracking domain, "
+                   "CTA Click URL and Campaign Tracking URL from ClickFlare and fetches the lander script "
+                   "automatically, so do NOT ask the user for them — ask only which campaign he is running. "
+                   "NEVER offer to publish without tracking code: pages missing the CTA placeholder are refused "
+                   "at the code level, and an untracked landing page records nothing while the ads still cost money. "
+                   "Never invent or "
                    "rewrite them. List Cloudflare resources if the domain is unknown. Register publishing with "
                    "propose_publish_landing_pages and only call confirm_action after confirmation in the next message."
                    if english else
@@ -3232,13 +3246,21 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "投放较久或版位较多的候选，并明确这些只是表现信号，不是真实 CTR/CVR。截图可用时必须直接"
                    "展示，并结合截图与公开页面文字拆解；只有域名首页时必须说明不一定是当时的完整投放路径。"
                    "从排版、文案、offer、信任背书、表单和 CTA 节奏分析，提炼关键词"
-                   "与可迁移优点，最后生成两个方向不同、可预览的原创 HTML 落地页。严禁照抄竞品品牌、"
-                   "承诺和具体优惠，也严禁创建、启停广告或登记定时任务。发布前必须向用户取得原样的"
-                   "ClickFlare CTA Click URL，绝不编造或改写。Lander Tracking Script **同一个追踪域名只需贴一次**："
-                   "贴过的域名把 tracking_script 留空即可自动复用，没贴过的要请用户贴一次；"
-                   "不确定就先调 list_cloudflare_landing_resources 看「已存脚本的追踪域名」。域名没定时先读取"
-                   "Cloudflare 可选域名。发布必须先用 propose_publish_landing_pages 登记，向用户完整复述，"
-                   "只有用户下一条消息明确确认后才能调用 confirm_action。")
+                   "与可迁移优点，最后生成可预览的原创 HTML 落地页。严禁照抄竞品品牌、"
+                   "承诺和具体优惠，也严禁创建、启停广告或登记定时任务。\n"
+                   "【生成落地页】默认出 2 版做 A/B；**用户说「只要一个」就传 n_variants=1**，"
+                   "不许多给。生成完必须把每一版的 preview_url **原样列出来让他点开看**，"
+                   "地址一个字都不许改、更不许自己拼 host 或端口。\n"
+                   "【追踪信息不用问用户】先调 clickflare_publish_kit(campaign)，"
+                   "它会从 ClickFlare 直接给出追踪域名、CTA Click URL、Campaign Tracking URL，"
+                   "追踪脚本也会自动取好。你只需要向用户要**他这次要投的 Campaign Tracking URL**"
+                   "(或 campaign 名字，用 list_clickflare_campaigns 找)。"
+                   "取不到时才请他手工从 ClickFlare 后台复制，**任何情况下都严禁编造或举例编一个地址** —— "
+                   "写出 `https://track.clickflare.com/click/1` 这种假例子会被当成真的照抄。\n"
+                   "【绝不许承诺「先不放追踪代码就发布」】没有 CTA 占位符的页面**代码层会直接拒绝发布**，"
+                   "答应了也做不到；而且没有追踪的落地页 = 买来的流量一条都统计不到，钱白花。\n"
+                   "域名没定时先读取 Cloudflare 可选域名。发布必须先用 propose_publish_landing_pages 登记，"
+                   "向用户完整复述，只有用户下一条消息明确确认后才能调用 confirm_action。")
 
     if mode == "campaign" and sched.recent_runs:
         prompt += ("\n\n【定时任务最近的执行结果】(代码层记录,若用户还不知道,主动告知一句):\n"
@@ -3631,8 +3653,11 @@ OPENAI_TOOL_SCHEMAS = [
               "url": {"type": "string", "description": "用户直接提供的完整 http(s) URL"},
               "lang": {"type": "string", "description": "zh 或 en"}}, []),
     _oa_tool("summarize_landing_page_patterns",
-             "汇总已拆解页面的共性、关键词和 offer 设计，并生成两个方向不同的原创 HTML 落地页",
-             {"brand": {"type": "string", "description": "自己的品牌名，可空"},
+             "汇总已拆解页面的共性、关键词和 offer 设计，并生成原创 HTML 落地页。"
+             "默认 2 版做 A/B；**用户说「只要一个」时必须传 n_variants=1**",
+             {"n_variants": {"type": "integer", "description":
+                 "生成几版：1 或 2，默认 2。用户明确只要一个就传 1，不要多给"},
+              "brand": {"type": "string", "description": "自己的品牌名，可空"},
               "offer": {"type": "string", "description": "自己的 offer，可空，空时使用占位表达"},
               "audience": {"type": "string", "description": "目标人群，可空"},
               "lang": {"type": "string", "description": "zh 或 en"}}, []),
