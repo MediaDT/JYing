@@ -1074,6 +1074,126 @@ def test_pure_logic():
         return bad or True
     check("换落地页的工具五处都注册了、且走两阶段", t_swap_tool_registered)
 
+    # 追踪脚本和 CTA 地址原来要用户手工去 ClickFlare 后台复制,两样都可能粘错,
+    # 而粘错了页面看起来完全正常。现在从平台接口现取 —— 实测「模板 + 域名」拼出来的
+    # 和用户手工复制的真脚本 md5 完全相同。
+    def t_clickflare_script_from_api():
+        import clickflare_client as cfc
+        MARK = "{{{__TRACKING_DOMAIN__}}}"
+        calls = []
+        real = cfc._api
+
+        def fake(method, path, **kw):
+            calls.append(path)
+            if path == "/api/scripts/direct":
+                return {"script": 'var c="' + MARK + '";'}
+            if path == "/api/scripts/links":
+                return {"click": MARK + "/cf/click", "conversion": MARK + "/cf/cv"}
+            raise AssertionError("不该调 " + path)
+
+        cfc._api = fake
+        try:
+            out = cfc.lander_script("trk.mine.com")
+            if out != '<script>var c="https://trk.mine.com";</script>':
+                return f"脚本拼错了:{out[:80]}"
+            if "/api/scripts/direct" not in calls:
+                return "没有去平台现取模板(抄进代码里就会静默发老版本)"
+            # 传完整地址也要认得(用户手里常常是一整条 URL)
+            if cfc.lander_script("https://trk.mine.com/cf/click/1") != out:
+                return "传完整地址时没抽出主机名"
+            url = cfc.click_url("trk.mine.com")
+            if url != "https://trk.mine.com/cf/click/1":
+                return f"CTA 地址拼错了:{url}"
+            if cfc.click_url("trk.mine.com", 2) != "https://trk.mine.com/cf/click/2":
+                return "CTA 序号没生效"
+            if "/api/scripts/links" not in calls:
+                return "CTA 路径是写死的,没从平台取"
+            # 平台改了格式(占位符没了)→ 必须明确报错,绝不许发一段拼错的脚本出去
+            cfc._api = lambda m, pth, **k: {"script": "no placeholder here"}
+            try:
+                cfc.lander_script("trk.mine.com")
+                return "模板里没有占位符也照发 —— 那会发出一段坏脚本"
+            except cfc.ClickFlareError:
+                pass
+            # 域名不合法要拦
+            cfc._api = fake
+            for bad in ("", "不是域名", "localhost"):
+                try:
+                    cfc.lander_script(bad)
+                    return f"「{bad}」这种域名也放行了"
+                except cfc.ClickFlareError:
+                    pass
+        finally:
+            cfc._api = real
+        return None
+    check("追踪脚本和 CTA 地址从平台接口现取(不写死、不让用户贴)", t_clickflare_script_from_api)
+
+    # 脚本原文绝不能出现在聊天里(和待办清单同一条规矩)
+    def t_publish_kit_hides_script():
+        import agent_server as srv, clickflare_client as cfc, clickflare_scripts as cfs
+        import tempfile
+        from pathlib import Path as _P
+        real_kit, real_store = cfc.publish_kit, cfs.STORE
+        cfc.publish_kit = lambda campaign, cta_index=1: {
+            "campaign": {"id": "c" * 24, "名字": "X"},
+            "追踪域名": "trk.mine.com",
+            "CTA_Click_URL": "https://trk.mine.com/cf/click/1",
+            "Campaign_Tracking_URL": "https://trk.mine.com/cf/r/xxx",
+            "tracking_script": "<script>SECRET_SCRIPT_BODY</script>"}
+        with tempfile.TemporaryDirectory() as d:
+            cfs.STORE = _P(d) / "s.json"
+            tok = srv.CURRENT_USER_ID.set("__kit__")
+            try:
+                out = str(srv.clickflare_publish_kit("c" * 24))
+            finally:
+                srv.CURRENT_USER_ID.reset(tok)
+                cfc.publish_kit, cfs.STORE = real_kit, real_store
+        if "SECRET_SCRIPT_BODY" in out or "<script" in out:
+            return "把脚本原文吐进聊天了"
+        if "cf/click/1" not in out:
+            return "CTA 地址没给出来(那用户还是得自己去后台找)"
+        return None
+    check("publish_kit 给地址但不回显脚本原文", t_publish_kit_hides_script)
+
+    # 只给相对路径的话,模型会自己配 host —— 线上实测编出了 localhost:3000,
+    # 用户点开是他本机另一个项目的 404,而且完全看不出问题在哪。
+    def t_preview_url_is_absolute():
+        import agent_server as srv
+        tok = srv.CURRENT_BASE_URL.set("http://localhost:18100/")
+        try:
+            got = srv._absolute_previews([{"preview_url": "/landing-pages/x.html"}])
+        finally:
+            srv.CURRENT_BASE_URL.reset(tok)
+        if got[0]["preview_url"] != "http://localhost:18100/landing-pages/x.html":
+            return f"没补成完整地址:{got[0]['preview_url']}"
+        # 拿不到站点地址时(命令行/测试)保持原样,不瞎拼
+        plain = srv._absolute_previews([{"preview_url": "/landing-pages/x.html"}])
+        if plain[0]["preview_url"] != "/landing-pages/x.html":
+            return "没有站点地址时不该自己拼一个"
+        # 真有这个路由(不然给了地址也是 404)
+        routes = [getattr(r, "path", "") for r in srv.app.routes]
+        if "/landing-pages/{filename}" not in routes:
+            return "预览路由不存在 —— 给了地址也打不开"
+        return None
+    check("落地页预览给的是完整地址,而且路由真的在", t_preview_url_is_absolute)
+
+    def t_kit_tool_registered():
+        import agent_server as srv
+        n = "clickflare_publish_kit"
+        bad = []
+        if not any(f.__name__ == n for f in srv.NEWSBREAK_TOOLS):
+            bad.append("不在 Gemini 工具清单")
+        if n not in srv.OPENAI_TOOL_FUNCS:
+            bad.append("不在 OPENAI_TOOL_FUNCS")
+        if not any(t["function"]["name"] == n for t in srv.OPENAI_TOOL_SCHEMAS):
+            bad.append("没有 OpenAI schema")
+        if n not in srv.LANDING_TOOL_NAMES:
+            bad.append("落地页模式里用不了")
+        if n not in srv._TOOL_LABELS:
+            bad.append("没有进度文案")
+        return bad or True
+    check("publish_kit 工具五处都注册了", t_kit_tool_registered)
+
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
     # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**

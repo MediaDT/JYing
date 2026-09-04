@@ -472,3 +472,82 @@ def apply_flow(flow_id: str, put_body: dict, expect_fingerprint: str = "") -> di
         landed.extend(block.get("landers") or [])
     return {"done": True, "flow_id": flow_id,
             "写完回查到的落地页": landed or "(一个都没有 —— 不对劲,请到后台核对)"}
+
+
+# ---------------------------------------------------------------- 脚本和地址(不用再让用户贴)
+
+_SCRIPT_DOMAIN_MARK = "{{{__TRACKING_DOMAIN__}}}"
+
+
+def _tracking_origin(domain: str) -> str:
+    raw = str(domain or "").strip().lower()
+    if "://" in raw:
+        raw = urlparse(raw).hostname or ""
+    raw = raw.strip("./")
+    if not raw or "/" in raw or "." not in raw:
+        raise ClickFlareError(f"追踪域名不对:「{domain}」。应该是形如 trk.example.com 的主机名。")
+    return "https://" + raw
+
+
+def lander_script(tracking_domain: str) -> str:
+    """现取 ClickFlare 的 Lander Tracking Script,代入追踪域名后返回完整 `<script>`。
+
+    **为什么可以这么做,而「把脚本抄进代码当模板」不行**:模板是每次从
+    `GET /api/scripts/direct` **现取**的 —— ClickFlare 改版(加参数、换上报格式)
+    我们自动跟上;抄进代码就会静默发老版本。存的地方在他们那儿,不在我们这儿。
+
+    实测(2026-09-04):把用户手工从后台复制的两段真脚本拿来逐字节比对,
+    「模板 + 域名」拼出来的和真脚本 **md5 完全相同**,两个不同域名都对上了。
+    """
+    data = _api("GET", "/api/scripts/direct")
+    body = str((data or {}).get("script") or "")
+    if not body or _SCRIPT_DOMAIN_MARK not in body:
+        raise ClickFlareError(
+            "ClickFlare 返回的追踪脚本模板不认识(里面没有追踪域名占位符)。"
+            "平台可能改了格式 —— 请先手工从后台复制一次脚本贴过来,并跑 "
+            "check_clickflare_params.py 看看是不是接口变了。")
+    return "<script>" + body.replace(_SCRIPT_DOMAIN_MARK, _tracking_origin(tracking_domain)) + "</script>"
+
+
+def click_url(tracking_domain: str, index: int = 1) -> str:
+    """拼出 CTA Click URL。路径形状**从平台接口取**,不写死在代码里。"""
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        raise ClickFlareError("CTA 序号要是整数,通常是 1。")
+    if index < 1:
+        raise ClickFlareError("CTA 序号从 1 开始。")
+    tpl = str((_api("GET", "/api/scripts/links") or {}).get("click") or "")
+    if _SCRIPT_DOMAIN_MARK not in tpl:
+        raise ClickFlareError("ClickFlare 返回的 click 地址模板不认识,平台可能改了格式。")
+    return tpl.replace(_SCRIPT_DOMAIN_MARK, _tracking_origin(tracking_domain)).rstrip("/") + f"/{index}"
+
+
+def campaign_tracking_domain(campaign_doc: dict) -> str:
+    """这条 campaign 用的追踪域名(按它的 domain_id 反查)。查不到就报错,不猜。"""
+    did = str(campaign_doc.get("domain_id") or "")
+    if not did:
+        raise ClickFlareError("这条 campaign 上没有 domain_id,认不出用哪个追踪域名。")
+    for d in list_domains():
+        if str(d.get("id")) == did:
+            return str(d.get("domain") or "")
+    raise ClickFlareError(f"ClickFlare 的域名列表里找不到 id 为 {did[:8]}… 的追踪域名。")
+
+
+def publish_kit(campaign: str, cta_index: int = 1) -> dict:
+    """发布落地页要用的三样东西,一次全给 —— **一样都不用用户手工去后台复制**。
+
+    以前要用户贴 CTA Click URL 和整段 Lander Tracking Script,
+    两样都可能粘错,而粘错了页面看起来完全正常(见 CLAUDE.md 第六之十七节)。
+    现在全部从这条 campaign 推导:域名来自它的 `domain_id`,脚本来自平台接口。
+    """
+    doc = get_campaign(campaign)
+    domain = campaign_tracking_domain(doc)
+    return {
+        "campaign": {"id": doc.get("_id"), "名字": doc.get("name")},
+        "追踪域名": domain,
+        "CTA_Click_URL": click_url(domain, cta_index),
+        "Campaign_Tracking_URL": str(doc.get("url") or "")
+                                 or "(平台没给,去 ClickFlare 后台复制)",
+        "tracking_script": lander_script(domain),
+    }

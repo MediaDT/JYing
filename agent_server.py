@@ -100,6 +100,11 @@ SESSION_COOKIE = "adbot_session"
 # 当前请求是谁发的。AI 的工具函数(比如登记定时任务)藏在很深的调用链里,
 # 拿不到 request,所以在中间件里设一次,它们直接读。
 # 空字符串 = 不在请求里(定时任务线程 / 命令行 / 测试)。
+# 这次请求真实的站点地址(形如 http://localhost:18100/)。
+# **为什么必须有**:落地页预览原来只给模型一个相对路径 `/landing-pages/xxx.html`,
+# 于是它自己配了个 host —— 线上实测编出了 `http://localhost:3000/...`,
+# 打到用户本机另一个项目上,看到的是那个项目的 404。给它完整地址就没得编。
+CURRENT_BASE_URL: contextvars.ContextVar = contextvars.ContextVar("adbot_base_url", default="")
 CURRENT_USER_ID: contextvars.ContextVar = contextvars.ContextVar("adbot_user_id", default="")
 
 # 流式回复时,用来把「进度/文字」一小段一小段递给前端的回调。
@@ -126,6 +131,7 @@ _TOOL_LABELS = {
     "describe_clickflare_campaign": "正在看这条 campaign 现在挂着什么…",
     "create_clickflare_landers": "正在把 A/B 两版登记进 ClickFlare…",
     "propose_swap_campaign_landers": "正在核对这条 campaign 现在挂着什么…",
+    "clickflare_publish_kit": "正在从 ClickFlare 取追踪地址和脚本…",
     "propose_publish_landing_pages": "正在登记 A/B 页面发布待办…",
     "my_ad_categories": "正在看你的账户在投什么品类…",
     "platform_kind": "正在判断这是哪类投放平台…",
@@ -174,6 +180,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in _PUBLIC_PATHS or path.startswith("/static/"):
             return await call_next(request)
 
+        # 设在 call_next **之前**,下游(含丢进线程池的同步接口)才读得到
+        CURRENT_BASE_URL.set(str(request.base_url))
         user = acc.session_user(request.cookies.get(SESSION_COOKIE, ""))
         if user:
             request.state.user = user
@@ -988,6 +996,21 @@ def _landing_models() -> dict[str, dict]:
     return _LANDING_MODELS_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", {})
 
 
+def _absolute_previews(pages: list[dict]) -> list[dict]:
+    """把 `preview_url` 补成**完整地址**再交给模型。
+
+    只给相对路径的话,模型会自己配一个 host —— 实测编出了 `localhost:3000`,
+    用户点开是他本机另一个项目的 404,而且看不出问题出在哪。
+    拿不到站点地址(命令行/测试)时保持相对路径,不瞎拼。
+    """
+    base = str(CURRENT_BASE_URL.get() or "").rstrip("/")
+    for page in pages:
+        rel = str(page.get("preview_url") or "")
+        if base and rel.startswith("/"):
+            page["preview_url"] = base + rel
+    return pages
+
+
 def _landing_pages() -> list[dict]:
     return _LANDING_PAGES_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", [])
 
@@ -1167,7 +1190,7 @@ def summarize_landing_page_patterns(brand: str = "", offer: str = "",
     out = lp.summarize(models, brand=brand, offer=offer, audience=audience, lang=lang)
     if out.get("error"):
         return out
-    pages = lp.save_pages(out.get("新落地页") or [])
+    pages = _absolute_previews(lp.save_pages(out.get("新落地页") or []))
     out["新落地页"] = pages
     _LANDING_PAGES_BY_USER[CURRENT_USER_ID.get() or "-"] = list(pages)
     return {
@@ -1175,6 +1198,8 @@ def summarize_landing_page_patterns(brand: str = "", offer: str = "",
         "依据页面数": len(models),
         "不能发布的版本": [p.get("file") for p in pages if not p.get("可发布")],
         "note": ("先总结共同规律和 offer 设计建议,再列出两个新落地页的 preview_url。"
+                 "**preview_url 必须原样照抄,一个字都不许改** —— 尤其不许自己拼 "
+                 "host 或端口(编出来的地址打开是别的东西的 404)。"
                  "提醒用户:这是可预览的 HTML 初稿,学的是结构和说服逻辑,没有复制竞品页面。"
                  "**任何一版的「可发布」是 false 时,必须在回复里明确说出来**:"
                  "把「⚠️问题」原样讲给用户(通常是没有 CTA 占位符,或者 CTA 是 alert 这类假按钮),"
@@ -1237,12 +1262,22 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
             # 能这么干是因为实测过:同一追踪域名下所有 Lander 的脚本逐字节相同。
             host = (urlparse(cta_url).hostname or "").lower()
             reused = cfs.lookup(uid, host) if host else None
+            if not reused and host and cfc.configured():
+                # 脚本库里没有,就直接从 ClickFlare 现取(实测:模板 + 域名拼出来的
+                # 和用户手工复制的脚本 md5 完全相同)。这样他一次都不用贴。
+                try:
+                    fetched = cfc.lander_script(host)
+                    cfs.remember(uid, fetched)
+                    reused = cfs.lookup(uid, host)
+                except Exception:
+                    reused = None      # 取不到就走下面的老路子,请用户贴一次
             if not reused:
                 stored = "、".join(x["追踪域名"] for x in cfs.listing(uid)) or "(还没存过任何脚本)"
                 return {"error": (
                     f"没有登记发布待办:脚本库里没有 {host or '这个域名'} 的 Lander Tracking Script。"
                     f"你已经存过的追踪域名:{stored}。"),
-                    "note": ("请用户到 ClickFlare 后台复制**这个追踪域名**的 Lander Tracking Script "
+                    "note": ("没能从 ClickFlare 自动取到(可能这个域名不在这个账号里,或接口暂时不可用)。"
+                             "请用户到 ClickFlare 后台复制**这个追踪域名**的 Lander Tracking Script "
                              "完整贴过来(含 <script>…</script>)。**同一个追踪域名只用贴这一次**,"
                              "以后同域名的发布会自动复用。**严禁自己编造、拼接或改写脚本。**")}
             script = reused["script"]
@@ -2442,6 +2477,35 @@ def _execute_swap_campaign_landers(action: dict) -> dict:
     return result
 
 
+def clickflare_publish_kit(campaign: str, cta_index: int = 1) -> dict:
+    """一次取齐发布落地页要用的三样东西 —— **用户一样都不用手工去后台复制**。
+
+    以前要他自己贴 CTA Click URL 和整段 Lander Tracking Script:两样都可能粘错,
+    而粘错了页面看起来**完全正常**,要等数据不对劲才发现。现在全部从这条 campaign
+    推导:追踪域名来自它的 `domain_id`,脚本来自 ClickFlare 自己的接口。
+
+    `campaign` 直接传用户给的 Campaign Tracking URL(带 `cpid=`)或 campaign id。
+    """
+    try:
+        kit = cfc.publish_kit(campaign, cta_index=cta_index)
+    except Exception as e:
+        return {"error": str(e)[:500],
+                "note": ("取不到的话,还可以让用户手工从 ClickFlare 后台复制 "
+                         "CTA Click URL 和 Lander Tracking Script 贴过来 —— "
+                         "但**严禁自己编造或拼凑**这两样。")}
+    script = kit.pop("tracking_script", "")
+    # 顺手存进脚本库:以后 ClickFlare 接口万一不可用,还能从本地拿回来
+    saved = cfs.remember(CURRENT_USER_ID.get(), script)
+    return {
+        **kit,
+        "追踪脚本": f"已自动取到并存好({len(script)} 字符),发布时会原样植入,不在聊天里回显",
+        "脚本库": saved.get("action") or saved.get("reason") or "",
+        "note": ("这三样都是从 ClickFlare 推导出来的,**不用让用户再去后台复制**。"
+                 "请把「追踪域名 / CTA Click URL / Campaign Tracking URL」讲给他核对一眼,"
+                 "**脚本原文不要贴进聊天**。发布时 tracking_script 留空即可自动使用。"),
+    }
+
+
 def list_schedules() -> dict:
     """查看所有定时任务(含下次执行时间、上次执行结果)。"""
     tasks = sched.list_tasks()
@@ -2476,7 +2540,7 @@ NEWSBREAK_TOOLS = [
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
-    propose_swap_campaign_landers,
+    propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     propose_status_change, propose_create_campaign, confirm_action, cancel_action,
@@ -3222,7 +3286,7 @@ LANDING_TOOL_NAMES = {
     "decompose_landing_page", "summarize_landing_page_patterns",
     "list_cloudflare_landing_resources", "propose_publish_landing_pages",
     "list_clickflare_campaigns", "describe_clickflare_campaign", "create_clickflare_landers",
-    "propose_swap_campaign_landers",
+    "propose_swap_campaign_landers", "clickflare_publish_kit",
     "confirm_action", "cancel_action", "list_pending_actions",
 }
 
@@ -3594,6 +3658,14 @@ OPENAI_TOOL_SCHEMAS = [
               "cta_url": {"type": "string", "description": "本次的 ClickFlare CTA Click URL，用来反查追踪域名"},
               "name_prefix": {"type": "string", "description": "Lander 命名前缀，一般用实验名，可空"}},
              ["campaign", "variant_a_url", "variant_b_url", "cta_url"]),
+    _oa_tool("clickflare_publish_kit",
+             "一次取齐发布落地页要用的追踪域名、CTA Click URL 和 Campaign Tracking URL。"
+             "**用户不用再手工去 ClickFlare 后台复制任何东西**，追踪脚本也会自动取好存起来。"
+             "准备发布落地页时先调它",
+             {"campaign": {"type": "string", "description":
+                 "用户给的 Campaign Tracking URL(带 cpid=)或 24 位 campaign id"},
+              "cta_index": {"type": "integer", "description": "CTA 出口序号，默认 1"}},
+             ["campaign"]),
     _oa_tool("propose_swap_campaign_landers",
              "登记「把这条 campaign 的落地页换成 A/B 两个、各 50%」的待办。"
              "**这是外部写操作且确认后立刻生效**——只登记，必须完整复述现状与改动、"
@@ -3683,7 +3755,7 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
-    propose_swap_campaign_landers,
+    propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,

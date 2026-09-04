@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(141)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(145)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -53,7 +53,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(141)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(145)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -941,6 +941,28 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
 **建好的 Lander 还不会承接任何流量** —— 要等它被挂进 campaign 的 flow 才算数。
 那一步会**立刻改变正在花钱的投放**,属于写操作,必须走保险箱,**还没做**(第三步)。
 
+### 追踪脚本和 CTA 地址不用再让用户贴了(2026-09-04)
+
+**平台自己有接口给这两样**,是探 `/api/scripts/*` 时发现的:
+
+| 接口 | 给什么 |
+|---|---|
+| `GET /api/scripts/direct` | **Lander Tracking Script 的模板**,追踪域名是占位符 `{{{__TRACKING_DOMAIN__}}}` |
+| `GET /api/scripts/links` | click / conversion 地址的模板(`{{{__TRACKING_DOMAIN__}}}/cf/click`) |
+
+**验证方式和当初判断「脚本是不是通用一段」时一样**:拿用户手工从后台复制的两段真脚本,
+用「模板 + 各自的域名」拼一遍,**md5 完全相同,两个域名都对上**。
+
+所以 `clickflare_publish_kit(campaign)` 一次给齐:追踪域名(来自 campaign 的 `domain_id`)、
+CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及自动取好的脚本。
+**用户一样都不用去后台复制。**
+
+- **这不违反「不许把脚本抄进代码当模板」那条规矩** —— 模板是**每次现取**的,
+  ClickFlare 改版我们自动跟上;抄进代码才会静默发老版本。
+- **模板里没有占位符就明确报错**,绝不发一段拼错的脚本出去。
+- 取到的脚本仍会存进脚本库(第六之十七节),当平台接口不可用时的兜底。
+- 发布时 `tracking_script` 留空 → 先查脚本库 → 再从平台现取 → 都不行才请用户贴。
+
 ### 第三步:把 A/B 挂进 campaign(已完成)
 
 `propose_swap_campaign_landers` → `confirm_action`,和建广告同一套保险箱。
@@ -1045,6 +1067,8 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
 | **按公开单价算的成本会差很远** | 按 ofox 报的 `output_image` 单价 × 官方 token 数算出一张 $0.05,**实测 $0.203,差 4 倍**。报低了用户以为很便宜,批量生成才发现烧了不少。**成本一律拿账单实测校正**(记余额→生成→再记余额),别信算出来的 |
 | **测试用 index() 找源码会命中注释** | 守"文件名要排在 `cr.render()` 之前"那条测试,`src.index("cr.render(")` 先命中了**注释里**写的 `cr.render()`,于是误报。和之前 `minDaysRunning` 在 docstring 里被搜到是同一类。**读源码做判断前先把注释/docstring 剥掉** |
 | **同一个判断散在三处,加一种就漏一处** | 「这个工作室能看见/能确认哪些待办」原来在三处各写死一个字符串 `publish_landing_pages`:待办清单、提示词注入、`_tool_call` 的模式闸门。加了第二种待办后**三处全漏**,而且三处的表现完全不同 —— 登记成功却在清单里看不见、AI 跨轮忘了编号没处查、确认时被「不能确认其它工作区的待办」拒掉。更阴的是**直接调 `confirm_action()` 测不出来**:那道闸门在 `_tool_call` 里,测试必须走真正的工具分发层才碰得到(和「锁了输入框不等于锁住了发送」同一类)。**这类清单要收成一份常量**,加新类型只改那一行 |
+| **只给相对路径,模型会自己编个 host** | 落地页预览返回的是 `/landing-pages/xxx.html`,模型照着写成了 **`http://localhost:3000/...`** —— 那是用户本机另一个项目的端口,点开是那个项目的 404,完全看不出问题在哪(路由其实一直是好的)。**凡是要给用户点的地址,代码就得给完整的**:把请求的 `base_url` 存进 contextvar(设在 `call_next` 之前),返回前补成绝对地址,模型就没得编 |
+| **要用户手工复制的东西,先翻翻平台有没有接口** | ClickFlare 的 Lander Tracking Script 和 CTA Click URL,让用户来回从后台复制粘贴了很久 —— 而平台一直有 `/api/scripts/direct` 和 `/api/scripts/links`,直接给模板。是探接口时顺手翻 swagger 才看见的。**每多一样要用户手工搬运的东西,就多一处会粘错、而且粘错了看不出来的地方**;动手做「贴一次就存起来」这类缓解方案之前,先确认平台是不是根本就能自动拿 |
 | **可点的链接里混进追踪地址 = 用户一点就污染数据** | 竞品落地页表格里的域名做成可点之后,顺手会想把回复里所有链接都变可点 —— 但 ClickFlare 的 `/cf/click`、带 `cpid=` 的地址**点一下就是一次真实点击**,会记进那条 campaign 的统计,而且事后完全看不出是误点的。所以 linkify 时要挡住 `/cf/click`、`/cf/tags`、`cpid=`、`cftmid=`,降级成**纯文字**(还看得见、能复制),并用 title 说清为什么不能点。和「不自动访问追踪链接做健康检查」是同一条规矩 |
 | **测「新函数」不等于测「它被接上了」** | 给回复里的域名加可点链接,测试直接调 `linkifyBubble()` 全绿 —— 而把 `renderBubble` 里那一行调用**删掉,测试照样全绿**。函数写对了、根本没被调用,页面上什么都不会变。**必须再补一条走真正入口的测试**(这里是 `renderBubble`)。和「闸门在 `_tool_call` 里,直接调 `confirm_action()` 测不出来」是同一类 |
 | **别猜接口路径名,先找 swagger** | ClickFlare 的落地页接口叫 `/api/landings`,而所有人(包括它自己的界面)都管这东西叫 **lander** —— `/api/landers`、`/api/lander`、`/api/lp`、`/api/landing-pages` 全是 404,猜了十几次没中。真正解决问题的是 `GET /api/swagger.json`(200,54 个接口全在里面)。**探一个没有公开文档的 API,第一件事是找它的 spec 端点**(`/swagger.json`、`/openapi.json`、`/api/docs`),别从资源名开始猜 |
@@ -1164,7 +1188,7 @@ key       ClickFlare 后台 Settings → Security → Generate API Key
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 141 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 145 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1217,9 +1241,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 141 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 145 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 141 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 145 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。
