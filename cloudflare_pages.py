@@ -391,6 +391,43 @@ def _ensure_domain(project: str, domain: str) -> dict:
     return result.get("result") or {"name": domain, "status": "pending"}
 
 
+def _ensure_dns(domain: str, project: str) -> dict:
+    """让这个主机名真的解析得到 —— 建一条**代理的 CNAME** 指向 Pages 项目。
+
+    **绑定自定义域名 ≠ 这个域名能访问。** `POST .../pages/projects/x/domains`
+    只是把名字登记到项目上,**不会替你建 DNS 记录**(走 API 这条路不会;后台点的时候会)。
+    实测踩到:发布"成功"了、结果里还给了 A/B 地址,而 Cloudflare 那边是
+    `verification_data.error_message = "CNAME record not set"`、证书 pending,
+    浏览器打开是 `ERR_SSL_PROTOCOL_ERROR` —— **页面根本没人能访问,我们却报了成功**。
+    买来的流量落在这上面就是全丢。
+
+    只在**目标主机名上一条服务型记录都没有**时才建 —— 有记录说明那儿已经有东西在跑,
+    绝不碰(和 `domain_conflict()` 是同一条规矩:别抢占一个已经在服务的名字)。
+    """
+    zone = _owned_zone_record(domain)
+    zone_id = str(zone.get("id") or "")
+    target = f"{project}.pages.dev"
+    existing = _api("GET", f"/zones/{zone_id}/dns_records", params={"name": domain})
+    rows = [r for r in (existing.get("result") or [])
+            if str(r.get("type") or "").upper() in _SERVING_TYPES]
+    for r in rows:
+        if (str(r.get("type") or "").upper() == "CNAME"
+                and str(r.get("content") or "").lower().rstrip(".") == target.lower()):
+            return {"action": "已存在", "type": "CNAME", "content": target}
+    if rows:
+        # 有别的记录在这个名字上 —— 不是我们的,坚决不动
+        return {"action": "没动",
+                "⚠️": ("%s 上已经有 %s 记录(%s),不是指向本项目的。**没有改它** —— "
+                       "那上面可能有别的东西在跑。请到 Cloudflare 后台确认后再处理。"
+                       % (domain, rows[0].get("type"), str(rows[0].get("content"))[:60]))}
+    created = _api("POST", f"/zones/{zone_id}/dns_records",
+                   body={"type": "CNAME", "name": domain, "content": target,
+                         "proxied": True, "ttl": 1,
+                         "comment": "landing A/B (auto)"})
+    return {"action": "已创建", "type": "CNAME", "content": target,
+            "id": (created.get("result") or {}).get("id")}
+
+
 def replace_risk(domain: str, slug: str) -> dict:
     """这次发布会不会把线上已有的实验整站替换掉?
 
@@ -516,6 +553,14 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
             '</body></html>', encoding="utf-8")
         pages_url = _wrangler_deploy(site_dir, project, slug)
         domain_state = _ensure_domain(project, domain)
+        # 绑完还要让它**真的解析得到**,否则证书签不出来、页面打不开(见 _ensure_dns)
+        try:
+            dns_state = _ensure_dns(domain, project)
+        except Exception as e:
+            dns_state = {"action": "失败", "⚠️": "DNS 记录没建成(%s)。"
+                                                "在 Cloudflare 后台给 %s 加一条代理的 CNAME "
+                                                "指向 %s.pages.dev 即可。"
+                                                % (str(e)[:120], domain, project)}
         releases = list(old.get("releases") or [])
         releases.append({"slug": slug, "a": f"https://{domain}/{slug}/a/",
                          "b": f"https://{domain}/{slug}/b/", "user_id": user_id,
@@ -532,6 +577,7 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
             "project_action": "新建" if created else "复用",
             "domain": domain,
             "domain_status": domain_state.get("status") or "active",
+            "DNS记录": dns_state,
             "pages_dev_url": pages_url,
             "variant_a_url": f"https://{domain}/{slug}/a/",
             "variant_b_url": f"https://{domain}/{slug}/b/",
@@ -542,8 +588,11 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
         },
         "note": (
             ("⏳ 域名还在签发证书(状态 " + str(domain_state.get("status")) + ")，"
-             "通常几分钟内生效。**这期间先别把地址填进 ClickFlare**，"
-             "否则会看到证书错误或 404；先用 " + pages_url + " 自查页面内容。"
+             "**刚建好 DNS 记录的话通常要几分钟**,这期间打开会看到 "
+             "`ERR_SSL_PROTOCOL_ERROR` 或证书错误,那是正常的。"
+             "**证书没签好之前先别把地址填进 ClickFlare**；"
+             "先用 " + pages_url + " 自查页面内容。"
+             + (" ⚠️ " + str(dns_state.get("⚠️")) if dns_state.get("⚠️") else "")
              if str(domain_state.get("status") or "").lower() != "active" else
              "域名已生效，可以直接使用。")
             + " 接下来在 ClickFlare 建两个 Lander，50/50 分流；"

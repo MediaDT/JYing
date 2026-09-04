@@ -376,8 +376,17 @@ def _iter_paths(paths_obj: dict):
             if not isinstance(item, dict):
                 continue
             if isinstance(item.get("paths"), list):          # 这是一条规则
+                # **规则本身关着的话,里面的 path 再怎么 enabled 也不接流量。**
+                # 实测:某条 campaign 的 US 规则 `enabled: false`,而它里面那条 path
+                # 写着 `enabled: true`、挂着旧落地页。不看外层的话,它会被当成
+                # 「一条启用中的 path」——轻则逼用户在两条里选,重则把新落地页换进一条
+                # **根本不接流量**的规则里,而用户以为 A/B 已经在跑了。
+                rule_on = bool(item.get("enabled", True))
                 for jdx, path in enumerate(item["paths"]):
                     if isinstance(path, dict):
+                        if not rule_on:
+                            path = dict(path, enabled=False,
+                                        _规则关着=f"外层规则「{item.get('name')}」是关的")
                         yield (group_name, "paths", idx, "paths", jdx), path
             else:
                 yield (group_name, "paths", idx), item

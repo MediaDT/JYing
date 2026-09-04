@@ -3307,6 +3307,129 @@ def test_stale_years():
     check("两个生成器的提示词都注入了今年", prompts_carry_today)
 
 
+# ============ 3.48 绑了域名还得让它真的解析得到 ============
+
+def test_dns_and_rule_paths():
+    """两条都是线上实测抓出来的:
+
+    ① **绑定自定义域名 ≠ 这个域名能访问。** `POST .../pages/projects/x/domains`
+       只是把名字登记到项目上,**不会替你建 DNS 记录**(走 API 这条路不会)。
+       实测:发布"成功"、结果里还给了 A/B 地址,而 Cloudflare 那边是
+       `CNAME record not set`、证书 pending,浏览器打开 `ERR_SSL_PROTOCOL_ERROR` ——
+       **页面根本没人能访问,我们却报了成功**。买来的流量落上去就是全丢。
+
+    ② **ClickFlare 的规则关着时,里面的 path 再 enabled 也不接流量。**
+       实测某条 campaign 的 US 规则 `enabled: false`,里面那条 path 却写着
+       `enabled: true` 并挂着旧落地页。不看外层的话,轻则逼用户在两条里选,
+       重则把新落地页换进一条**根本不接流量**的规则里,而用户以为 A/B 已经在跑。
+    """
+    import inspect
+    import cloudflare_pages as cfp
+    import clickflare_client as cfc
+
+    print("\n【3.48】DNS 记录 + 规则关着的 path")
+
+    def fake_api(calls, existing):
+        def _api(method, path, params=None, body=None, timeout=30):
+            calls.append((method, path, body))
+            if method == "GET" and "/dns_records" in path:
+                return {"result": existing}
+            if method == "POST" and "/dns_records" in path:
+                return {"result": {"id": "newrec"}}
+            return {"result": {}}
+        return _api
+
+    def run_ensure(existing):
+        calls = []
+        real_api, real_zone = cfp._api, cfp._owned_zone_record
+        cfp._api = fake_api(calls, existing)
+        cfp._owned_zone_record = lambda d: {"id": "zone1", "name": "example.com"}
+        try:
+            return cfp._ensure_dns("lp.example.com", "proj-x"), calls
+        finally:
+            cfp._api, cfp._owned_zone_record = real_api, real_zone
+
+    def creates_when_missing():
+        r, calls = run_ensure([])
+        posts = [c for c in calls if c[0] == "POST"]
+        if r.get("action") != "已创建":
+            return "没有建 DNS 记录:%r" % r
+        if not posts:
+            return "说建了,其实没发请求"
+        body = posts[0][2] or {}
+        if body.get("type") != "CNAME" or body.get("content") != "proj-x.pages.dev":
+            return "建的记录不对:%r" % body
+        if not body.get("proxied"):
+            return "没走 Cloudflare 代理(证书签不出来)"
+        return True
+    check("目标域名没有记录 → 自动建代理 CNAME 指向 Pages", creates_when_missing)
+
+    def idempotent():
+        r, calls = run_ensure([{"type": "CNAME", "content": "proj-x.pages.dev"}])
+        if r.get("action") != "已存在":
+            return "已经有正确记录了还要再建一条:%r" % r
+        if [c for c in calls if c[0] == "POST"]:
+            return "重复发了创建请求"
+        return True
+    check("已经指向本项目 → 不重复创建", idempotent)
+
+    def never_touches_someone_elses():
+        # 那上面可能有别的东西在跑 —— 抢过来就是把人家的页面弄下线
+        r, calls = run_ensure([{"type": "A", "content": "1.2.3.4"}])
+        if [c for c in calls if c[0] == "POST"]:
+            return "把别人的记录顶掉了"
+        if r.get("action") != "没动" or not r.get("⚠️"):
+            return "有别的记录时既没停手也没说清:%r" % r
+        return True
+    check("目标域名上有别的记录 → 一个字都不动,并说清楚", never_touches_someone_elses)
+
+    def wired_into_publish():
+        # **函数写对了不等于被调用了**:不接进 publish_ab 的话,页面照样打不开
+        src = _no_comments(inspect.getsource(cfp.publish_ab))
+        if "_ensure_dns(" not in src:
+            return "publish_ab 里没有建 DNS 这一步"
+        i_dom, i_dns = src.find("_ensure_domain("), src.find("_ensure_dns(")
+        if i_dom < 0 or i_dns < i_dom:
+            return "建 DNS 排在绑定域名之前了"
+        if "DNS记录" not in src:
+            return "发布结果里没把 DNS 这一步告诉用户"
+        return True
+    check("发布流程真的用上了(不是写了个没人调的函数)", wired_into_publish)
+
+    def rule_off_means_path_off():
+        paths = {"defaultPaths": {"paths": [
+                    {"name": "New path", "enabled": True, "destination": "landers_offers",
+                     "landers_offers": {"landers": [{"id": "new1"}], "offers": []}}]},
+                 "rulePaths": {"paths": [
+                    {"name": "US", "enabled": False, "paths": [
+                        {"name": "US -> New path 1", "enabled": True,
+                         "destination": "landers_offers",
+                         "landers_offers": {"landers": [{"id": "old1"}], "offers": []}}]}]}}
+        seen = list(cfc._iter_paths(paths))
+        if len(seen) != 2:
+            return "两条 path 没都遍历到(看到 %d 条)" % len(seen)
+        live = [p for _, p in seen if p.get("enabled", True)]
+        if len(live) != 1 or live[0].get("name") != "New path":
+            return "规则关着,里面的 path 却还被算成启用中:%r" % [p.get("name") for p in live]
+        off = [p for _, p in seen if not p.get("enabled", True)]
+        if not off[0].get("_规则关着"):
+            return "没说清是因为外层规则关着"
+        return True
+    check("外层规则关着 → 里面的 path 不算启用中", rule_off_means_path_off)
+
+    def rule_on_still_counts():
+        # 别矫枉过正:规则开着的时候,里面的 path 该算数还是要算数
+        paths = {"rulePaths": {"paths": [
+                    {"name": "US", "enabled": True, "paths": [
+                        {"name": "US -> p1", "enabled": True, "destination": "landers_offers",
+                         "landers_offers": {"landers": [{"id": "x"}], "offers": []}}]}]}}
+        live = [p for _, p in cfc._iter_paths(paths) if p.get("enabled", True)]
+        if len(live) != 1:
+            return "规则开着,里面的 path 反而不算了"
+        return True
+    check("规则开着 → 里面的 path 照常算启用中", rule_on_still_counts)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3740,6 +3863,7 @@ if __name__ == "__main__":
     test_execute_time_recheck()
     test_campaign_id_from_link()
     test_stale_years()
+    test_dns_and_rule_paths()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()
