@@ -501,6 +501,10 @@
   // ===== 中英文切换 =====
   // 一张"翻译表",两套文案;切语言时整页刷新文案,并把语言告诉后端(AI 也跟着换语言)
   const LANG_KEY = "adbot-lang";
+  // 「多久没收到任何东西」才算卡死。**必须大于后端最长的一次调用**
+  // (agent_server 的 GEN_TIMEOUT_S),否则后端还在正常干活、前端先喊超时,
+  // 用户会以为发失败了然后重发一遍 —— 白烧一次额度。
+  const IDLE_TIMEOUT_MS = 300000;   // 5 分钟没动静
   // ===== 当前投放平台(从网址 ?platform= 取,记住上次的选择)=====
   // 用 var 而不是 const:var 会被"提升",早期(applyLang)读到的最差是 undefined,
   // 不会像 const 那样直接抛错把整页脚本打断。这是 CLAUDE.md 里记过的坑。
@@ -1223,9 +1227,19 @@
     if (convId === currentId) { sendBtn.disabled = true; liveTyping = showTyping(); }
     renderConvList();
 
-    // 超时保护:后端卡死时不要让小点一直转下去
+    // 超时保护:后端卡死时不要让小点一直转下去。
+    // **判据是「多久没动静」,不是「一共等了多久」** —— 原来写死总时长 3 分钟,
+    // 于是一次正常但耗时的生成(实测 gpt-5.5 出一整页落地页要 60 秒以上,
+    // 加上前面查资料的几轮工具调用轻松破 3 分钟)会被当成"卡死"掐掉,
+    // 而用户看到的是「等太久了,这条没发出去」——他以为坏了,其实后端好好的。
+    // 只要还在往回吐东西(status / delta),就说明活着,计时器就重来。
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 180000);   // 3 分钟
+    let timer = null;
+    const bump = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    };
+    bump();
 
     try {
       const body = JSON.stringify({ messages: msgs, lang: lang, mode: ensureConv(convId).mode || "campaign" });
@@ -1264,6 +1278,7 @@
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        bump();                       // 有动静就重新计时(见上面 IDLE_TIMEOUT_MS)
         buf += decoder.decode(value, { stream: true });
 
         // SSE 以空行分隔一条事件;最后可能是半条,留在缓冲里等下一块

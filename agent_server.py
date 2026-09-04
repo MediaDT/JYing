@@ -3347,6 +3347,12 @@ _RETRYABLE_CODES = (429, 500, 502, 503, 504)
 # 所以显式设一个**小于前端 180 秒**的值,让后端先失败、把真实原因说出来。
 BRAIN_TIMEOUT_S = float(os.environ.get("BRAIN_TIMEOUT_S", "75"))
 BRAIN_RETRIES = int(os.environ.get("BRAIN_RETRIES", "1"))
+# 一次性长文生成(归纳创意、生成整页落地页)和聊天不是一回事:
+# **实测 gpt-5.5 出一整页落地页 HTML 要 61 秒**,提示词里再塞进几份竞品拆解结果
+# 就会超过 BRAIN_TIMEOUT_S,被 SDK 掐掉、重试一次,总共 150 秒还是失败 ——
+# 用户看到的是「等太久了」,而模型其实一直在正常干活。
+# 必须**小于前端的 IDLE_TIMEOUT_MS(5 分钟)**:后端先失败,才能把真实原因说出来。
+GEN_TIMEOUT_S = float(os.environ.get("GEN_TIMEOUT_S", "240"))
 
 # ===== Gemini 的超时与熔断 =====
 # 实测(2026-08-26,开发机):`generativelanguage.googleapis.com` 的 TLS 握手 16ms、
@@ -4006,7 +4012,8 @@ def _plain_completion(prompt: str, lang: str = "zh") -> str:
         raise last
 
     def _openai() -> str:
-        client = openai.OpenAI(timeout=BRAIN_TIMEOUT_S, max_retries=BRAIN_RETRIES)
+        # 长文生成用 GEN_TIMEOUT_S,不是聊天那个 75 秒(见常量处的实测说明)
+        client = openai.OpenAI(timeout=GEN_TIMEOUT_S, max_retries=0)
         models = ["gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini"]
         custom = os.environ.get("OPENAI_MODEL", "").strip()
         if custom:

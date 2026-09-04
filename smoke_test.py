@@ -1289,6 +1289,55 @@ def test_pure_logic():
         return None
     check("看图跟着 BRAIN 走(设了 openai 就一次都不碰 Gemini)", t_vision_follows_brain)
 
+    # 超时的顺序不变量:**后端必须比前端先失败**。
+    # 反过来的话,用户看到「等太久了,这条没发出去」而后端还在正常干活 ——
+    # 他会以为发失败了再发一遍,白烧一次额度,而且拿不到真实原因。
+    # (和 UPLOAD_TIMEOUT_S 必须小于前端 180 秒是同一条。)
+    def t_timeout_ordering():
+        import agent_server as srv, re, inspect
+        from pathlib import Path as _P
+        html = _P("static/index.html").read_text(encoding="utf-8")
+        m = re.search(r"IDLE_TIMEOUT_MS\s*=\s*(\d+)", html)
+        if not m:
+            return "前端找不到 IDLE_TIMEOUT_MS"
+        idle_s = int(m.group(1)) / 1000
+        if srv.GEN_TIMEOUT_S >= idle_s:
+            return (f"后端长文超时 {srv.GEN_TIMEOUT_S}s 不小于前端 {idle_s}s —— "
+                    "用户会先看到「等太久了」,而后端还在跑")
+        if srv.BRAIN_TIMEOUT_S >= idle_s:
+            return f"聊天超时 {srv.BRAIN_TIMEOUT_S}s 不小于前端 {idle_s}s"
+        import cloudflare_pages as cfp
+        if cfp.UPLOAD_TIMEOUT_S >= idle_s:
+            return f"上传超时 {cfp.UPLOAD_TIMEOUT_S}s 不小于前端 {idle_s}s"
+        # 长文生成本来就慢(实测 gpt-5.5 出一整页 61 秒),不能还用聊天那个短超时
+        src = _no_comments(inspect.getsource(srv._plain_completion))
+        if "GEN_TIMEOUT_S" not in src:
+            return "长文生成还在用聊天的短超时,一整页落地页会被掐掉"
+        if "timeout=BRAIN_TIMEOUT_S" in src:
+            return "长文生成里还留着 BRAIN_TIMEOUT_S"
+        return None
+    check("超时顺序:后端一定比前端先失败", t_timeout_ordering)
+
+    # 前端的判据必须是「多久没动静」,不是「一共等了多久」——
+    # 一次正常但耗时的生成会被总时长判成"卡死"掐掉。
+    def t_frontend_idle_not_total():
+        from pathlib import Path as _P
+        import re
+        html = _P("static/index.html").read_text(encoding="utf-8")
+        # 剥掉注释再找,免得命中说明文字(坑表:index() 会命中注释)
+        body = re.sub(r"/\*.*?\*/", "", html, flags=re.S)
+        body = re.sub(r"^\s*//.*$", "", body, flags=re.M)
+        if "bump()" not in body:
+            return "没有重置计时器的 bump()"
+        # 读到数据之后必须重新计时
+        m = re.search(r"if \(done\) break;\s*(.*?)buf \+= decoder", body, re.S)
+        if not m or "bump()" not in m.group(1):
+            return "读到 SSE 数据之后没有重新计时 —— 长回复还是会被掐"
+        if re.search(r"setTimeout\(\(\) => controller\.abort\(\), 180000\)", body):
+            return "还留着写死 180 秒总时长的老写法"
+        return None
+    check("前端超时看的是「多久没动静」", t_frontend_idle_not_total)
+
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
     # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**
