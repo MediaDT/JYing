@@ -3204,6 +3204,109 @@ def test_campaign_id_from_link():
     check("中英提示词都禁止「抠不出 id 就按名字搜」", prompt_forbids_name_search)
 
 
+# ============ 3.47 落地页里的年份不能停在训练那一年 ============
+
+def test_stale_years():
+    """**实测**:8 个生成好的落地页里出现了 **9 次 2024**,而当时是 2026 年 ——
+    7 次在页脚版权、2 次在标题文案里(`2024 Homeowner Alert`)。
+    根因是生成提示词里**一个字都没提今天是哪年**,模型只能用训练时的默认年份。
+    2026 年的广告页写着 2024,用户一眼看出是旧的,信任感当场没了。
+    """
+    import inspect
+    import landing_lab as lp
+    import creative_lab as lab
+
+    print("\n【3.47】落地页里的过期年份")
+
+    year = lp.this_year()
+
+    def fixes_copyright():
+        for src in ('<footer>&copy; 2019 X</footer>',
+                    '<p>PAA © 2020. Trusted.</p>',
+                    '<p>Copyright 2018-2021 X</p>',
+                    '<p>(c) 2017 X</p>'):
+            out, fixed, stale = lp.fix_stale_years(src)
+            if str(year) not in out:
+                return "版权年没改成今年:%r" % out
+            if not fixed:
+                return "改了却没告诉用户改了什么:%r" % src
+        return True
+    check("页脚版权年自动改成今年,并如实说改了什么", fixes_copyright)
+
+    def never_touches_copy():
+        # 标题是**广告文案**,代码擅自改就等于替用户改了广告的说法
+        src = '<h1>2024 Homeowner Alert: Drafty Windows</h1>'
+        out, fixed, stale = lp.fix_stale_years(src)
+        if out != src:
+            return "把正文里的年份也偷偷改了:%r" % out
+        if not stale:
+            return "正文里的过期年份没报出来,用户不会知道"
+        if "【2024】" not in stale[0]:
+            return "报出来了但没标出是哪个年份:%r" % stale[0]
+        return True
+    check("标题文案里的年份只报不改(那是广告文案)", never_touches_copy)
+
+    def range_start_not_flagged():
+        # `Copyright 2019-2026` 里的 2019 是合法的起始年 —— 误报多了用户就不看提示了
+        out, fixed, stale = lp.fix_stale_years('<p>Copyright 2019-%d X</p>' % year)
+        if stale:
+            return "把版权区间的起始年当成过期年份误报了:%r" % stale
+        return True
+    check("版权区间的起始年不会被误报", range_start_not_flagged)
+
+    def current_and_future_untouched():
+        for y in (year, year + 4):
+            src = '<footer>&copy; %d X</footer>' % y
+            out, fixed, stale = lp.fix_stale_years(src)
+            if out != src or fixed or stale:
+                return "%d 年不该动,却动了:%r %r" % (y, out, fixed)
+        return True
+    check("今年和未来的年份不动", current_and_future_untouched)
+
+    def save_pages_reports_it():
+        # **要走真正的落盘入口**:函数写对了但没接进 save_pages,页面照样带着旧年份
+        pages = [{"命名": "smoke-year",
+                  "html": ('<html><body><h1>2024 Alert</h1>'
+                           '<a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
+                           '<footer>&copy; 2024 X</footer></body></html>')}]
+        out = lp.save_pages(pages, limit=1)
+        try:
+            if not out:
+                return "没存下来"
+            row = out[0]
+            body = (lp.GENERATED_DIR / row["file"]).read_text(encoding="utf-8")
+            if "&copy; %d" % year not in body:
+                return "落盘的页面里版权年还是旧的"
+            if "2024 Alert" not in body:
+                return "把标题里的年份也改了(不该改)"
+            if not row.get("已自动更新版权年"):
+                return "改了版权年却没在返回里告诉用户"
+            if not row.get("⚠️文案里有过期年份"):
+                return "文案里的过期年份没报给用户"
+            return True
+        finally:
+            for r in out:
+                (lp.GENERATED_DIR / r["file"]).unlink(missing_ok=True)
+    check("落盘入口真的用上了(不是写了个没人调的函数)", save_pages_reports_it)
+
+    def prompts_carry_today():
+        # 根因:模型不知道今天几号。两个生成器都要注入,只补一个等于没补。
+        # **要真拼一次提示词看里面有没有今年**:只在源码里搜 `_this_year()` 是假通过 ——
+        # 那几个字散在好几行里,删掉说明那一行、留下带年份的下一行,照样绿(第一版就这么错了)。
+        y = str(year)
+        creative = lab._summary_prompt([{"x": 1}], "B", "https://l", 2)
+        if y not in creative:
+            return "广告创意的生成提示词里没有今年(%s)" % y
+        # 落地页那段提示词拼在 summarize 里,拿源码模板渲染一次来查
+        tpl = inspect.getsource(lp.summarize)
+        if "{this_year()}" not in tpl:
+            return "落地页的生成提示词里没告诉模型今年是哪年"
+        if str(lp.this_year()) != y:
+            return "两处算出来的年份不一致"
+        return True
+    check("两个生成器的提示词都注入了今年", prompts_carry_today)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3636,6 +3739,7 @@ if __name__ == "__main__":
     test_fake_preview_link()
     test_execute_time_recheck()
     test_campaign_id_from_link()
+    test_stale_years()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

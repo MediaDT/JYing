@@ -246,6 +246,13 @@ _KW_KEYS = ",\n        ".join(
     f'"{en}": "{tip}"' for en, _zh, tip in KEYWORD_DIMENSIONS)
 
 
+def _this_year() -> int:
+    """今年是哪年 —— 按北京时间(和命名规范同一个口径)。
+    **模型自己不知道今天几号**,不注入的话它会用训练时的那一年。"""
+    import scheduler as sched
+    return sched.now_beijing().year
+
+
 def _summary_prompt(models: list, brand: str, landing: str, n_variants: int) -> str:
     """拼归纳提示词。合规要求放在**最前面**,和 SYSTEM_PROMPT_EN 那条教训一样 ——
     放末尾的约束容易被前面一大段内容带跑。"""
@@ -260,6 +267,9 @@ def _summary_prompt(models: list, brand: str, landing: str, n_variants: int) -> 
    反例:竞品写 "Call an Expert Contractor Now",你就不能也写这句;
    可以学它"直接下命令 + 强调专业"的路子,写成别的话。
 4. 只能基于下面给你的素材模型来归纳。**不许编造你没看到的广告**。
+5. **今年是 {_this_year()} 年。** 文案里如果要写年份(「XXXX 年新规」这类),
+   一律用 {_this_year()},绝不许写更早的年份 —— 模型默认会用训练时那一年,
+   实测生成的落地页里冒出过 9 次 2024,而当时已经是 2026 年了。拿不准就别写年份。
 
 ---
 

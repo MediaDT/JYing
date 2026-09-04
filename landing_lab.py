@@ -309,6 +309,11 @@ def decompose_screenshot(image: bytes, mime: str, page: dict,
     return creative_lab._ask_vision(image, mime, prompt)
 
 
+def _today_str() -> str:
+    import scheduler as sched
+    return sched.now_beijing().strftime("%Y-%m-%d")
+
+
 def summarize(models: list[dict], brand: str = "", offer: str = "",
               audience: str = "", lang: str = "zh", n_variants: int = 2) -> dict:
     """汇总竞品落地页并生成 n_variants 个新页面(1 或 2)。
@@ -335,7 +340,11 @@ def summarize(models: list[dict], brand: str = "", offer: str = "",
 5. {"生成的两个页面要方向不同,方便 A/B test。" if many else
    "**只要 1 个页面**,别多给 —— 用户明确只要一个,多出来的那版是白花钱。"}
 6. HTML 要完整可预览,但不要引用外部 JS/CSS/图片;可以用 CSS 做干净版式。
-7. 只输出 JSON。
+7. **今年是 {this_year()} 年**(北京时间 {_today_str()})。页面里任何地方出现年份 ——
+   页脚版权、标题里的「XXXX 年提醒」、文中的「XXXX 年新规」—— **一律用 {this_year()}**,
+   绝不许写更早的年份。写成过期年份的话,用户一眼就看出这是张旧页面,信任感当场没了。
+   拿不准就**干脆别写年份**。
+8. 只输出 JSON。
 
 我们自己的信息:
 品牌: {brand or "(未提供)"}
@@ -389,6 +398,62 @@ _FAKE_CTA = (r"""onclick\s*=\s*["'][^"']*alert\(""", r"""href\s*=\s*["']\s*#\s*[
              r"""href\s*=\s*["']\s*javascript:""")
 
 
+# 版权声明里的年份:© / &copy; / (c) / Copyright 后面跟一个年份,或者 2019-2024 这种区间。
+# 这几种形状是**确定**的,可以放心自动改;正文里的年份不行(见 fix_stale_years)。
+_COPYRIGHT_YEAR = re.compile(
+    r"(&copy;|©|\(c\)|copyright)(\s*)(?:(20\d\d)(\s*[-–—]\s*))?(20\d\d)", re.I)
+_ANY_YEAR = re.compile(r"\b(20\d\d)\b")
+
+
+def this_year() -> int:
+    """今年是哪年 —— **按北京时间**,和命名规范用的是同一个口径。"""
+    import scheduler as sched
+    return sched.now_beijing().year
+
+
+def fix_stale_years(html: str, year: int | None = None) -> tuple[str, list[str], list[str]]:
+    """把过期的年份处理掉。返回 (新 html, 自动改了什么, 还得用户自己定的)。
+
+    **为什么必须有**:生成落地页的提示词里原来一个字都没提今天是哪年,模型只能
+    用训练时的默认年份 —— 实测 8 个生成页里出现了 **9 次 2024**,而当时是 2026 年。
+    一个 2026 年的广告落地页写着「© 2024」「2024 Homeowner Alert」,用户一眼看出是旧的,
+    信任感当场没了。提示词已经补上今天的日期,但**提示词不是防线**(这个项目反复踩过),
+    所以再加一道确定性的。
+
+    分两类处理,这是关键:
+      · **版权声明**(© 2024 / Copyright 2019-2024)—— 形状固定、不涉及文案,**直接改对**;
+      · **正文里的年份**(标题里的「2024 Homeowner Alert」)—— 那是**广告文案**,
+        改了就等于替用户改了广告的说法。只**如实报出来**让他自己定。
+    """
+    year = int(year or this_year())
+    fixed: list[str] = []
+
+    def _repl(m):
+        mark, gap, start, dash, end = m.groups()
+        if int(end) >= year:
+            return m.group(0)
+        fixed.append("%s %s → %d" % (mark, (start + dash if start else "") + end, year))
+        if start:
+            return "%s%s%s%s%d" % (mark, gap, start, dash, year)
+        return "%s%s%d" % (mark, gap, year)
+
+    out = _COPYRIGHT_YEAR.sub(_repl, html)
+
+    # **扫正文之前先把版权那几段遮掉**:`Copyright 2019-2026` 里的起始年 2019
+    # 是合法的(版权区间本来就从过去某年算起),不遮的话会当成"过期年份"误报,
+    # 而误报多了用户就不看这个提示了。
+    masked = _COPYRIGHT_YEAR.sub(lambda m: " " * len(m.group(0)), out)
+    stale: list[str] = []
+    for m in _ANY_YEAR.finditer(masked):
+        if int(m.group(1)) >= year:
+            continue
+        a, b = max(0, m.start() - 45), min(len(out), m.end() + 25)
+        snippet = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", out[a:b])).strip()
+        # 把那个年份标出来 —— 上下文里可能还有别的(已经改好的)年份,不标的话看不出说的是哪个
+        stale.append(snippet.replace(m.group(1), "【%s】" % m.group(1), 1))
+    return out, fixed, stale
+
+
 def _check_publishable(html: str) -> tuple[str, list[str]]:
     """存盘前就把「这页能不能发布」判出来,并把能确定性补的补上。
 
@@ -426,6 +491,7 @@ def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
         if "<html" not in raw.lower():
             raw = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>" + raw + "</body></html>"
         raw, problems = _check_publishable(raw)
+        raw, year_fixed, year_stale = fix_stale_years(raw)
         name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(p.get("命名") or f"landing-{i}")).strip("-").lower()
         filename = f"{uuid.uuid4().hex[:8]}-{name or 'landing'}.html"
         path = GENERATED_DIR / filename
@@ -436,6 +502,14 @@ def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
             "可发布": not problems,
             "CTA占位符数量": raw.count(CTA_MARK),
             **({"⚠️问题": problems} if problems else {}),
+            # 版权年是代码改的,如实告诉用户一声(别偷偷改了不说)
+            **({"已自动更新版权年": year_fixed} if year_fixed else {}),
+            # 正文里的过期年份**不许代码擅自改** —— 那是广告文案,得用户定
+            **({"⚠️文案里有过期年份": year_stale,
+                "⚠️怎么办": "这几处是**广告文案**,代码不替你改。"
+                          "%d 年的广告写着旧年份,用户一眼看出是旧的。"
+                          "请问用户:改成今年、还是去掉年份?" % this_year()}
+               if year_stale else {}),
         })
     _prune()
     return out
