@@ -21,7 +21,7 @@
 4. `.env` 里是真实密钥:不外传、不提交 git、不写进本文件;
    **本文件已推到 GitHub(MediaDT/JYing),所以公司名、org id、广告账户 id、
    真实 campaign/ad id 一律不写进来** —— 要用现查(见第九节「账户事实」那条命令);
-5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(147)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
+5. **改完代码必跑五套测试全绿才提交 git**:`./venv/bin/python smoke_test.py`(148)、`node frontend_test.js`(87)、`node dashboard_test.js`(26)、`node platform_test.js`(43)、`node stream_test.js`(19)
    (项目已纳入版本管理,改坏了可以 `git diff` / 回滚);
 6. **别只看注释和文档下结论**——本项目已多次出现"注释/CLAUDE.md 说的和代码实际行为不一致"
    (docstring 还写着"只读客户端"、BRAIN 实际值等)。以代码和实测为准,发现不一致顺手改掉。
@@ -53,7 +53,7 @@
 ```
 
 其他文件:`start.sh` 一键启动;`README.md` 面向使用者的指南(给 Cole 和团队看);
-五套测试:`smoke_test.py` 后端冒烟(147)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
+五套测试:`smoke_test.py` 后端冒烟(148)+ `frontend_test.js` 多会话(87)+ `dashboard_test.js` 大屏绘图(26)+ `platform_test.js` 多平台(43)+ `stream_test.js` 流式(19),改完都要跑;`requirements.txt` + `.gitignore` 让项目可独立搬家
 (**`.gitignore` 已排除 `.env`、`data/`(每个人的聊天记录、平台凭据、追踪脚本库、发布产物)、`pending_actions.json`、`scheduled_tasks.json` —— 后两个是运行时状态,跟机器走,别进 git**);`chat.py`、`newsbreak_hello.py` 是学习期的小练习。
 
 ## 四、怎么运行
@@ -1067,6 +1067,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
 | **按公开单价算的成本会差很远** | 按 ofox 报的 `output_image` 单价 × 官方 token 数算出一张 $0.05,**实测 $0.203,差 4 倍**。报低了用户以为很便宜,批量生成才发现烧了不少。**成本一律拿账单实测校正**(记余额→生成→再记余额),别信算出来的 |
 | **测试用 index() 找源码会命中注释** | 守"文件名要排在 `cr.render()` 之前"那条测试,`src.index("cr.render(")` 先命中了**注释里**写的 `cr.render()`,于是误报。和之前 `minDaysRunning` 在 docstring 里被搜到是同一类。**读源码做判断前先把注释/docstring 剥掉** |
 | **同一个判断散在三处,加一种就漏一处** | 「这个工作室能看见/能确认哪些待办」原来在三处各写死一个字符串 `publish_landing_pages`:待办清单、提示词注入、`_tool_call` 的模式闸门。加了第二种待办后**三处全漏**,而且三处的表现完全不同 —— 登记成功却在清单里看不见、AI 跨轮忘了编号没处查、确认时被「不能确认其它工作区的待办」拒掉。更阴的是**直接调 `confirm_action()` 测不出来**:那道闸门在 `_tool_call` 里,测试必须走真正的工具分发层才碰得到(和「锁了输入框不等于锁住了发送」同一类)。**这类清单要收成一份常量**,加新类型只改那一行 |
+| **切了大脑,还有一条路在偷偷用旧模型** | 把 `BRAIN` 切成 openai 之后,聊天、大屏诊断都跟着走了,**只有看图那条路写死了 Gemini** —— 结果 Gemini 一 503,拆素材和拆落地页截图整个坏掉,而用户以为早就不用它了。**「换模型」这种开关要盘一遍所有调用方**(`grep -rn gemini --include=*.py`),别只改主路径。现在 `_ask_vision` 跟着同一个 `BRAIN` 走,而且 **openai 挂了也不偷偷回落 Gemini** —— 用户明说不用,就是不用 |
 | **「要几个」写死在代码里 = 用户说了不算** | `save_pages` 写死 `pages[:2]`,而且工具连「要几版」这个参数都没有 —— 用户明说「只生成一个」,照样出两个。多的那版是白花的模型钱,还逼他在两个里挑,等于没听他说话。**凡是「出 N 份」的功能,N 必须能从用户那儿一路传到底**(工具参数 → 生成提示词 → 落盘上限),漏一层就失效 |
 | **模型会举一个「例子地址」,而用户会当真** | 助手为了解释 CTA 是什么,顺手写了 `https://track.clickflare.com/click/1` 当例子 —— 那是编的,格式也不对(真的是 `/cf/click/`)。用户很可能直接拿去用。**凡是「绝不许编造」的东西,连举例都不许编**,提示词要明写这一条 |
 | **模型会许诺代码根本不允许的事** | 落地页助手说「你没有追踪代码也没关系,我先不放追踪代码把页面发出去」—— 而缺 CTA 占位符的页面**代码层直接拒绝发布**,答应了也做不到;真发出去更糟:买来的流量一条都统计不到。**代码里拦住的事,提示词里要同样明确地禁止承诺** —— 否则用户按它说的走一圈,到最后才发现是空头支票 |
@@ -1180,7 +1181,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
   新域名自动建项目、旧域名复用;ClickFlare CTA/脚本确定性注入,发布走二次确认;
   **追踪脚本每个追踪域名只贴一次**(脚本库,按人存),**CTA 域名和脚本域名对不上直接拒**,
   **A/B 两版内容相同也直接拒**(第六之十七节);
-- 大脑:三级火箭 + `BRAIN` 开关;Gemini/OpenAI 工具共 31 个;
+- 大脑:三级火箭 + `BRAIN` 开关(**看图也跟着这个开关走**,设 openai 就一次都不碰 Gemini);Gemini/OpenAI 工具共 31 个;
 - **数据大屏**:KPI(带环比)/ 每日趋势 / 各计划对比 / 三层明细表 / **AI 投放诊断**,双语;
 - 定时任务:一次性 + 每天重复,看表线程每 30 秒检查,错过 >15 分钟不补跑;
   **定时开启同样三层一起开**(任务里存 `targets`);
@@ -1191,7 +1192,7 @@ CTA Click URL、Campaign Tracking URL(campaign 自己的 `url` 字段)、以及�
   两条大脑路径都是手动挡工具循环(第六之五节);
 - 安全:登录门 `AuthMiddleware`(未登录页面 302、接口 401)、`APP_PASSWORD` 当**注册邀请码**
   (留空=谁都能注册,分享端口/部署前必设),已关掉 `/docs`;
-- 工程化:`README.md` 使用指南、五套测试(冒烟 147 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
+- 工程化:`README.md` 使用指南、五套测试(冒烟 148 + 前端 87 + 大屏 26 + 平台 43 + 流式 19)、
   `requirements.txt` + `.gitignore`(项目已可独立搬家,零依赖 qx-ad-bot)、
   **已纳入 git 版本管理**(提交前先跑冒烟测试;`.env` 已被 `.gitignore` 排除)。
 
@@ -1205,8 +1206,9 @@ MAX_CONVERSION),均已固化进代码和第五节速查。
 > 要拿真实 id:`./venv/bin/python -c "import newsbreak_client as nb; \
 > o=nb.list_organizations(); print(o); print(nb.list_ad_accounts(o[0]['id']))"`
 > —— 账户唯一,所以 `_default_ad_account_id()` 不会挑错;哪天变成多账户,代码会明确报错让人选。
-`.env` 现为 **BRAIN=auto**(免费 Gemini 优先,额度尽了切 ofox);ofox 中转已接通并实测
-(`https://api.ofox.ai/v1` + `google/gemini-3.1-pro-preview`,公司通道);
+`.env` 现为 **BRAIN=openai**(2026-09-04 起,Cole 要求不再用 Gemini 的模型);
+ofox 中转 `https://api.ofox.ai/v1` + **`openai/gpt-5.5`**,实测对话和**工具调用**都正常
+(`GET /v1/models` 能列出这家支持的全部型号,换型号前先去那儿确认名字);
 Gemini 官方免费额度每日重置(北京时间下午 3~4 点);OpenAI 官方账户无余额(key 在 .env 里注释保留)。
 
 **线上部署(2026-08-14)**:已上线到宝塔服务器(Debian 13 / Python 3.13,机器在欧洲),
@@ -1244,9 +1246,9 @@ Supervisor 守护、nginx 反代。细节和四条硬约束见第六之六节。
    → **200 = 活着**。注意别去 curl `/`:自从加了登录门,`/` 未登录时返回 **302**(跳登录页),
    那是正常的,不是挂了。连不上(000/7)才 `./start.sh`
    (后台跑要 `setsid nohup ./start.sh >> server.log 2>&1 &`);
-2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 147 项全绿说明钥匙、
+2. **跑一遍冒烟测试**:`./venv/bin/python smoke_test.py` —— 148 项全绿说明钥匙、
    平台连通、护栏都正常,比逐个手测快得多,也能立刻发现平台规则变动;
 3. **看 `git log --oneline`** 了解最近改了什么,再看本文件第八节(踩过的坑)和第九节(进度)。
 
-**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 147 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
+**改代码的固定节奏**:说清要做什么 → 改 → **跑五套测试**(冒烟 148 / 前端 87 / 大屏 26 / 平台 43 / 流式 19)
 → 更新本文件相关章节 → 提交 git。

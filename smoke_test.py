@@ -1255,6 +1255,40 @@ def test_pure_logic():
         return bad or True
     check("落地页提示词:不问用户要追踪信息、不许承诺无追踪发布", t_landing_prompt_no_false_promise)
 
+    # 看图这条路以前写死 Gemini,于是把大脑切成 openai 之后它还在偷偷用 Gemini ——
+    # Gemini 一 503,拆素材和拆落地页截图就整个坏掉,而用户以为早就不用它了。
+    def t_vision_follows_brain():
+        import creative_lab as lab, agent_server as srv
+        calls = []
+        real_g, real_o = lab._vision_gemini, lab._vision_openai
+        real_env, real_shrink = srv._read_env_value, lab.shrink
+        lab._vision_gemini = lambda *a: (calls.append("gemini"), {"ok": "g"})[1]
+        lab._vision_openai = lambda *a: (calls.append("openai"), {"ok": "o"})[1]
+        lab.shrink = lambda data, mime="": (b"x", "image/jpeg")   # 别真去解码图片
+        try:
+            for brain, want in (("openai", ["openai"]), ("auto", ["gemini"]), ("", ["gemini"])):
+                calls.clear()
+                srv._read_env_value = lambda k, b=brain: b if k == "BRAIN" else real_env(k)
+                lab._ask_vision(b"fake", "image/jpeg", "p")
+                if calls != want:
+                    return f"BRAIN={brain or '(空)'} 时走的是 {calls},应该是 {want}"
+            # openai 那条挂了也**绝不许**偷偷回落 Gemini —— 用户明说不用它
+            calls.clear()
+            srv._read_env_value = lambda k: "openai" if k == "BRAIN" else real_env(k)
+            def boom(*a):
+                calls.append("openai"); raise RuntimeError("挂了")
+            lab._vision_openai = boom
+            out = lab._ask_vision(b"fake", "image/jpeg", "p")
+            if "gemini" in calls:
+                return "BRAIN=openai 时 openai 挂了竟然偷偷用了 Gemini"
+            if not out.get("error"):
+                return "全挂了却没报错"
+        finally:
+            lab._vision_gemini, lab._vision_openai = real_g, real_o
+            srv._read_env_value, lab.shrink = real_env, real_shrink
+        return None
+    check("看图跟着 BRAIN 走(设了 openai 就一次都不碰 Gemini)", t_vision_follows_brain)
+
     # 追踪器的 lander 脚本有两种设计:通用一段(靠 Lander URL 区分)、
     # 或每个 Lander 一段(脚本里带 lander id)。**如果是后者而我们两版注入同一段,
     # B 版会上报成 A 版,A/B 数据全废,而且页面一切正常、看不出任何异常。**

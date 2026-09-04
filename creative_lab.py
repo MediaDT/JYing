@@ -56,20 +56,35 @@ def _json_from(text: str) -> dict:
         return {"error": f"模型没有返回合法 JSON:{e}", "原文": (text or "")[:400]}
 
 
-def _ask_vision(image: bytes, mime: str, prompt: str) -> dict:
-    """把图 + 提示词发给视觉模型,要一个 JSON 回来。逐个模型接力。"""
+def _vision_openai(small: bytes, smime: str, prompt: str) -> dict:
+    """走 ofox/OpenAI 通道看图(和聊天用的是同一个 base_url + 型号)。"""
+    import base64
     import agent_server as srv
-    from google import genai
+    import openai
+
+    model = srv._read_env_value("OPENAI_MODEL").strip()
+    if not model or not srv._read_env_value("OPENAI_API_KEY"):
+        raise RuntimeError("没有配置 OPENAI_API_KEY / OPENAI_MODEL")
+    data_uri = "data:%s;base64,%s" % (smime or "image/jpeg",
+                                      base64.b64encode(small).decode())
+    client = openai.OpenAI(timeout=srv.BRAIN_TIMEOUT_S, max_retries=srv.BRAIN_RETRIES)
+    r = client.chat.completions.create(model=model, messages=[{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": data_uri}}]}])
+    return _json_from(r.choices[0].message.content or "")
+
+
+def _vision_gemini(small: bytes, smime: str, prompt: str) -> dict:
+    """走 Gemini 直连看图。逐个型号接力。"""
+    import agent_server as srv
     from google.genai import types
 
     key = srv._read_env_value("GEMINI_API_KEY")
     if not key:
-        return {"error": "没有配置 GEMINI_API_KEY,看不了图"}
+        raise RuntimeError("没有配置 GEMINI_API_KEY")
     # **必须带超时**:下面是逐个模型接力,没有超时的话一旦对方不回音,
     # 每个模型都要干等一次,拆一张图能卡好几分钟(见 agent_server 的 _gemini_client)
     client = srv._gemini_client(key)
-    small, smime = shrink(image, mime)
-
     last = ""
     for model in VISION_MODELS:
         try:
@@ -81,7 +96,31 @@ def _ask_vision(image: bytes, mime: str, prompt: str) -> dict:
         except Exception as e:
             last = f"{type(e).__name__}: {str(e)[:120]}"
             continue
-    return {"error": f"视觉模型都没响应({last})"}
+    raise RuntimeError(f"Gemini 视觉模型都没响应({last})")
+
+
+def _ask_vision(image: bytes, mime: str, prompt: str) -> dict:
+    """把图 + 提示词发给视觉模型,要一个 JSON 回来。
+
+    **跟着 `.env` 里的 `BRAIN` 走,和聊天用同一个开关** —— 一个设置管全部:
+    · `BRAIN=openai` → 只走 ofox/OpenAI,**一次都不碰 Gemini**;
+    · 其它(auto / claude)→ 先 Gemini(有免费额度),不行再退到 ofox。
+    以前这里写死 Gemini,于是把大脑切成 openai 之后,看图还在偷偷用 Gemini ——
+    Gemini 一 503,拆素材、拆落地页截图就整个坏掉,而用户以为已经不用它了。
+    """
+    import agent_server as srv
+
+    small, smime = shrink(image, mime)
+    brain = srv._read_env_value("BRAIN").strip().lower() or "auto"
+    order = ([_vision_openai] if brain == "openai"
+             else [_vision_gemini, _vision_openai])
+    problems = []
+    for fn in order:
+        try:
+            return fn(small, smime, prompt)
+        except Exception as e:
+            problems.append(f"{fn.__name__.replace('_vision_', '')}: {str(e)[:120]}")
+    return {"error": "看图失败(" + ";".join(problems) + ")"}
 
 
 # ============ 拆解 ============
