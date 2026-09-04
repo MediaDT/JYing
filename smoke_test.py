@@ -3011,6 +3011,88 @@ def test_fake_preview_link():
     check("中英提示词都写了不许自己编预览链接", prompt_forbids_inventing)
 
 
+# ============ 3.45 执行时要把校验再做一遍(老待办身上没做过) ============
+
+def test_execute_time_recheck():
+    """待办会在保险箱里躺很久(重启也不丢),而校验是后来才加的。
+
+    **实测**:彩排时发现保险箱里正躺着一条「加检查之前」登记的假 A/B ——
+    A、B 是同一个文件。它的两个 sha256 都能对上,于是一路放行,
+    发出去两个网址跑同一个页面,钱照花、数据照上报,而从外面完全看不出来。
+    这是「两阶段流程里,校验只做在前一阶段」的通病。
+    """
+    import hashlib
+    import agent_server as srv
+    import landing_lab as lp
+
+    print("\n【3.45】执行时把校验再做一遍")
+
+    same = sorted(lp.GENERATED_DIR.glob("*.html"))
+    if not same:
+        check("(跳过:盘上没有生成好的落地页)", lambda: True)
+        return
+    one = same[0]
+    sha = hashlib.sha256(one.read_bytes()).hexdigest()
+
+    def base_action(**kw):
+        return {"type": "publish_landing_pages", "domain": "example.com", "slug": "t",
+                "cta_url": "https://trk.example.com/cf/click/1", "tracking_script": "<script></script>",
+                "variant_a_file": one.name, "variant_b_file": one.name,
+                "variant_a_sha256": sha, "variant_b_sha256": sha, **kw}
+
+    def refuses_identical_ab():
+        r = srv._execute_publish_landing_pages(base_action())
+        if "error" not in r:
+            return "两版一模一样的老待办被放行了"
+        if "完全相同" not in r["error"]:
+            return "拦是拦了,但没说清为什么:%r" % r["error"][:80]
+        return True
+    check("老待办的 A/B 是同一个文件 → 执行时拦住", refuses_identical_ab)
+
+    def allow_identical_still_works():
+        # A/A 测试是真实用法,用户明说了就得放行 —— 别把口子一起焊死
+        real = srv.cfp.publish_ab
+        srv.cfp.publish_ab = lambda *a, **k: {"done": True, "detail": "stub"}
+        try:
+            r = srv._execute_publish_landing_pages(base_action(allow_identical=True))
+        finally:
+            srv.cfp.publish_ab = real
+        if r.get("error"):
+            return "明说了要做 A/A 还是被拦:%r" % str(r["error"])[:80]
+        return True
+    check("用户明说要做 A/A 测试的仍然放行", allow_identical_still_works)
+
+    def missing_file_is_plain_language():
+        # 文件被清理掉的老待办:必须是人话,而且**绝不能**走到发布那一步。
+        # **要走 confirm_action**,不能直接调 _execute_ —— 兜住异常、翻成人话的那层
+        # 就在 confirm_action 里,绕过它测出来的是一个裸 ValueError(第一版就这么错了)。
+        aid = "smoke-missing-file"
+        srv.PENDING_ACTIONS[aid] = base_action(
+            variant_a_file="never-existed-xyz.html", user_id="", seq=-1)
+        try:
+            r = srv.confirm_action(aid)
+        finally:
+            srv.PENDING_ACTIONS.pop(aid, None)
+            srv._save_actions()
+        if "error" not in r:
+            return "文件不存在却没报错"
+        if "找不到" not in str(r["error"]):
+            return "报错不是人话:%r" % str(r["error"])[:80]
+        return True
+    check("引用了已被清理文件的老待办 → 说人话,不发布", missing_file_is_plain_language)
+
+    def swap_refuses_identical_landers():
+        r = srv._execute_swap_campaign_landers(
+            {"type": "swap_campaign_landers", "flow_id": "f" * 24, "put_body": {},
+             "fingerprint": "x", "expect_landers": ["abc123", "ABC123"]})
+        if "error" not in r:
+            return "两个 Lander 是同一个,却放行了"
+        if "同一个" not in r["error"]:
+            return "拦是拦了,但没说清为什么:%r" % str(r["error"])[:80]
+        return True
+    check("换页待办的两个 Lander 是同一个 → 执行时拦住", swap_refuses_identical_landers)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3441,6 +3523,7 @@ if __name__ == "__main__":
     test_empty_reply()
     test_loop_guard()
     test_fake_preview_link()
+    test_execute_time_recheck()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

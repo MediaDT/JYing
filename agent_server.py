@@ -1427,10 +1427,23 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
 def _execute_publish_landing_pages(action: dict) -> dict:
     file_a = _generated_landing_file(action.get("variant_a_file", ""))
     file_b = _generated_landing_file(action.get("variant_b_file", ""))
-    if hashlib.sha256(file_a.read_bytes()).hexdigest() != action.get("variant_a_sha256"):
+    sha_a = hashlib.sha256(file_a.read_bytes()).hexdigest()
+    sha_b = hashlib.sha256(file_b.read_bytes()).hexdigest()
+    if sha_a != action.get("variant_a_sha256"):
         return {"error": "A 版页面在确认前发生了变化，已停止发布，请重新登记。"}
-    if hashlib.sha256(file_b.read_bytes()).hexdigest() != action.get("variant_b_sha256"):
+    if sha_b != action.get("variant_b_sha256"):
         return {"error": "B 版页面在确认前发生了变化，已停止发布，请重新登记。"}
+    # **执行时要再查一遍「两版是不是一样的」,不能只信登记那一刻查过。**
+    # 待办会在保险箱里躺很久(重启也不丢),而检查是后来才加的 ——
+    # 实测保险箱里就躺着一条加检查之前登记的假 A/B(A、B 是同一个文件)。
+    # 那条的两个 sha 都能对上,于是一路放行,发出去两个网址跑同一个页面。
+    # 这是「两阶段流程里,校验只做在前一阶段」的通病(和"待办里要存快照"同一类)。
+    if sha_a == sha_b and not action.get("allow_identical"):
+        return {"error": "没有发布。这个待办里的 A/B 两版内容**完全相同**"
+                         f"({action.get('variant_a_file')} / {action.get('variant_b_file')})——"
+                         "发出去两个网址跑的是同一个页面,钱照花、数据照上报,"
+                         "但分出来的「胜者」只是噪音。请重新生成两版方向不同的页面;"
+                         "确实要做 A/A 测试就明确说一句,重新登记时带 allow_identical=true。"}
     try:
         return cfp.publish_ab(action["domain"], action["slug"], file_a, file_b,
                               action["cta_url"], action["tracking_script"],
@@ -2480,6 +2493,13 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
 
 def _execute_swap_campaign_landers(action: dict) -> dict:
     """真改。执行前会拿指纹再比一次 —— 登记之后被人在后台动过就停下不写。"""
+    # 和发布那条同理:**登记时查过不代表执行时还成立**。待办会在保险箱里躺很久,
+    # 而"两个 Lander 指向同一个网址"这道检查是后加的,老待办身上没做过。
+    want = [str(x).lower() for x in (action.get("expect_landers") or [])]
+    if len(want) > 1 and len(set(want)) == 1 and not action.get("allow_identical"):
+        return {"error": "没有改。这个待办要挂上去的两个 Lander 是**同一个**,"
+                         "分流出去两边跑的是同一个页面 —— 实验问不出任何东西。"
+                         "请重新登记;确实要做 A/A 测试就明确说一句。"}
     try:
         result = cfc.apply_flow(action.get("flow_id", ""), action.get("put_body") or {},
                                 expect_fingerprint=action.get("fingerprint", ""),
