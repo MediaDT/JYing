@@ -30,7 +30,46 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 GENERATED_DIR = Path(__file__).parent / "data" / "landing_pages"
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-KEEP_GENERATED = 80
+KEEP_GENERATED = 80        # 每个人各留这么多份,不是所有人共用这么多
+
+
+def _owner_dir(owner: str = "") -> Path:
+    """这个人的预览目录。
+
+    **按人分目录。** 原来所有人的页面平铺在同一个目录里,后果有三层:
+      ① 预览不存在时的 404 页面会把**别人的**预览文件列成可点链接;
+      ② 取文件时零归属检查 —— 拿到文件名就能读别人的整页(里面有他的
+         落地页文案、CTA 追踪地址);
+      ③ `KEEP_GENERATED=80` 是**所有人共用**的,A 多生成几轮就把 B 的页面
+         删掉了,而 B 的待办还指着那个文件 —— 确认发布时才报「文件找不到」。
+
+    `owner` 为空 = 不在用户上下文(命令行 / 测试)→ 用平铺的老目录。
+    **老文件(按人分目录之前生成的)仍然平铺在根目录下**,当作"没有归属"处理:
+    谁都读得到。和老待办、老定时任务的兼容口径一致 —— 否则那些页面谁都发不了。
+    """
+    name = re.sub(r"[^A-Za-z0-9_-]+", "", str(owner or ""))[:64]
+    if not name:
+        return GENERATED_DIR
+    d = GENERATED_DIR / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def resolve_preview(filename: str, owner: str = "") -> Path | None:
+    """把文件名解析成盘上的真实路径:**先找他自己的,再找没有归属的老文件**。
+
+    找不到返回 None。目录穿越(`../`、带斜杠、非 .html)一律拒绝 ——
+    这个函数的返回值会被直接读出来发给用户。
+    """
+    name = Path(str(filename or "")).name
+    if not name or "/" in str(filename or "") or "\\" in str(filename or "") \
+            or not name.lower().endswith(".html"):
+        return None
+    for base in ([_owner_dir(owner), GENERATED_DIR] if owner else [GENERATED_DIR]):
+        path = (base / name).resolve()
+        if path.parent == base.resolve() and path.is_file():
+            return path
+    return None
 
 
 class _PageParser(HTMLParser):
@@ -480,8 +519,11 @@ def _check_publishable(html: str) -> tuple[str, list[str]]:
     return html, problems
 
 
-def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
-    """把生成的页面落盘。`limit` 是**这次要几版** —— 别再写死 2。"""
+def save_pages(pages: list[dict], limit: int = 2, owner: str = "") -> list[dict]:
+    """把生成的页面落盘。`limit` 是**这次要几版** —— 别再写死 2。
+
+    `owner` 是当前用户 id:页面写进**他自己的**目录(见 `_owner_dir`)。
+    """
     limit = max(1, min(int(limit or 2), 2))
     out = []
     for i, p in enumerate(pages[:limit], start=1):
@@ -494,7 +536,7 @@ def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
         raw, year_fixed, year_stale = fix_stale_years(raw)
         name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(p.get("命名") or f"landing-{i}")).strip("-").lower()
         filename = f"{uuid.uuid4().hex[:8]}-{name or 'landing'}.html"
-        path = GENERATED_DIR / filename
+        path = _owner_dir(owner) / filename
         path.write_text(raw, encoding="utf-8")
         out.append({k: v for k, v in p.items() if k != "html"} | {
             "file": filename,
@@ -511,27 +553,30 @@ def save_pages(pages: list[dict], limit: int = 2) -> list[dict]:
                           "请问用户:改成今年、还是去掉年份?" % this_year()}
                if year_stale else {}),
         })
-    _prune()
+    _prune(owner)
     return out
 
 
-def preview_exists(filename: str) -> bool:
+def preview_exists(filename: str, owner: str = "") -> bool:
     """这个预览文件真的在盘上吗?
 
     **模型会照着 `<8位十六进制>-version-a---<英文名>.html` 这个形状编一个出来**
     (线上实测:整轮压根没调生成工具,直接给了个链接,用户点开是 404)。
     所以"给出去的链接"必须能被代码回查,不能只靠提示词让它别编。
     """
-    name = str(filename or "")
-    if "/" in name or "\\" in name or not name.lower().endswith(".html"):
-        return False
-    return (GENERATED_DIR / name).is_file()
+    return resolve_preview(filename, owner) is not None
 
 
-def recent_previews(limit: int = 8) -> list[dict]:
-    """盘上真实存在的预览,新的排前面。给"编了个链接"时的兜底清单用。"""
+def recent_previews(limit: int = 8, owner: str = "") -> list[dict]:
+    """盘上真实存在的预览,新的排前面。给"编了个链接"时的兜底清单用。
+
+    **只列他自己的 + 没有归属的老文件**,绝不列别人的 —— 这个清单会被直接
+    渲染成可点链接甩到用户面前(404 页面和 ⚠️ 拆穿章)。
+    """
     try:
-        files = sorted(GENERATED_DIR.glob("*.html"),
+        pool = list(_owner_dir(owner).glob("*.html")) if owner else []
+        pool += list(GENERATED_DIR.glob("*.html"))          # 没有归属的老文件
+        files = sorted({f.resolve(): f for f in pool}.values(),
                        key=lambda f: f.stat().st_mtime, reverse=True)
     except Exception:
         return []
@@ -539,9 +584,15 @@ def recent_previews(limit: int = 8) -> list[dict]:
              "mtime": f.stat().st_mtime} for f in files[:max(1, int(limit or 8))]]
 
 
-def _prune() -> None:
+def _prune(owner: str = "") -> None:
+    """只淘汰**这个人自己**目录里的旧页面。
+
+    原来是全局扫一遍砍到 80 份 —— A 多生成几轮就把 B 的页面删了,
+    而 B 的发布待办还指着那个文件,他确认时才拿到「文件找不到」。
+    """
     try:
-        files = sorted(GENERATED_DIR.glob("*.html"), key=lambda f: f.stat().st_mtime)
+        base = _owner_dir(owner)
+        files = sorted(base.glob("*.html"), key=lambda f: f.stat().st_mtime)
         for f in files[:-KEEP_GENERATED]:
             f.unlink(missing_ok=True)
     except Exception:

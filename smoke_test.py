@@ -4317,6 +4317,287 @@ def test_no_such_action():
     check("confirm / cancel / 工具分发层,三处用同一份措辞", all_three_doors_say_the_same)
 
 
+# ============ 3.54 「读」这一头的按人隔离 ============
+
+def test_read_side_isolation():
+    """上一轮只把「写」堵上了(confirm/cancel 查归属),**读这一头一个字没改**。
+    对抗性审查实跑出来的:B 一句「查一下待办」就能拿到 A 待办的全部原文,
+    而且每轮自动注进 B 的提示词。这一组守住读的那一头。
+    """
+    import contextvars
+    import agent_server as srv
+    import scheduler as sched
+
+    print("\n【3.54】「读」这一头的按人隔离")
+
+    def as_user(uid, fn, mode="campaign"):
+        def go():
+            srv.CURRENT_USER_ID.set(uid)
+            srv.CURRENT_SEQ.set(1)
+            srv.CURRENT_CHAT_MODE.set(mode)
+            srv.CURRENT_EXECUTED.set([])
+            return fn()
+        return contextvars.Context().run(go)
+
+    def with_box(rows, fn):
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        srv.PENDING_ACTIONS.update(rows)
+        try:
+            return fn()
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+
+    SECRET = {"type": "create_campaign", "seq": 1, "user_id": "uA",
+              "campaign_name": "NB-Secret-260101-01",
+              "landing_url": "https://a-secret-client.example/lp",
+              "budget_cents": 8800, "ads": [{"name": "AD-x", "headline": "A客户的独家文案"}]}
+    LEGACY = {"type": "create_campaign", "seq": 1, "campaign_name": "NB-Legacy-01"}
+
+    def box_listing_is_per_user():
+        rows = {"aOnly": dict(SECRET), "old1": dict(LEGACY)}
+
+        def look(uid):
+            return str(with_box(rows, lambda: as_user(uid, srv.list_pending_actions)))
+        seen_by_b = look("uB")
+        if "aOnly" in seen_by_b or "NB-Secret" in seen_by_b or "a-secret-client" in seen_by_b:
+            return "B 看得见 A 的待办原文:%r" % seen_by_b[:160]
+        if "old1" not in seen_by_b:
+            return "没有归属的老待办谁都该看得见,现在 B 看不到了"
+        mine = look("uA")
+        if "aOnly" not in mine:
+            return "A 反而看不见自己的待办"
+        if "user_id" in mine:
+            return "还在输出 user_id —— 筛过之后它必然是当前用户,纯占 token"
+        return True
+    check("保险箱清单:B 看不见 A 的待办(老待办除外)", box_listing_is_per_user)
+
+    def studios_leak_too():
+        # **别只测投放助手**:`list_pending_actions` 三个工具集里都有,
+        # 落地页工作室的 B 同样能看到 A 的发布待办(域名、slug、带 A 追踪域名的 CTA)
+        rows = {"pubA": {"type": "publish_landing_pages", "seq": 1, "user_id": "uA",
+                         "domain": "lp.a-secret.example", "slug": "window-260907",
+                         "cta_url": "https://trk.a-secret.example/cf/click/1"}}
+        seen = str(with_box(rows, lambda: as_user("uB", srv.list_pending_actions, mode="landing")))
+        if "pubA" in seen or "a-secret" in seen:
+            return "落地页工作室里,B 照样看得见 A 的发布待办:%r" % seen[:150]
+        if "pubA" not in str(with_box(rows, lambda: as_user("uA", srv.list_pending_actions, mode="landing"))):
+            return "A 在自己的工作室里反而看不见"
+        return True
+    check("工作室里也不漏:B 看不见 A 的发布待办", studios_leak_too)
+
+    def prompt_injection_is_per_user():
+        # **这条比清单更要紧**:提示词是每轮自动注入的,用户什么都没问也会被念出来
+        rows = {"aOnly": dict(SECRET)}
+        got = with_box(rows, lambda: as_user("uB", lambda: srv._system_prompt_now("zh")))
+        if "aOnly" in got or "NB-Secret" in got:
+            return "A 的待办被注进了 B 的提示词 —— 用户什么都没问就会被 AI 念出来"
+        mine = with_box(rows, lambda: as_user("uA", lambda: srv._system_prompt_now("zh")))
+        if "aOnly" not in mine:
+            return "A 自己的待办反而没注进他的提示词(跨轮就会忘编号)"
+        return True
+    check("提示词注入:只注入自己的待办", prompt_injection_is_per_user)
+
+    def unmasking_stamp_only_lists_my_ids():
+        # ⚠️ 拆穿章是**直接给用户看**的,还写着「请回复『执行待办 xxx』重试」——
+        # 列上别人的编号等于指使他去执行别人的东西
+        rows = {"aOnly": dict(SECRET)}
+        out = with_box(rows, lambda: as_user("uB", lambda: srv._finalize("好的,我已创建完成。", "zh")))
+        if "aOnly" in str(out):
+            return "B 的回复被盖章,里面列着 A 的待办编号"
+        mine = with_box(rows, lambda: as_user("uA", lambda: srv._finalize("好的,我已创建完成。", "zh")))
+        if "aOnly" not in str(mine):
+            return "A 自己谎报时反而不拆穿了 —— 钢印失效"
+        return True
+    check("拆穿章只列自己的待办编号", unmasking_stamp_only_lists_my_ids)
+
+    # ---------- 定时任务 ----------
+    def schedule_dedupe_knows_who():
+        real_load, real_save = sched.load_tasks, sched.save_tasks
+        rows = []
+        sched.load_tasks = lambda: [dict(x) for x in rows]
+        sched.save_tasks = lambda ts: rows.__setitem__(slice(None), [dict(x) for x in ts])
+        try:
+            base = {"kind": "once", "when": "2030-01-01 09:00", "level": "campaign",
+                    "object_id": "obj1", "name": "计划X", "status": "ON"}
+            a = sched.add_task(dict(base, user_id="uA"))
+            b = sched.add_task(dict(base, user_id="uB"))
+            if b.get("duplicate"):
+                return ("A 和 B 定同样的事被归并成一条 —— B 拿到的是 A 的 task_id,"
+                        "然后他既看不见它、也取消不了它,是个死胡同")
+            if a.get("task_id") == b.get("task_id"):
+                return "两个人拿到了同一个 task_id"
+            again = sched.add_task(dict(base, user_id="uA"))
+            if not again.get("duplicate"):
+                return "同一个人重复登记同一件事,查重失效了"
+        finally:
+            sched.load_tasks, sched.save_tasks = real_load, real_save
+        return True
+    check("定时任务查重要认人:A 和 B 各是各的", schedule_dedupe_knows_who)
+
+    def run_results_are_per_user():
+        saved = list(sched.recent_runs)
+        sched.recent_runs.clear()
+        try:
+            sched._note_run({"user_id": "uA"}, "⏰ 定时任务 t1:开启 campaign「A的私密计划」→ ✅ 成功")
+            sched._note_run({}, "⏰ 定时任务 t0:开启 campaign「老任务」→ ✅ 成功")
+            if any("A的私密计划" in m for m in sched.runs_for("uB")):
+                return "B 读得到 A 的定时任务执行结果(里面带着计划名)"
+            if not any("老任务" in m for m in sched.runs_for("uB")):
+                return "没有归属的老记录谁都该看得见"
+            if not any("A的私密计划" in m for m in sched.runs_for("uA")):
+                return "A 自己反而看不到"
+            got = as_user("uB", lambda: srv._system_prompt_now("zh"))
+            if "A的私密计划" in got:
+                return "A 的计划名被注进了 B 的提示词 —— 后面还跟着「主动告知一句」"
+            # 上限也要是每人一份,否则 A 跑几次就把 B 的挤没了
+            for i in range(sched.RECENT_RUNS_PER_USER + 3):
+                sched._note_run({"user_id": "uA"}, "A 的第 %d 条" % i)
+            sched._trim_runs()
+            if not any("老任务" in m for m in sched.runs_for("uB")):
+                return "A 的记录把 B 那条挤掉了 —— 上限还是全局共用的"
+        finally:
+            sched.recent_runs[:] = saved
+        return True
+    check("定时任务执行结果:按人存、按人读、上限也按人", run_results_are_per_user)
+
+    # ---------- 落地页预览 ----------
+    def previews_are_per_user():
+        import tempfile
+        from pathlib import Path as _P
+        real = srv.lp.GENERATED_DIR
+        page = ('<!doctype html><html><body><a href="[[CLICKFLARE_CTA_URL]]">Go</a>'
+                '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+        with tempfile.TemporaryDirectory() as d:
+            srv.lp.GENERATED_DIR = _P(d)
+            try:
+                a_rows = srv.lp.save_pages([{"命名": "aaa", "html": page}], limit=1, owner="uA")
+                legacy = _P(d) / "0000legacy-old.html"
+                legacy.write_text(page, encoding="utf-8")
+                a_file = a_rows[0]["file"]
+
+                if srv.lp.preview_exists(a_file, "uB"):
+                    return "B 拿文件名就能读到 A 的落地页"
+                if not srv.lp.preview_exists(a_file, "uA"):
+                    return "A 自己反而读不到刚生成的"
+                if not srv.lp.preview_exists("0000legacy-old.html", "uB"):
+                    return "没有归属的老文件谁都该读得到(否则老待办谁都发不了)"
+
+                listed = [r["file"] for r in srv.lp.recent_previews(8, owner="uB")]
+                if a_file in listed:
+                    return "404 页面会把 A 的预览列成可点链接给 B"
+                if "0000legacy-old.html" not in listed:
+                    return "老文件没列出来"
+
+                # 取文件那一层也要拦(_generated_landing_file 是发布时读内容用的)
+                def b_reads():
+                    try:
+                        srv._generated_landing_file(a_file)
+                        return "B 通过 _generated_landing_file 读到了 A 的页面"
+                    except ValueError:
+                        return True
+                bad = as_user("uB", b_reads)
+                if bad is not True:
+                    return bad
+
+                # A 生成一堆不该把 B 的删掉
+                keep = srv.lp.KEEP_GENERATED
+                srv.lp.KEEP_GENERATED = 2
+                try:
+                    b_row = srv.lp.save_pages([{"命名": "bbb", "html": page}], limit=1, owner="uB")[0]
+                    for i in range(5):
+                        srv.lp.save_pages([{"命名": "a%d" % i, "html": page}], limit=1, owner="uA")
+                    if not srv.lp.preview_exists(b_row["file"], "uB"):
+                        return "A 多生成几轮就把 B 的页面删了 —— 上限还是全局共用的"
+                finally:
+                    srv.lp.KEEP_GENERATED = keep
+            finally:
+                srv.lp.GENERATED_DIR = real
+        return True
+    check("落地页预览:按人分目录,读不到也删不掉别人的", previews_are_per_user)
+
+
+# ============ 3.55 流式那条路真的把上下文带进线程了吗 ============
+
+def test_stream_carries_context():
+    """**网页默认走流式**,而按人隔离全靠 contextvars。大脑函数是同步阻塞的,
+    所以丢进线程跑 —— 线程必须 `copy_context()`。
+
+    审查实测:把 `ctx.run(work)` 改成 `work`(去掉上下文拷贝),
+    **12 条按人隔离的测试全部照样绿**,因为它们都是直接调函数,
+    一次都没走过这条线程。而线程里 `CURRENT_USER_ID.get()` 是空串的话:
+      ·`_put_action` 只查 key 在不在,`user_id: ""` 照过;
+      ·confirm/cancel 的归属判据空串是假值,整段短路;
+      ·`_find_duplicate` 又把 A 和 B 的同样请求归并成一条;
+      ·`_searched()` / 预览目录全落进同一个桶;
+      ·`sched.list_tasks("")` 谁都看得见谁的。
+    **一整轮按人隔离在生产主路径上完全失效,而测试毫无察觉。**
+    """
+    import asyncio
+    import contextvars
+    import threading
+    import agent_server as srv
+
+    print("\n【3.55】流式线程带不带得动上下文")
+
+    def t_stream_thread_context():
+        seen = {}
+        orig = srv._route_brain
+
+        def spy(req):
+            seen["user"] = srv.CURRENT_USER_ID.get()
+            seen["creds"] = srv.nb.CURRENT_CREDS.get()
+            seen["seq"] = srv.CURRENT_SEQ.get()
+            seen["mode"] = srv.CURRENT_CHAT_MODE.get()
+            seen["guard"] = srv.CURRENT_GUARD.get()
+            seen["thread"] = threading.current_thread().name
+            return "ok"
+
+        srv._route_brain = spy
+
+        def go():
+            # 模拟 AuthMiddleware 在 call_next 之前设好的东西
+            srv.CURRENT_USER_ID.set("uStream")
+            srv.nb.CURRENT_CREDS.set({"token": "T-stream", "account_id": "ACC-stream"})
+            resp = srv.chat_stream(srv.ChatRequest(
+                messages=[srv.ChatMessage(role="user", content="hi")],
+                lang="zh", mode="landing"))
+
+            async def drain():
+                async for _ in resp.body_iterator:
+                    pass
+            asyncio.new_event_loop().run_until_complete(drain())
+
+        try:
+            contextvars.Context().run(go)
+        finally:
+            srv._route_brain = orig
+
+        if not seen:
+            return "大脑压根没被调到,这条测试什么都没验"
+        if seen.get("thread") == threading.current_thread().name:
+            return ("大脑没跑在单独的线程里 —— 这条测试守的就是「跨线程」,"
+                    "实现改了就要重写它,不能让它继续假绿")
+        if seen.get("user") != "uStream":
+            return ("线程里拿不到当前用户(%r)—— 按人隔离在流式这条路上整个失效:"
+                    "待办不记归属、查重会把两个人归并、素材和预览全落进同一个桶"
+                    % seen.get("user"))
+        if (seen.get("creds") or {}).get("token") != "T-stream":
+            return ("线程里拿不到这个人的平台凭据(%r)—— 会回落成 .env 里的公用 token,"
+                    "等于拿别人的账户在投广告" % seen.get("creds"))
+        if seen.get("mode") != "landing":
+            return "线程里的工作室模式不对(%r)—— 工具闸门会按错的模式放行" % seen.get("mode")
+        if not seen.get("seq"):
+            return "线程里没有 seq —— 两阶段确认的保险丝失效,能自问自答"
+        if seen.get("guard") is None:
+            return "线程里没有 LoopGuard —— 打转闸门在流式这条路上失效,会一直烧钱"
+        return True
+
+    check("流式:线程里拿得到当前用户/凭据/模式/保险丝/闸门", t_stream_thread_context)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -4756,6 +5037,8 @@ if __name__ == "__main__":
     test_per_user_holes()
     test_multi_ad()
     test_no_such_action()
+    test_read_side_isolation()
+    test_stream_carries_context()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

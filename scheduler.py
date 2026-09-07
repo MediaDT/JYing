@@ -103,10 +103,15 @@ def add_task(task: dict) -> dict:
         return {"error": err}
     with _lock:
         tasks = load_tasks()
-        # 同一个对象 + 同一个动作 + 同一个时间点 = 同一个任务,不重复登记
+        # 同一个人 + 同一个对象 + 同一个动作 + 同一个时间点 = 同一个任务,不重复登记。
+        # **`user_id` 这一项不能少**:少了的话 A 和 B 想定同一件事会被归并成一条,
+        # B 拿到的是 A 的 task_id —— 然后 `list_tasks` 里看不见它、`cancel_task`
+        # 说「是别的账号登记的」,他被卡在一个自己完全无法理解的死胡同里。
+        # 和保险箱 `_find_duplicate` 少了 user_id 是同一个洞。
         for t in tasks:
             if (t["object_id"] == task["object_id"] and t["status"] == task["status"]
                     and t["kind"] == task["kind"] and t["when"] == task["when"]
+                    and str(t.get("user_id") or "") == str(task.get("user_id") or "")
                     and t.get("state") == "active"):
                 return {"task_id": t["task_id"], "duplicate": True,
                         "note": f"这个定时任务已经存在(编号 {t['task_id']}),无需重复添加"}
@@ -195,8 +200,44 @@ def cancel_task(task_id: str, user_id: str = "") -> dict:
 
 # ============ 后台执行 ============
 
-# 最近执行过的定时任务(供聊天时主动汇报给用户),只留最近 5 条
-recent_runs: list[str] = []
+# 最近执行过的定时任务(供聊天时主动汇报给用户),**每人各留最近 5 条**。
+#
+# 原来这是一串**纯字符串**、全局一份,而每条消息里都带着计划名
+# (`⏰ 定时任务 07b614:开启 campaign「paa-0814」→ ✅ 成功`),
+# 又被 `_system_prompt_now` 无过滤地拼进**每个人**的提示词,后面还跟着一句
+# 「若用户还不知道,主动告知一句」—— 于是 A 在投什么、什么时候开关,
+# B 一登录就被 AI 主动念给他听。现在每条记下是谁的,读的时候按人筛。
+RECENT_RUNS_PER_USER = 5
+recent_runs: list[dict] = []
+
+
+def _note_run(task: dict, msg: str) -> None:
+    """记一条执行结果,并按人裁到上限。"""
+    recent_runs.append({"user_id": str(task.get("user_id") or ""), "msg": msg})
+
+
+def _trim_runs() -> None:
+    """**每人各留最近 5 条**,不是全局留 5 条 —— 全局留的话,A 的任务多跑几次
+    就把 B 的执行结果挤没了,B 再也看不到自己那条到底跑没跑。
+    (和素材登记表「200 条上限是每人一份」是同一条。)
+    """
+    kept: dict[str, int] = {}
+    out = []
+    for item in reversed(recent_runs):
+        who = item.get("user_id") or ""
+        if kept.get(who, 0) >= RECENT_RUNS_PER_USER:
+            continue
+        kept[who] = kept.get(who, 0) + 1
+        out.append(item)
+    out.reverse()
+    recent_runs[:] = out
+
+
+def runs_for(user_id: str = "") -> list[str]:
+    """这个人自己的定时任务执行结果。判据和 `_mine` 同一把尺子:
+    不在用户上下文 → 全给;记录没有归属(老的)→ 也给;否则只给他自己的。
+    """
+    return [x["msg"] for x in recent_runs if _mine(x, user_id)]
 
 
 def _run_due_tasks(execute_fn) -> None:
@@ -222,7 +263,7 @@ def _run_due_tasks(execute_fn) -> None:
                 msg = f"⏰ 定时任务 {t['task_id']}({label})原定 {both_times(next_at)}," \
                       f"但服务当时没运行(迟了 {int(late_min)} 分钟),**没有执行**"
                 print(f"[schedule] {msg}", flush=True)
-                recent_runs.append(msg)
+                _note_run(t, msg)
                 if t["kind"] == "daily":
                     nxt, _ = parse_when("daily", t["when"])   # 跳到下一次
                     t["next_at"] = nxt.isoformat() if nxt else ""
@@ -246,7 +287,7 @@ def _run_due_tasks(execute_fn) -> None:
             t["last_result"] = f"{now.strftime('%m-%d %H:%M')} {'成功' if ok else '失败:' + detail}"
             msg = f"⏰ 定时任务 {t['task_id']}:{label} → {'✅ 成功' if ok else '❌ 失败(' + detail + ')'}"
             print(f"[schedule] {msg}", flush=True)
-            recent_runs.append(msg)
+            _note_run(t, msg)
 
             if t["kind"] == "daily":
                 # 每天重复的任务:失败一次不停掉,排下一次继续试(结果已记在 last_result 里)
@@ -258,7 +299,7 @@ def _run_due_tasks(execute_fn) -> None:
 
         if changed:
             save_tasks(tasks)
-    del recent_runs[:-5]      # 只留最近 5 条
+    _trim_runs()              # 每人各留最近 5 条
 
 
 def start_worker(execute_fn) -> None:

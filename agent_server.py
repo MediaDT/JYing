@@ -1231,7 +1231,8 @@ def summarize_landing_page_patterns(brand: str = "", offer: str = "",
                        lang=lang, n_variants=want)
     if out.get("error"):
         return out
-    pages = _absolute_previews(lp.save_pages(out.get("新落地页") or [], limit=want))
+    pages = _absolute_previews(lp.save_pages(out.get("新落地页") or [], limit=want,
+                                             owner=CURRENT_USER_ID.get() or ""))
     out["新落地页"] = pages
     _LANDING_PAGES_BY_USER[CURRENT_USER_ID.get() or "-"] = list(pages)
     return {
@@ -1266,11 +1267,10 @@ def list_cloudflare_landing_resources(query: str = "", limit: int = 50) -> dict:
 
 
 def _generated_landing_file(filename: str) -> Path:
-    name = Path(str(filename or "")).name
-    path = (lp.GENERATED_DIR / name).resolve()
-    root = lp.GENERATED_DIR.resolve()
-    if not name or path.parent != root or path.suffix.lower() != ".html" or not path.is_file():
-        raise ValueError(f"找不到生成的落地页文件：{name or '(空)'}")
+    """按文件名取出这个人自己生成的落地页。**别人的取不到**(见 lp.resolve_preview)。"""
+    path = lp.resolve_preview(filename, CURRENT_USER_ID.get() or "")
+    if path is None:
+        raise ValueError(f"找不到生成的落地页文件：{Path(str(filename or '')).name or '(空)'}")
     return path
 
 
@@ -1949,17 +1949,41 @@ def _mode_action_types(mode: str) -> tuple:
 
 
 
+def _my_action(a: dict) -> bool:
+    """这条待办归不归**当前这个人**看?
+
+    判据和 `confirm_action` 的归属检查**逐字一致**(宽松那一版):
+      · 不在用户上下文(命令行 / 测试 / 后台线程)→ 全都算;
+      · 待办上没有归属(按人隔离之前登记的老单子)→ 也算,否则老待办谁都管不了;
+      · 两边都有且不相等 → **不是他的**。
+
+    **读和写必须用同一把尺子。** 上一轮只把 confirm/cancel 这一头堵上了,
+    读这一头三个地方一个字没改,而 campaign 是默认模式、绝大多数人就待在那儿:
+    B 一句「查一下待办」就能拿到 A 待办的**全部原文** —— 广告账户 id、落地页地址、
+    预算、标题描述、素材地址、发布用的域名和 CTA(里面就是 A 的 campaign id)。
+    更糟的是 `_system_prompt_now` 每轮把它拼进 B 的提示词,还写着
+    「用户确认时直接调 confirm_action(用上面的编号)」—— B 照做只会撞上
+    「这个待办属于另一个账号」,是个死胡同。
+    """
+    me = CURRENT_USER_ID.get()
+    owner = a.get("user_id")
+    return (not me) or (not owner) or owner == me
+
+
 def list_pending_actions() -> dict:
     """查看保险箱:所有已登记、还没执行的待办(含编号 action_id)。
     用户确认后若不记得编号,先用这个查,严禁重新登记同一件事。"""
     mode = CURRENT_CHAT_MODE.get()
     visible = [(aid, a) for aid, a in PENDING_ACTIONS.items()
-               if mode in FULL_ACCESS_MODES
-               or a.get("type") in _mode_action_types(mode)]
+               if _my_action(a)
+               and (mode in FULL_ACCESS_MODES or a.get("type") in _mode_action_types(mode))]
     return {"pending_actions": [
+        # `user_id` 过滤之后必然等于当前用户,**直接不输出**,别写成「不回显」——
+        # 那是「有值但不能给你看」(tracking_script 那种),这个是「没有信息量」,
+        # 白占提示词 token 还让模型以为这儿藏着什么要跟用户交代的东西。
         {"action_id": aid, **{k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b")
                                     else "[已算好，不回显]" if k == "put_body" else v)
-                              for k, v in a.items() if k != "seq"}}
+                              for k, v in a.items() if k not in ("seq", "user_id")}}
         for aid, a in visible
     ] or "保险箱是空的,没有待执行的待办"}
 
@@ -3452,12 +3476,12 @@ def landing_page_preview(filename: str):
     """预览本机生成的落地页；只允许访问生成目录下的 HTML 文件。"""
     if "/" in filename or "\\" in filename or not filename.lower().endswith(".html"):
         return JSONResponse(status_code=400, content={"error": "无效的预览文件名"})
-    path = lp.GENERATED_DIR / filename
-    if not path.is_file():
+    path = lp.resolve_preview(filename, CURRENT_USER_ID.get() or "")
+    if path is None:
         # **别甩一句 JSON**:用户看到 `{"error":"...不存在或已过期"}` 只会以为功能坏了,
         # 而真相多半是"这个地址是模型编的"。直接把盘上真实存在的预览列出来,
         # 他一眼就能点到对的那个,不用再回聊天里追问。
-        real = lp.recent_previews(8)
+        real = lp.recent_previews(8, owner=CURRENT_USER_ID.get() or "")
         items = "".join(
             '<li><a href="/landing-pages/%s">%s</a></li>' % (r["file"], r["file"])
             for r in real)
@@ -3829,12 +3853,15 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "域名没定时先读取 Cloudflare 可选域名。发布必须先用 propose_publish_landing_pages 登记，"
                    "向用户完整复述，只有用户下一条消息明确确认后才能调用 confirm_action。")
 
-    if mode in FULL_ACCESS_MODES and sched.recent_runs:
+    # **只注入他自己的**:这些消息里带着计划名,而后面那句「主动告知一句」
+    # 会让 AI 把别人在投什么念给他听。
+    my_runs = sched.runs_for(CURRENT_USER_ID.get())
+    if mode in FULL_ACCESS_MODES and my_runs:
         prompt += ("\n\n【定时任务最近的执行结果】(代码层记录,若用户还不知道,主动告知一句):\n"
-                   + "\n".join(f"- {m}" for m in sched.recent_runs))
+                   + "\n".join(f"- {m}" for m in my_runs))
     visible_actions = {aid: a for aid, a in PENDING_ACTIONS.items()
-                       if mode in FULL_ACCESS_MODES
-                       or a.get("type") in _mode_action_types(mode)}
+                       if _my_action(a)
+                       and (mode in FULL_ACCESS_MODES or a.get("type") in _mode_action_types(mode))}
     if visible_actions:
         lines = []
         for aid, a in visible_actions.items():
@@ -4889,11 +4916,12 @@ def _fake_preview_note(reply: str, english: bool) -> str:
     names = list(dict.fromkeys(_PREVIEW_LINK.findall(reply or "")))
     if not names:
         return ""
-    fake = [n for n in names if not lp.preview_exists(n)]
+    owner = CURRENT_USER_ID.get() or ""
+    fake = [n for n in names if not lp.preview_exists(n, owner)]
     if not fake:
         return ""
     base = str(CURRENT_BASE_URL.get() or "").rstrip("/")
-    real = lp.recent_previews(5)
+    real = lp.recent_previews(5, owner=owner)
     links = "\n".join("· %s%s" % (base, r["preview_url"]) for r in real)
     if english:
         head = ("⚠️ **System verification**: %d preview link(s) above do not exist on disk "
@@ -4935,8 +4963,12 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
 
     # 谎报匹配不分大小写:AI 写的是 "Successfully created",关键词表里是小写
     reply_lower = reply.lower()
-    if PENDING_ACTIONS and any(kw.lower() in reply_lower for kw in _CLAIM_KEYWORDS):
-        ids = ", ".join(PENDING_ACTIONS.keys()) if english else "、".join(PENDING_ACTIONS.keys())
+    # 拆穿章里要报编号,而编号是**给用户看、还叫他去执行**的 —— 只能报他自己的。
+    # 原来直接把 `PENDING_ACTIONS.keys()` 全倒出来:B 随口一句「已暂停」就会被
+    # 盖上一章,里面列着 A 的待办编号,还写着「请回复『执行待办 xxx』重试」。
+    mine_ids = [aid for aid, a in PENDING_ACTIONS.items() if _my_action(a)]
+    if mine_ids and any(kw.lower() in reply_lower for kw in _CLAIM_KEYWORDS):
+        ids = ", ".join(mine_ids) if english else "、".join(mine_ids)
         note = (f"⚠️ **System verification**: nothing was actually executed this turn — "
                 f"the pending action(s) are still queued ({ids}). If the message above claims something "
                 f"was created or done, that is an AI hallucination. "
