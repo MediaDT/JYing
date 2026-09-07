@@ -3657,6 +3657,286 @@ def test_studio_handoff():
     check("投放助手仍然放行全部工具", campaign_mode_blocks_nothing)
 
 
+# ============ 3.51 按人隔离的四个漏洞 ============
+
+def test_per_user_holes():
+    """四个都是**静默**的洞:不报错、不出错,只是有一天变成
+    「我的待办怎么被别人执行了」「我的定时任务怎么没了」。
+    """
+    import contextvars
+    import agent_server as srv
+    import scheduler as sched
+
+    print("\n【3.51】按人隔离的四个洞")
+
+    def as_user(uid, fn):
+        def go():
+            srv.CURRENT_USER_ID.set(uid)
+            srv.CURRENT_SEQ.set(1)
+            srv.CURRENT_CHAT_MODE.set("campaign")
+            return fn()
+        return contextvars.Context().run(go)
+
+    # ---------- ① 待办必须带 user_id ----------
+    def every_action_carries_owner():
+        # **不是搜源码,是真登记一遍**:少了 user_id,归属检查会整段短路
+        # (`if action.get("user_id") and ...`),B 就能执行也能删掉 A 的待办。
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            r = as_user("uA", lambda: srv.propose_status_change(
+                "campaign", "obj-1", "OFF", name="X"))
+            aid = r.get("action_id")
+            if not aid:
+                return "登记失败:%r" % str(r)[:120]
+            a = srv.PENDING_ACTIONS.get(aid) or {}
+            if a.get("user_id") != "uA":
+                return "开关广告的待办没记下是谁登记的:%r" % a.get("user_id")
+            return True
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+    check("开关广告的待办记得下「谁登记的」", every_action_carries_owner)
+
+    def registration_refuses_ownerless():
+        # choke point:以后再加新待办类型,忘了带 user_id 会当场炸,不会安安静静留个洞
+        try:
+            srv._put_action("__never__", {"type": "whatever", "seq": 1})
+        except RuntimeError as e:
+            if "user_id" not in str(e):
+                return "报错没说清缺什么:%r" % str(e)[:80]
+            return True
+        finally:
+            srv.PENDING_ACTIONS.pop("__never__", None)
+        return "没带 user_id 也让登记了"
+    check("登记入口会拒绝没带 user_id 的待办", registration_refuses_ownerless)
+
+    def others_cannot_touch_it():
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            aid = as_user("uA", lambda: srv.propose_status_change(
+                "campaign", "obj-1", "OFF", name="X"))["action_id"]
+            srv.CURRENT_SEQ.set(0)          # 换一条消息,保险丝不拦
+            for fn, what in ((srv.confirm_action, "执行"), (srv.cancel_action, "取消")):
+                r = as_user("uB", lambda f=fn: f(aid))
+                if "另一个账号" not in str(r.get("error", "")):
+                    return "B 居然能%s A 的待办:%r" % (what, str(r)[:100])
+            if aid not in srv.PENDING_ACTIONS:
+                return "被拒了却把待办弄没了"
+            return True
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+    check("别人的待办:执行不了也取消不了", others_cannot_touch_it)
+
+    def same_request_from_two_people_is_not_merged():
+        # `_find_duplicate` 比的是除 seq 外的全部字段。少了 user_id,
+        # **A 和 B 提出同样的事会被归并成一条** —— 谁先确认就动了谁的。
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            a = as_user("uA", lambda: srv.propose_status_change("campaign", "same", "ON", name="X"))
+            b = as_user("uB", lambda: srv.propose_status_change("campaign", "same", "ON", name="X"))
+            if a.get("action_id") == b.get("action_id"):
+                return "A 和 B 提同一件事,被归并成了同一条待办"
+            return True
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+    check("A 和 B 提同样的事 → 各是各的待办", same_request_from_two_people_is_not_merged)
+
+    # ---------- ② 定时任务 ----------
+    def schedules_are_per_user():
+        real = sched.load_tasks
+        sched.load_tasks = lambda: [
+            {"task_id": "tA", "user_id": "uA", "level": "campaign", "object_id": "1",
+             "name": "A的计划", "status": "ON", "kind": "once", "when": "2030-01-01 09:00",
+             "state": "active", "next_at": "", "last_result": ""},
+            {"task_id": "tOld", "level": "campaign", "object_id": "2", "name": "老任务",
+             "status": "OFF", "kind": "daily", "when": "09:00",
+             "state": "active", "next_at": "", "last_result": ""}]
+        try:
+            ids = lambda u: {x["task_id"] for x in sched.list_tasks(u)}
+            if ids("uB") != {"tOld"}:
+                return "B 看得见 A 的定时任务:%r" % ids("uB")
+            if ids("uA") != {"tA", "tOld"}:
+                return "A 看不全自己的:%r" % ids("uA")
+            if ids("") != {"tA", "tOld"}:
+                return "不在用户上下文时(看表线程)应该看全部:%r" % ids("")
+        finally:
+            sched.load_tasks = real
+        return True
+    check("定时任务:只看得见自己的(老任务除外)", schedules_are_per_user)
+
+    def cannot_cancel_someone_elses_schedule():
+        real_load, real_save = sched.load_tasks, sched.save_tasks
+        rows = [{"task_id": "tA", "user_id": "uA", "level": "campaign", "object_id": "1",
+                 "name": "A的计划", "status": "ON", "kind": "once",
+                 "when": "2030-01-01 09:00", "state": "active", "next_at": "", "last_result": ""}]
+        saved = []
+        sched.load_tasks = lambda: [dict(x) for x in rows]
+        sched.save_tasks = lambda ts: saved.append(ts)
+        try:
+            r = sched.cancel_task("tA", "uB")
+            if r.get("cancelled") or saved:
+                return "B 居然取消了 A 的定时任务"
+            if "别的账号" not in str(r.get("error", "")):
+                return "拒了但没说清为什么:%r" % str(r)[:90]
+            ok = sched.cancel_task("tA", "uA")
+            if not ok.get("cancelled"):
+                return "自己的反而取消不了:%r" % str(ok)[:90]
+            if "取消掉的是" not in ok:
+                return "取消完没回显取消的是什么 —— 取错了用户不会有任何察觉"
+        finally:
+            sched.load_tasks, sched.save_tasks = real_load, real_save
+        return True
+    check("定时任务:别人的取消不了,自己的取消完会回显", cannot_cancel_someone_elses_schedule)
+
+    # ---------- ③ 搜过的素材登记表 ----------
+    def searched_assets_are_per_user():
+        srv._SEARCHED_ASSETS_BY_USER.pop("uA", None)
+        srv._SEARCHED_ASSETS_BY_USER.pop("uB", None)
+        try:
+            as_user("uA", lambda: srv._remember_assets(
+                [{"image_url": "https://x/a.jpg", "media_type": "IMAGE"}]))
+            seen_by_b = as_user("uB", lambda: srv._searched().get("https://x/a.jpg"))
+            if seen_by_b:
+                return "B 直接看得见 A 搜出来的素材地址"
+            seen_by_a = as_user("uA", lambda: srv._searched().get("https://x/a.jpg"))
+            if not seen_by_a:
+                return "A 自己反而找不到刚搜到的"
+            return True
+        finally:
+            srv._SEARCHED_ASSETS_BY_USER.pop("uA", None)
+            srv._SEARCHED_ASSETS_BY_USER.pop("uB", None)
+    check("搜到的素材:B 看不见 A 的", searched_assets_are_per_user)
+
+    def cap_is_per_user_not_shared():
+        # 上限原来是**所有人共用** 200 条:A 多搜几次就把 B 刚搜到的挤掉,
+        # B 再选就被当成「编的地址」拒掉 —— 而他明明刚看到过
+        srv._SEARCHED_ASSETS_BY_USER.pop("uA", None)
+        srv._SEARCHED_ASSETS_BY_USER.pop("uB", None)
+        try:
+            as_user("uB", lambda: srv._remember_assets([{"image_url": "https://x/b.jpg"}]))
+            as_user("uA", lambda: srv._remember_assets(
+                [{"image_url": "https://x/%d.jpg" % i} for i in range(srv.MAX_SEARCHED_ASSETS + 50)]))
+            if not as_user("uB", lambda: srv._searched().get("https://x/b.jpg")):
+                return "A 搜爆之后,B 刚搜到的被挤掉了"
+            if len(srv._SEARCHED_ASSETS_BY_USER["uA"]) > srv.MAX_SEARCHED_ASSETS:
+                return "每人的上限没生效"
+            return True
+        finally:
+            srv._SEARCHED_ASSETS_BY_USER.pop("uA", None)
+            srv._SEARCHED_ASSETS_BY_USER.pop("uB", None)
+    check("200 条上限是每人一份,不是大家共用", cap_is_per_user_not_shared)
+
+    # ---------- ④ 认不出的模式必须 fail-closed ----------
+    def unknown_mode_fails_closed():
+        def tools(mode):
+            def go():
+                srv.CURRENT_CHAT_MODE.set(mode)
+                return sum(1 for x in srv.OPENAI_TOOL_FUNCS if srv._tool_allowed(x))
+            return contextvars.Context().run(go)
+        full = tools("campaign")
+        for bogus in ("制作台", "studio", "campaignX", "CAMPAIGN"):
+            n = tools(bogus)
+            if n == full:
+                return "模式 %r 被当成了投放助手,%d 个工具全放行" % (bogus, n)
+            if n != len(srv.STRICTEST_TOOL_NAMES):
+                return "模式 %r 拿到的不是最严的那一档(%d 个)" % (bogus, n)
+        return True
+    check("认不出的模式 → 最严的一档,绝不 fail-open 成全权限", unknown_mode_fails_closed)
+
+    def unknown_mode_sees_no_actions():
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        srv.PENDING_ACTIONS["x1"] = {"type": "create_campaign", "seq": 1, "user_id": ""}
+        try:
+            def go():
+                srv.CURRENT_CHAT_MODE.set("制作台")
+                return (srv.list_pending_actions(),
+                        srv._mode_action_types("制作台"),
+                        srv._tool_call("confirm_action", {"action_id": "x1"}))
+            listed, types, confirmed = contextvars.Context().run(go)
+            if "x1" in str(listed):
+                return "认不出的模式却看得见待办"
+            if types:
+                return "认不出的模式却认领了待办类型:%r" % (types,)
+            if confirmed.get("done"):
+                return "认不出的模式居然把待办执行了"
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+        return True
+    check("认不出的模式:待办看不见也确认不了", unknown_mode_sees_no_actions)
+
+    def new_turn_does_not_normalize_away():
+        # **这条最要紧**:上面几条都是直接设 mode 测的,绕过了 `_new_turn`。
+        # 而真正的 fail-open 就在那儿 —— 它原来把认不出的模式**回落成 campaign**,
+        # 于是下游那套 fail-closed 逻辑一次都不会跑到。
+        def go():
+            srv._new_turn("制作台")
+            return srv.CURRENT_CHAT_MODE.get()
+        got = contextvars.Context().run(go)
+        if got in srv.FULL_ACCESS_MODES:
+            return "认不出的模式被 _new_turn 回落成了全权限模式(%r)" % got
+        if got != "制作台":
+            return "既没保留也没说清,变成了 %r" % got
+        # 正常的三个仍要原样通过
+        for m in srv.VALID_MODES:
+            def go2(mm=m):
+                srv._new_turn(mm)
+                return srv.CURRENT_CHAT_MODE.get()
+            if contextvars.Context().run(go2) != m:
+                return "正常模式 %r 被改掉了" % m
+        return True
+    check("_new_turn 不把认不出的模式回落成全权限", new_turn_does_not_normalize_away)
+
+    def one_source_of_truth():
+        # 这个判断原来散在五处,加一个工作室漏一处就静默变成全权限
+        import inspect
+        # `_tool_call` 单独判:它里面的 "campaign" 是**移交单指向的目的地**
+        # (就是要写死指向投放助手),不是模式分派。这里只查那道闸门的判据。
+        gate = _no_comments(inspect.getsource(srv._tool_call))
+        if "FULL_ACCESS_MODES" not in gate:
+            return "_tool_call 的确认闸门没走 FULL_ACCESS_MODES"
+        if '("creative", "landing")' in gate:
+            return "_tool_call 的确认闸门还硬编码着模式名元组 —— 模式一改名它整段跳过"
+        for fn, name in ((srv._tool_allowed, "_tool_allowed"),
+                         (srv._mode_action_types, "_mode_action_types"),
+                         (srv.list_pending_actions, "list_pending_actions")):
+            # **docstring 也要剥掉**:`_no_comments` 只剥 # 开头的行,
+            # 而这几个函数的 docstring 里正当地写着模式名(在解释规矩),
+            # 不剥就会误命中 —— 和坑表「读源码做判断前先把注释/docstring 剥掉」同一条。
+            src = _no_comments(inspect.getsource(fn))
+            doc = inspect.getdoc(fn) or ""
+            for line in doc.splitlines():
+                src = src.replace(line, "")
+            if '"creative"' in src or '"landing"' in src or '"campaign"' in src:
+                return "%s 里还硬编码着模式名,加工作室时会漏改" % name
+        if set(srv.STUDIO_TOOL_SETS) != set(srv.STUDIO_ACTION_TYPES):
+            return "两张表登记的工作室对不上:%r vs %r" % (
+                set(srv.STUDIO_TOOL_SETS), set(srv.STUDIO_ACTION_TYPES))
+        # **扫全文件,不只是上面那几个函数。** 上一版就是只查了四个函数,
+        # 漏掉了 `_system_prompt_now` —— 它里面还留着 `mode == "campaign"`
+        # 决定「待办注入给谁看」和「定时任务执行结果注入给谁看」。
+        # "campaign" 是全放行档,凡是拿它做判断的地方都必须走 FULL_ACCESS_MODES;
+        # (`mode == "creative"` / `"landing"` 是往提示词里塞各工作室的说明文字,
+        #  那是内容分派不是权限闸门,不在这条规矩里。)
+        whole = _no_comments(inspect.getsource(srv))
+        for bad in ('mode == "campaign"', 'mode != "campaign"'):
+            if bad in whole:
+                where = [i + 1 for i, ln in enumerate(whole.splitlines()) if bad in ln]
+                return "agent_server 里还有 %s(第 %r 行附近)—— 全放行档要走 FULL_ACCESS_MODES" % (bad, where)
+        return True
+    check("模式判断收成一份表,全文件都不再硬编码 campaign", one_source_of_truth)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -4093,6 +4373,7 @@ if __name__ == "__main__":
     test_dns_and_rule_paths()
     test_oal_filter_combo()
     test_studio_handoff()
+    test_per_user_holes()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

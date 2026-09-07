@@ -757,7 +757,33 @@ def recommend_creatives(ad_account_id: str = "", days: int = 90, top_n: int = 5)
 
 # 搜出来过的素材地址。**AI 只能从这里面选**,不能自己编一个链接让系统去下载 ——
 # 编链接是这个项目反复防的幻觉行为(见 CLAUDE.md 第八节「AI 幻觉执行」)。
-_SEARCHED_ASSETS: dict[str, dict] = {}
+#
+# **必须按人分桶。** 原来是模块级一份全局表,而同类的 `_CREATIVE_MODELS_BY_USER` /
+# `_CREATIVE_PLANS_BY_USER` / `_LANDING_PAGES_BY_USER` 早就分过了 —— 就这张漏了。
+# 后果有两层:①B 能直接拿 A 搜出来的地址去 `use_found_creative` 转存、去
+# `decompose_creative` 拆解,等于看见了 A 在研究哪些竞品素材;②200 条的上限是全局共享的,
+# A 多搜几次就把 B 刚搜到的挤掉,B 再选就被当成"编的地址"拒掉 —— 而他明明刚看到过。
+# 这就是坑表里「缓存键忘了带用户 = 数据串号」那条。
+_SEARCHED_ASSETS_BY_USER: dict[str, dict] = {}
+# 每人最多记多少条搜索结果。原来 200 是**所有人共用**的,现在是每人各一份。
+MAX_SEARCHED_ASSETS = 200
+
+
+def _searched() -> dict:
+    """当前这个人搜出来过的素材。不在用户上下文时用 "-" 这个桶
+    (和 `_models()` / `_plans()` 完全同一个写法)。"""
+    return _SEARCHED_ASSETS_BY_USER.setdefault(CURRENT_USER_ID.get() or "-", {})
+
+
+def _remember_assets(items: list) -> None:
+    """把一批搜索结果记进**这个人自己的**登记表,并按上限淘汰最旧的。"""
+    mine = _searched()
+    for item in items:
+        mine[item["image_url"]] = item
+    # 服务是长驻进程,搜的次数多了这张表会一直长。留最近 200 条够用了
+    # (用户总是从"刚搜出来的"那批里选,不会回头挑几百次之前的)。
+    while len(mine) > MAX_SEARCHED_ASSETS:
+        mine.pop(next(iter(mine)))
 
 
 def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -> dict:
@@ -776,12 +802,7 @@ def search_stock_creatives(keyword: str, count: int = 6, source: str = "auto") -
         r = cs.search(keyword, count=count, source=source)
         if r.get("error"):
             return r
-        for item in r["results"]:
-            _SEARCHED_ASSETS[item["image_url"]] = item
-        # 服务是长驻进程,搜的次数多了这张表会一直长。留最近 200 条够用了
-        # (用户总是从"刚搜出来的"那批里选,不会回头挑几百次之前的)。
-        while len(_SEARCHED_ASSETS) > 200:
-            _SEARCHED_ASSETS.pop(next(iter(_SEARCHED_ASSETS)))
+        _remember_assets(r["results"])
 
         if not r["results"]:
             ready = [s["name"] for s in cs.available_sources() if s["ready"]]
@@ -971,10 +992,7 @@ def search_competitor_ads(keyword: str, count: int = 8, country: str = "US",
             f"还有:用户问的要是「现在什么广告跑得好」这类**没有品类的开放问题**,"
             f"就不该在这儿编一个词 —— 应该改用 native_market_scan 扫全市场。")
 
-    for item in r["results"]:
-        _SEARCHED_ASSETS[item["image_url"]] = item
-    while len(_SEARCHED_ASSETS) > 200:
-        _SEARCHED_ASSETS.pop(next(iter(_SEARCHED_ASSETS)))
+    _remember_assets(r["results"])
 
     if not r["results"]:
         return {"results": [], "note": (
@@ -1400,8 +1418,7 @@ def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
         return {"action_id": dup,
                 "note": f"相同发布待办已经存在（编号 {dup}），请复述后等待用户确认。"}
     action_id = uuid.uuid4().hex[:8]
-    PENDING_ACTIONS[action_id] = candidate
-    _save_actions()
+    _put_action(action_id, candidate)
     mapping = (resources.get("domain_project_mappings") or {}).get(domain) or {}
     project = mapping.get("project") or cfp.project_name_for_domain(domain)
     # 脚本从哪来,要如实讲给用户 —— 复用的那段是他上次贴的,他有权知道用的是哪份、什么时候存的
@@ -1476,7 +1493,7 @@ def _execute_publish_landing_pages(action: dict) -> dict:
 # ===== 创意拆解与方案(P0:只出文字,不出图)=====
 # 拆解过的素材模型,按 image_url 存着。summarize 那步要一次看多条,
 # 靠 AI 把几百行 JSON 在工具参数里传来传去不现实,也容易被截断 ——
-# 和 _SEARCHED_ASSETS 一个路数,存在这边,只传编号。
+# 和 _SEARCHED_ASSETS_BY_USER 一个路数,存在这边,只传编号。
 # **按人分开**:B 归纳"共同点"时混进 A 拆过的素材,得出的结论就是错的
 # (和 _CREATIVE_PLANS_BY_USER 同理)。
 _CREATIVE_MODELS_BY_USER: dict[str, dict[str, dict]] = {}
@@ -1495,7 +1512,7 @@ def decompose_creative(image_url: str) -> dict:
 
     拆出来的结果会记下来,之后可以用 summarize_creative_patterns 把多条一起归纳。
     """
-    info = _SEARCHED_ASSETS.get((image_url or "").strip())
+    info = _searched().get((image_url or "").strip())
     if not info:
         return {"error": "这个素材地址不在搜索结果里。请先用 search_competitor_ads 或 "
                          "search_stock_creatives 搜一次,再拆解结果里的素材。"}
@@ -1641,7 +1658,7 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
     plans = [_plans()[i] for i in picked]
     cost = len(plans) * cr.COST_PER_IMAGE_USD
     action = {
-        "type": "make_creatives", "seq": _seq(),
+        "type": "make_creatives", "user_id": CURRENT_USER_ID.get(), "seq": _seq(),
         # **把方案原样快照进待办**,不能只存编号:编号指向的是"当前这份方案列表",
         # 用户还没点头就又归纳了一次的话,列表整个换掉,同样的编号指到别的方案 ——
         # 报价时给他看的是 A,真做出来、真花钱的是 B。快照之后"看到什么就做什么"。
@@ -1654,8 +1671,7 @@ def propose_make_creatives(variants: str = "", ad_account_id: str = "") -> dict:
         return {"action_id": dup, "note": f"这一单之前已经登记过,编号 {dup},不要重复登记,"
                                           f"用户同意后直接 confirm_action('{dup}')。"}
     aid = uuid.uuid4().hex[:8]
-    PENDING_ACTIONS[aid] = action
-    _save_actions()
+    _put_action(aid, action)
     print(f"[write-op] 登记待办 {aid}: 生成 {len(plans)} 张广告图", flush=True)
     return {
         "action_id": aid,
@@ -1780,7 +1796,7 @@ def use_found_creative(image_url: str, ad_account_id: str = "") -> dict:
     image_url 原样传进来。
     只接受**搜索结果里出现过的**地址(防止编造链接)。
     """
-    info = _SEARCHED_ASSETS.get((image_url or "").strip())
+    info = _searched().get((image_url or "").strip())
     if not info:
         return {"error": "这个素材地址不在刚才的搜索结果里。请先调 search_stock_creatives 搜一次,"
                          "让用户从结果里选,不要自己拼地址。"}
@@ -1879,6 +1895,24 @@ def _executed() -> list:
     return lst
 
 
+def _put_action(action_id: str, candidate: dict) -> None:
+    """把待办放进保险箱 —— **所有登记都必须走这里**。
+
+    在这儿把一次关:少了 `user_id` 就直接抛,让它在开发时就炸出来,
+    而不是安安静静地留个洞。实测漏过三种(update_status / create_campaign /
+    make_creatives),后果是**归属检查形同虚设**(B 能执行也能删掉 A 的待办),
+    外加 `_find_duplicate` 会把 A 和 B 的同样请求**归并成同一条**。
+    这两样都不会报错,只会在某天变成"我的待办怎么没了/怎么被别人执行了"。
+    """
+    if "user_id" not in candidate:
+        raise RuntimeError(
+            f"待办 {candidate.get('type')!r} 登记时没带 user_id —— "
+            "归属检查和查重都会失效,不许登记。请在 candidate 里加上 "
+            '"user_id": CURRENT_USER_ID.get()')
+    PENDING_ACTIONS[action_id] = candidate
+    _save_actions()
+
+
 def _find_duplicate(candidate: dict) -> str:
     """保险箱里是否已有内容完全相同的待办?有就返回它的编号(比较时忽略序号)。
     防止 AI 忘了编号就反复登记同一件事,陷入"永远在确认"的死循环。"""
@@ -1896,12 +1930,21 @@ CREATIVE_ACTION_TYPES = ("make_creatives",)
 LANDING_ACTION_TYPES = ("publish_landing_pages", "swap_campaign_landers")
 
 
+# 「工作室 → 它管哪几类待办」,同样收成一份。投放助手不走这张表(它全都能看/能确认)。
+STUDIO_ACTION_TYPES: dict[str, tuple] = {
+    "creative": CREATIVE_ACTION_TYPES,
+    "landing": LANDING_ACTION_TYPES,
+}
+
+
 def _mode_action_types(mode: str) -> tuple:
-    if mode == "creative":
-        return CREATIVE_ACTION_TYPES
-    if mode == "landing":
-        return LANDING_ACTION_TYPES
-    return ()
+    """这个工作室能看见 / 能确认哪些类型的待办。
+
+    **认不出的模式返回空**(什么都看不见、什么都确认不了),这是 fail-closed 的一半;
+    另一半在 `_tool_call` —— 那道闸门不能再硬编码 ("creative","landing"),
+    否则模式一改名它整段跳过,归属检查跟着失效。
+    """
+    return STUDIO_ACTION_TYPES.get(mode, ())
 
 
 
@@ -1910,7 +1953,7 @@ def list_pending_actions() -> dict:
     用户确认后若不记得编号,先用这个查,严禁重新登记同一件事。"""
     mode = CURRENT_CHAT_MODE.get()
     visible = [(aid, a) for aid, a in PENDING_ACTIONS.items()
-               if mode == "campaign"
+               if mode in FULL_ACCESS_MODES
                or a.get("type") in _mode_action_types(mode)]
     return {"pending_actions": [
         {"action_id": aid, **{k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b")
@@ -1954,15 +1997,15 @@ def propose_status_change(level: str, object_id: str, status: str, name: str = "
     candidate = {
         "type": "update_status",
         "level": level, "object_id": str(object_id), "status": status,
-        "name": name, "targets": targets, "seq": _seq(),
+        "name": name, "targets": targets,
+        "user_id": CURRENT_USER_ID.get(), "seq": _seq(),
     }
     dup = _find_duplicate(candidate)
     if dup:
         return {"action_id": dup, "note": f"这件事此前已登记过(编号 {dup}),无需重复登记。"
                                           f"请向用户复述内容并附上编号,用户同意后直接调 confirm_action。"}
     action_id = uuid.uuid4().hex[:8]
-    PENDING_ACTIONS[action_id] = candidate
-    _save_actions()
+    _put_action(action_id, candidate)
     print(f"[write-op] 登记待办 {action_id}: {status} × {len(targets)} 个对象", flush=True)
     verb = "开启" if status == "ON" else "暂停"
     listed = [f"{verb} {t['level']}「{t['name'] or t['id']}」(id={t['id']})" for t in targets]
@@ -2128,15 +2171,14 @@ def propose_create_campaign(
         "call_to_action": call_to_action or "Learn More",
         "asset_url": asset_url,
         "asset_filename": asset_filename,
-        "seq": _seq(),
+        "user_id": CURRENT_USER_ID.get(), "seq": _seq(),
     }
     dup = _find_duplicate(candidate)
     if dup:
         return {"action_id": dup, "note": f"这单建广告此前已登记过(编号 {dup}),无需重复登记。"
                                           f"请向用户复述整单内容并附上编号,用户同意后直接调 confirm_action。"}
     action_id = uuid.uuid4().hex[:8]
-    PENDING_ACTIONS[action_id] = candidate
-    _save_actions()
+    _put_action(action_id, candidate)
     print(f"[write-op] 登记建广告待办 {action_id}: {candidate['campaign_name']}", flush=True)
     a = PENDING_ACTIONS[action_id]
     budget_word = "日预算" if budget_type == "DAILY" else "总预算"
@@ -2359,8 +2401,7 @@ def propose_schedule(kind: str, when: str, level: str, object_id: str,
         return {"action_id": dup, "note": f"这件事此前已登记过(编号 {dup}),无需重复登记。"
                                           f"请向用户复述并附上编号,用户同意后直接调 confirm_action。"}
     action_id = uuid.uuid4().hex[:8]
-    PENDING_ACTIONS[action_id] = candidate
-    _save_actions()
+    _put_action(action_id, candidate)
     verb = "开启" if status == "ON" else "暂停"
     when_desc = f"每天 {when}(北京时间)" if kind == "daily" else sched.both_times(parsed)
     print(f"[write-op] 登记定时任务待办 {action_id}: {when_desc} {verb} {name or object_id}", flush=True)
@@ -2495,8 +2536,7 @@ def propose_swap_campaign_landers(campaign: str, lander_a_id: str, lander_b_id: 
         return {"action_id": dup,
                 "note": f"相同的待办已经存在(编号 {dup}),请复述后等用户确认,不要重新登记。"}
     action_id = uuid.uuid4().hex[:8]
-    PENDING_ACTIONS[action_id] = candidate
-    _save_actions()
+    _put_action(action_id, candidate)
     return {
         "action_id": action_id,
         "pending": {
@@ -2581,14 +2621,18 @@ def clickflare_publish_kit(campaign: str, cta_index: int = 1) -> dict:
 
 def list_schedules() -> dict:
     """查看所有定时任务(含下次执行时间、上次执行结果)。"""
-    tasks = sched.list_tasks()
+    tasks = sched.list_tasks(CURRENT_USER_ID.get())
     return {"schedules": tasks or "还没有任何定时任务",
             "now": sched.both_times(sched.now_beijing())}
 
 
 def cancel_schedule(task_id: str) -> dict:
-    """取消一个已生效的定时任务(用 list_schedules 查到的 task_id)。"""
-    return sched.cancel_task(task_id)
+    """取消一个已生效的定时任务(用 list_schedules 查到的 task_id)。
+
+    **只能取消自己登记的** —— 定时任务按人存,别人的碰不得。
+    取消完会把「取消掉的是什么」一起返回,请原样念给用户核对。
+    """
+    return sched.cancel_task(task_id, CURRENT_USER_ID.get())
 
 
 def cancel_action(action_id: str) -> dict:
@@ -2654,7 +2698,7 @@ from fastapi import File, UploadFile  # noqa: E402
 
 _CACHED_ACCOUNT_ID: dict = {}    # {token前12位: 账户id} —— 按 token 分桶,不同用户不串号
 # 素材地址 → 素材类型(IMAGE/GIF/VIDEO),上传时记下,建广告时查回
-# 素材地址 → 类型。和 _SEARCHED_ASSETS / 拆解结果一样要有上限,
+# 素材地址 → 类型。和 _SEARCHED_ASSETS_BY_USER / 拆解结果一样要有上限,
 # 否则进程活得越久它越大(长驻服务是按月算的)。
 _ASSET_TYPES: dict[str, str] = {}
 
@@ -3368,11 +3412,11 @@ def _system_prompt_now(lang: str = "zh") -> str:
                    "域名没定时先读取 Cloudflare 可选域名。发布必须先用 propose_publish_landing_pages 登记，"
                    "向用户完整复述，只有用户下一条消息明确确认后才能调用 confirm_action。")
 
-    if mode == "campaign" and sched.recent_runs:
+    if mode in FULL_ACCESS_MODES and sched.recent_runs:
         prompt += ("\n\n【定时任务最近的执行结果】(代码层记录,若用户还不知道,主动告知一句):\n"
                    + "\n".join(f"- {m}" for m in sched.recent_runs))
     visible_actions = {aid: a for aid, a in PENDING_ACTIONS.items()
-                       if mode == "campaign"
+                       if mode in FULL_ACCESS_MODES
                        or a.get("type") in _mode_action_types(mode)}
     if visible_actions:
         lines = []
@@ -3424,13 +3468,31 @@ LANDING_TOOL_NAMES = {
 }
 
 
+# 「工作室 → 它能用哪些工具」的**唯一事实来源**。加一个新工作室 = 这里加一行。
+STUDIO_TOOL_SETS: dict[str, set] = {
+    "creative": CREATIVE_TOOL_NAMES,
+    "landing": LANDING_TOOL_NAMES,
+}
+# 全放行的模式。**必须是显式白名单** —— 不能靠「不是工作室就全放行」那种写法,
+# 那样任何拼错的、或者新加而忘了登记的模式名都会 fail-open 成全权限。
+FULL_ACCESS_MODES = frozenset({"campaign"})
+VALID_MODES = FULL_ACCESS_MODES | set(STUDIO_TOOL_SETS)
+# 所有工作室都放行的那几个工具 —— 认不出模式时按这个来(最严的一档)。
+# 用交集而不是「挑最短的那个名单」:名单以后怎么变,这里都还是最严的。
+STRICTEST_TOOL_NAMES = frozenset(set.intersection(*(set(v) for v in STUDIO_TOOL_SETS.values())))
+
+
 def _tool_allowed(name: str) -> bool:
     mode = CURRENT_CHAT_MODE.get()
-    if mode == "creative":
-        return name in CREATIVE_TOOL_NAMES
-    if mode == "landing":
-        return name in LANDING_TOOL_NAMES
-    return True
+    if mode in FULL_ACCESS_MODES:
+        return True
+    names = STUDIO_TOOL_SETS.get(mode)
+    if names is None:
+        # **认不出的模式按最严的来,绝不当成投放助手。**
+        # 这样「加了工作室忘了登记」会立刻表现成"这个工作室什么都干不了"(一眼看见),
+        # 而不是"这个工作室什么都能干"(悄无声息,直到出事)。
+        names = STRICTEST_TOOL_NAMES
+    return name in names
 
 
 STUDIO_LABELS = {"campaign": "投放助手", "creative": "素材工作室", "landing": "落地页工作室"}
@@ -3484,11 +3546,13 @@ def _tool_call(name: str, args: dict) -> dict:
             f"「{what}」这件事当前工作室做不了,"
             f"要在「{STUDIO_LABELS.get(_studio_that_can(name))}」里做。",
             say=f"帮我{what}")
-    if CURRENT_CHAT_MODE.get() in ("creative", "landing") and name in ("confirm_action", "cancel_action"):
+    if CURRENT_CHAT_MODE.get() not in FULL_ACCESS_MODES and name in ("confirm_action", "cancel_action"):
         action = PENDING_ACTIONS.get(str(args.get("action_id") or ""))
         allowed = _mode_action_types(CURRENT_CHAT_MODE.get())
         if not action or action.get("type") not in allowed:
-            label = "素材" if CURRENT_CHAT_MODE.get() == "creative" else "落地页"
+            # 标签也从那份表里取 —— 写死 "creative"/"落地页" 的话,
+            # 加一个工作室这里就会指鹿为马(说成「落地页工作室」)
+            label = STUDIO_LABELS.get(CURRENT_CHAT_MODE.get(), "当前")
             if not action:
                 return {"error": f"找不到待办 {args.get('action_id') or '(空)'}"
                                  "(可能已执行/已取消,或编号有误)。"
@@ -4615,7 +4679,14 @@ def _new_turn(mode: str = "campaign") -> None:
     CURRENT_SEQ.set(seq)            # 保险丝:区分"登记"和"确认"是不是同一条消息
     CURRENT_EXECUTED.set([])        # 本轮"真实执行台账",一轮一份
     CURRENT_GUARD.set(LoopGuard())  # 本轮的刹车片(轮数 / 重复调用 / 花费),一轮一份
-    CURRENT_CHAT_MODE.set(mode if mode in {"campaign", "creative", "landing"} else "campaign")
+    # **认不出的模式不回落成 campaign。** 回落等于 fail-open:全部 36 个工具 +
+    # 能确认任何类型的待办。原样留着(截短防日志被撑爆),让下游的表查不到 →
+    # 自动落到最严的一档,并在日志里喊一声,好让"加了工作室忘了登记"当场暴露。
+    mode = str(mode or "campaign")[:32]
+    if mode not in VALID_MODES:
+        print(f"[warn] 认不出的工作室模式 {mode!r} —— 已按最严权限处理。"
+              f"新增工作室要同时登记进 STUDIO_TOOL_SETS / STUDIO_ACTION_TYPES", flush=True)
+    CURRENT_CHAT_MODE.set(mode)
     load_env_file()                 # 现读 .env:刚填的钥匙不用重启就生效
 
 
