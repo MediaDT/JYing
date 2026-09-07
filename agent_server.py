@@ -147,6 +147,7 @@ _TOOL_LABELS = {
     "get_report": "正在拉报表数据…",
     "propose_status_change": "正在登记开关待办…",
     "propose_create_campaign": "正在登记建广告待办…",
+    "propose_add_ad": "正在登记加广告待办…",
     "propose_schedule": "正在登记定时任务…",
     "confirm_action": "正在执行你确认的操作…",
     "cancel_action": "正在取消待办…",
@@ -2072,13 +2073,81 @@ def _campaign_name(type_word: str, ymd: str, existing_names: list) -> str:
     return f"NB-{type_word}-{ymd}-{mx + 1:02d}"
 
 
-def _child_names(type_word: str, ymd: str) -> tuple[str, str]:
-    """新建计划底下的第一个广告组和第一条广告的名字。
+def _child_names(type_word: str, ymd: str, n_ads: int = 1) -> tuple[str, list[str]]:
+    """新建计划底下的广告组名,和它下面 n_ads 条广告的名字。
 
-    我们一次只建一组一条,所以序号固定是 001 —— 计划是全新的,底下不可能已有别的。
+    **广告组序号固定 001** —— 计划是全新的,底下不可能已有别的。
+    **广告序号从 001 顺排到 00N**:一个广告组里放多条广告是常规做法
+    (同一份预算、同一批人群,只换素材和文案 —— 这才是干净的素材 A/B)。
+    原来这里写死只出一条 `001`,于是用户说「一个组下面两条广告」时**根本没有地方
+    能接住第二条**,模型只能退回去再建一整条计划 → 同一条计划底下两个同名广告组、
+    各带一份日预算(实测用户以为 $20/天,实际 $40/天)。
     广告多带一个 `AD-` 前缀,好和同序号的广告组区分开。
     """
-    return f"{ymd}-{type_word}-001", f"AD-{ymd}-{type_word}-001"
+    return (f"{ymd}-{type_word}-001",
+            [f"AD-{ymd}-{type_word}-{i:03d}" for i in range(1, max(1, n_ads) + 1)])
+
+
+def _norm_creatives(primary: dict, extras: list[dict] | None) -> tuple[list[dict], list[str]]:
+    """把「主素材 + extra_creatives」拉平成一个广告清单,并逐条体检。
+
+    **一条不合格就整单拒绝**,不做「跳过坏的、把好的建了」——
+    用户要的是两条,给他一条还报成功,他要到平台后台才发现少了一条。
+    """
+    problems: list[str] = []
+    out: list[dict] = []
+    for idx, c in enumerate([primary] + list(extras or []), start=1):
+        if not isinstance(c, dict):
+            problems.append(f"第{idx}条广告的素材格式不对(要一个对象,至少含 "
+                            f"asset_url / headline / description)")
+            continue
+        url = str(c.get("asset_url") or "").strip()
+        head = str(c.get("headline") or "").strip()
+        desc = str(c.get("description") or "").strip()
+        if not url.startswith("http"):
+            problems.append(f"第{idx}条广告的 asset_url 无效:请先让用户点 📎 上传素材")
+        # 90 字符和 3~90 是平台硬规则(实测),两条都要逐条查 —— 第二条超了照样整单被拒
+        if not 3 <= len(head) <= 90:
+            problems.append(f"第{idx}条广告的标题必须 3~90 个字符(现在 {len(head)} 个)")
+        if not 3 <= len(desc) <= 90:
+            problems.append(f"第{idx}条广告的描述必须 3~90 个字符(现在 {len(desc)} 个),请精简")
+        out.append({"asset_url": url, "headline": head, "description": desc,
+                    "asset_filename": str(c.get("asset_filename") or "").strip(),
+                    "call_to_action": str(c.get("call_to_action") or "").strip(),
+                    "brand_name": str(c.get("brand_name") or "").strip()})
+    # **两条一模一样 = 白花一份钱,而且从外面完全看不出来**(两条广告都正常在跑、
+    # 数据照常回来,只是分出来的"胜者"是噪音)。和落地页「A/B 两版内容相同直接拒」
+    # 是同一条规矩,只能在代码层拦。
+    seen: dict[tuple, int] = {}
+    for i, c in enumerate(out, start=1):
+        key = (c["asset_url"], c["headline"], c["description"])
+        if key in seen:
+            problems.append(f"第{seen[key]}条和第{i}条广告的素材、标题、描述完全一样 —— "
+                            f"同一个广告组里放两条一样的广告,等于花两份钱跑同一条,"
+                            f"而且数据上分不出胜负。请改掉其中一条,或者只留一条")
+        seen[key] = i
+    return out, problems
+
+
+def _existing_ad_set(ad_account_id: str, campaign_name: str, set_name: str) -> dict:
+    """这条计划底下有没有一个已经叫 `set_name` 的广告组?没有(或查不到)返回 {}。
+
+    **查不到就当没有** —— 网络抖一下不该拦住用户建广告;真撞上了执行那一步还会再查一次
+    (「两阶段流程里,校验只做在登记那一步是不够的」)。
+    接口不支持按父级过滤,只能拉回来按 campaignId 自己筛(和 get_delivery_tree 一样)。
+    """
+    try:
+        camp = next((c for c in nb.list_campaigns(ad_account_id, search=campaign_name).get("items") or []
+                     if str(c.get("name") or "") == campaign_name), None)
+        if not camp:
+            return {}
+        cid = str(camp.get("id"))
+        for one in nb.list_ad_sets(ad_account_id, limit=100).get("items") or []:
+            if str(one.get("campaignId")) == cid and str(one.get("name") or "") == set_name:
+                return {"id": str(one.get("id")), "campaign_id": cid}
+    except Exception:
+        pass
+    return {}
 
 
 # 建广告的默认值。**改这里就等于改向导的推荐值**,别把数字散写进提示词。
@@ -2102,6 +2171,7 @@ def propose_create_campaign(
     brand_name: str = "",
     call_to_action: str = DEFAULT_CALL_TO_ACTION,
     campaign_name: str = "",
+    extra_creatives: list[dict] | None = None,
 ) -> dict:
     """登记一个「新建广告」待办(不会立即执行!),会一次建好 campaign+ad set+ad 三层。
 
@@ -2114,7 +2184,19 @@ def propose_create_campaign(
     tracking_id(转化事件id)可选:不填则自动选用账户里的 submit form 或第一个事件。
     可选:asset_filename(素材文件名,用于判断图片/视频)、budget_type(DAILY日预算/TOTAL总预算)、
     brand_name(品牌名,默认用关键词)、call_to_action(按钮文案)、campaign_name(手动指定计划名)。
-    登记后必须用表格向用户完整复述整单,等用户下一条消息确认后再 confirm_action。
+
+    **一个广告组下面要放几条广告,用 `extra_creatives`。**
+    用户说「一个 ad set 下面两个 ad」「这两套素材各做一条广告」时,
+    第一套走上面的 asset_url/headline/description,**第二套起放进 extra_creatives**:
+    `[{"asset_url": "...", "headline": "...", "description": "...",
+       "asset_filename": "...", "call_to_action": "...", "brand_name": "..."}]`
+    广告名会自动排成 AD-年月日-类型-001 / -002 / …。
+    **绝不许为了放第二套素材去建第二条计划或第二个广告组** —— 那会变成两个同名广告组
+    各带一份日预算(用户以为花 $20,实际 $40),而且报表里两行同名分不出来。
+    计划和广告组**已经建好了**才想加广告,用 `propose_add_ad`,不要再调这个。
+
+    登记后必须用表格向用户完整复述整单(**每一条广告都要列出来**),
+    等用户下一条消息确认后再 confirm_action。
     """
     # ---- 参数体检:把明显的问题挡在登记之前 ----
     # 没给预算就用默认值(向导会把这个默认值和理由讲给用户听,用户能改)
@@ -2123,17 +2205,16 @@ def propose_create_campaign(
         budget_dollars = DEFAULT_BUDGET_DOLLARS
         used_default_budget = True
 
-    problems = []
+    # 每条广告各查一遍(第二条的标题超长也要整单拒,不能只查第一条)
+    ads, problems = _norm_creatives(
+        {"asset_url": asset_url, "headline": headline, "description": description,
+         "asset_filename": asset_filename, "call_to_action": call_to_action,
+         "brand_name": brand_name},
+        extra_creatives)
     if not landing_url.startswith("http"):
         problems.append("landing_url 必须是 http(s) 开头的完整链接")
-    if not asset_url.startswith("http"):
-        problems.append("asset_url 无效:请先让用户点 📎 上传素材")
     if budget_dollars < 10:
         problems.append("预算最低 $10")
-    if not 3 <= len(description) <= 90:
-        problems.append(f"广告描述必须 3~90 个字符(现在 {len(description)} 个),请精简")
-    if not 3 <= len(headline) <= 90:
-        problems.append(f"广告标题必须 3~90 个字符(现在 {len(headline)} 个)")
     if budget_type not in ("DAILY", "TOTAL"):
         problems.append("budget_type 只能是 DAILY 或 TOTAL")
     if not keyword.strip():
@@ -2153,24 +2234,46 @@ def propose_create_campaign(
     except Exception:
         existing = []            # 查不到就从 01 起,总比建不出来强
     c_name = campaign_name.strip() or _campaign_name(tw, ymd, existing)
-    set_name, ad_name = _child_names(tw, ymd)
+    set_name, ad_names = _child_names(tw, ymd, len(ads))
+    fallback_brand = (brand_name.strip() or keyword.strip().capitalize())[:40]
+    for one_name, c in zip(ad_names, ads):
+        c["name"] = one_name
+        c["brand_name"] = (c["brand_name"] or fallback_brand)[:40]
+        c["call_to_action"] = c["call_to_action"] or call_to_action or "Learn More"
+
+    # **同名广告组已经存在就别再建一个。** 复用已有计划时(用户又提了一次同类型同日期的),
+    # 执行那一步会「同名计划已存在,直接复用」,而广告组是**无条件新建**的 ——
+    # 结果是同一条计划底下两个同名广告组、各带一份日预算。这是免费的检查,排在登记之前。
+    clash = _existing_ad_set(ad_account_id, c_name, set_name)
+    if clash:
+        return {
+            "error": f"计划「{c_name}」底下已经有一个叫「{set_name}」的广告组(id {clash['id']}),"
+                     f"不能再建一个同名的。",
+            "两条路,请让用户选": {
+                "A·把这些素材加进已有的那个组":
+                    f"改调 propose_add_ad(ad_set_id=\"{clash['id']}\", ...),"
+                    f"广告序号会接着组里已有的往下排(已有 001 就叫 002)。**多数情况选这个。**",
+                "B·确实要另起一个广告组":
+                    "请用户给这个新组换个名字(传 campaign_name 换一条计划,"
+                    "或者明确说要用哪个序号),不能和已有的同名。",
+            },
+            "note": "**绝不许硬着头皮再建一个同名的。** 两个同名广告组各带一份日预算 —— "
+                    "用户以为在花 $20,实际是 $40,而且报表里只有一列 name,"
+                    "两行同名他一眼分不出哪个是哪个。**请把上面两条原样问给用户,让他选。**",
+        }
 
     candidate = {
         "type": "create_campaign",
         "ad_account_id": ad_account_id,
         "campaign_name": c_name,
         "ad_set_name": set_name,
-        "ad_name": ad_name,
+        # **存快照,不存「指向当前状态的引用」**:报价时给用户看的就是这几条,
+        # 执行时照着这份做(见坑表「待办里要存快照」那条)。
+        "ads": ads,
         "landing_url": landing_url,
         "budget_type": budget_type,
         "budget_cents": int(round(budget_dollars * 100)),
         "tracking_id": tracking_id,
-        "headline": headline,
-        "description": description,
-        "brand_name": (brand_name.strip() or keyword.strip().capitalize())[:40],
-        "call_to_action": call_to_action or "Learn More",
-        "asset_url": asset_url,
-        "asset_filename": asset_filename,
         "user_id": CURRENT_USER_ID.get(), "seq": _seq(),
     }
     dup = _find_duplicate(candidate)
@@ -2185,37 +2288,87 @@ def propose_create_campaign(
     return {
         "action_id": action_id,
         "pending": {
-            "计划名": a["campaign_name"], "广告组名": a["ad_set_name"], "广告名": a["ad_name"],
+            "计划名": a["campaign_name"], "广告组名": a["ad_set_name"],
+            "这个广告组下面要建几条广告": len(a["ads"]),
             "落地页": landing_url,
-            budget_word: f"${budget_dollars:g}" + ("(系统默认值)" if used_default_budget else ""),
+            budget_word: f"${budget_dollars:g}" + ("(系统默认值)" if used_default_budget else "")
+                         + ("(**整个广告组共用这一份,不是每条广告各一份**)" if len(a["ads"]) > 1 else ""),
             "出价": "自动(MAX_CONVERSION)",
             "转化事件": tracking_id or "自动选用(优先 submit form)",
-            "标题": headline, "描述": description, "品牌名": a["brand_name"],
-            "按钮": a["call_to_action"], "素材": asset_filename or asset_url,
+            "广告": [{"广告名": c["name"], "标题": c["headline"], "描述": c["description"],
+                     "品牌名": c["brand_name"], "按钮": c["call_to_action"],
+                     "素材": c["asset_filename"] or c["asset_url"]} for c in a["ads"]],
             "创建后状态": "暂停(OFF),需用户确认无误后再开启",
         },
         # 哪些值是系统替用户定的,要明确列出来 —— 用户有权知道"我没说过的东西是谁定的"
         "defaults_used": ([f"{budget_word} ${budget_dollars:g}"] if used_default_budget else [])
                          + ([] if tracking_id else ["转化事件(自动选 submit form)"]),
         "note": ("已登记待办,尚未执行。请用表格向用户完整复述以上内容并等确认。"
+                 "**「广告」里有几条就列几条,一条都不许省** —— 用户是按条数验收的。"
                  "**凡是 defaults_used 里列出的项,要额外说明这是系统默认值、为什么这么定、"
                  "以及用户可以直接说要改成多少。**"),
     }
 
 
+def _pick_id(data: dict, *keys: str) -> str:
+    """从平台返回里把 id 抠出来(有时包在 `object` 里)。"""
+    for k in keys:
+        v = data.get(k)
+        if v not in (None, ""):
+            return str(v)
+    nested = data.get("object")
+    if isinstance(nested, dict):
+        return _pick_id(nested, *keys)
+    return ""
+
+
+def _ads_from(a: dict) -> list[dict]:
+    """待办里的广告清单。
+
+    **老待办回落成一条广告** —— 保险箱是持久化的(重启不丢),里面完全可能躺着
+    「支持多条广告」之前登记的单子,那种只有单套 ad_name/headline/asset_url 字段。
+    和生图待办「老待办没快照时回落按编号取」是同一个兼容分支。
+    """
+    if a.get("ads"):
+        return a["ads"]
+    return [{"name": a.get("ad_name"), "asset_url": a.get("asset_url"),
+             "asset_filename": a.get("asset_filename") or "",
+             "headline": a.get("headline"), "description": a.get("description"),
+             "call_to_action": a.get("call_to_action") or "Learn More",
+             "brand_name": a.get("brand_name") or ""}]
+
+
+def _create_ads(ad_set_id: str, ads: list[dict], landing_url: str) -> tuple[list, list]:
+    """在**一个**广告组底下逐条建广告。返回 (建成的, 失败的)。
+
+    **有失败的必须点名说是哪一条**,不能笼统说「部分失败」—— 用户是按条数验收的,
+    少建了一条他要到平台后台才发现(和「三层开关有失败的要点名」同一条规矩)。
+    """
+    made: list = []
+    failed: list = []
+    for c in ads:
+        creative = {
+            # 类型优先用上传时记下的(权威),查不到才退回按文件名猜
+            "type": _ASSET_TYPES.get(c["asset_url"]) or nb.creative_type_of(c.get("asset_filename") or "", ""),
+            "headline": c["headline"],
+            "description": c["description"],
+            "callToAction": c.get("call_to_action") or "Learn More",
+            "brandName": c.get("brand_name") or "",
+            "assetUrl": c["asset_url"],
+            "clickThroughUrl": landing_url,
+        }
+        try:
+            ad = nb.create_ad(ad_set_id, c["name"], creative, status="OFF")
+            made.append({"id": _pick_id(ad, "id", "adId"), "name": c["name"]})
+        except Exception as e:
+            failed.append({"name": c["name"], "error": str(e)})
+    return made, failed
+
+
 def _execute_create_campaign(a: dict) -> dict:
     """真正执行三层创建。任何一层失败都如实汇报已建成的部分(都处于暂停态,无风险)。"""
     created: dict = {}
-
-    def _pick_id(data: dict, *keys: str) -> str:
-        for k in keys:
-            v = data.get(k)
-            if v not in (None, ""):
-                return str(v)
-        nested = data.get("object")
-        if isinstance(nested, dict):
-            return _pick_id(nested, *keys)
-        return ""
+    ads = _ads_from(a)
 
     # 第一层:campaign(幂等:同名的已存在就直接复用,支持"上次建到一半"接着建)
     campaign_id = ""
@@ -2245,7 +2398,26 @@ def _execute_create_campaign(a: dict) -> dict:
         tracking_id = str(chosen.get("id") or "")
         created["conversion_event"] = f"自动选用「{chosen.get('name')}」(id={tracking_id});如需换事件请告知"
 
-    # 第二层:ad set
+    # 第二层:ad set。
+    # **建之前再查一次同名的。** 登记时查过一次,但待办会在保险箱里躺着(落盘、重启不丢),
+    # 期间用户完全可能又建了一条同名计划/广告组 ——「两阶段流程里,校验只做在登记那一步
+    # 是不够的」。漏掉这一次复查的代价:同一条计划底下两个同名广告组、各带一份日预算。
+    try:
+        for one in nb.list_ad_sets(a["ad_account_id"], limit=100).get("items") or []:
+            if str(one.get("campaignId")) == str(campaign_id) \
+                    and str(one.get("name") or "") == a["ad_set_name"]:
+                return {
+                    "error": f"计划「{a['campaign_name']}」底下已经有一个叫「{a['ad_set_name']}」"
+                             f"的广告组(id {one.get('id')})了,**这次一个东西都没建**。",
+                    "created_so_far": created,
+                    "note": "**别再建一个同名的** —— 两个同名广告组各带一份日预算,"
+                            "用户以为花 $20 实际花 $40,而且报表里两行同名分不出来。"
+                            f"要把这些素材加进已有的那个组,改用 "
+                            f"propose_add_ad(ad_set_id=\"{one.get('id')}\", ...) 重新登记;"
+                            "确实要另起一个组,请让用户给它换个名字。",
+                }
+    except Exception:
+        pass          # 查不到就照建 —— 不能让一次网络抖动把用户挡在建广告门外
     try:
         adset = nb.create_ad_set(
             campaign_id, a["ad_set_name"], a["budget_type"],
@@ -2259,22 +2431,16 @@ def _execute_create_campaign(a: dict) -> dict:
     if not ad_set_id:
         return {"error": "NewsBreak 未返回 ad set id", "created_so_far": created}
 
-    # 第三层:ad(带创意)
-    creative = {
-        # 类型优先用上传时记下的(权威),查不到才退回按文件名猜
-        "type": _ASSET_TYPES.get(a["asset_url"]) or nb.creative_type_of(a.get("asset_filename", ""), ""),
-        "headline": a["headline"],
-        "description": a["description"],
-        "callToAction": a["call_to_action"],
-        "brandName": a["brand_name"],
-        "assetUrl": a["asset_url"],
-        "clickThroughUrl": a["landing_url"],
-    }
-    try:
-        ad = nb.create_ad(ad_set_id, a["ad_name"], creative, status="OFF")
-        created["ad"] = {"id": _pick_id(ad, "id", "adId"), "name": a["ad_name"]}
-    except Exception as e:
-        return {"error": f"广告创建失败: {e}", "created_so_far": created,
+    # 第三层:ad(带创意)。**一个广告组下面可以有多条** —— 同一份预算、同一批人群,
+    # 只换素材和文案,这才是干净的素材 A/B。
+    made, failed = _create_ads(ad_set_id, ads, a["landing_url"])
+    created["ads"] = made
+    if failed:
+        created["没建成的广告"] = failed
+    if not made:
+        return {"error": "广告全部创建失败:"
+                         + ";".join(f"{f['name']}: {f['error']}" for f in failed),
+                "created_so_far": created,
                 "note": "campaign 和 ad set 已建好(暂停态),可修正素材/文案后单独补建广告"}
 
     # 建完不轻信:立刻去平台回查一遍,确认真的存在
@@ -2285,15 +2451,260 @@ def _execute_create_campaign(a: dict) -> dict:
     except Exception:
         created["platform_verified"] = "(回查失败,请人工核实)"
 
-    return {"done": True, "created": created,
-            "note": "三层已全部创建,均为暂停(OFF)状态;提醒用户核对后说「开启 xxx」即可开始投放"}
+    return {
+        "done": True, "created": created,
+        "建成的广告条数": f"{len(made)} / {len(ads)}",
+        "note": ("三层已全部创建,均为暂停(OFF)状态;提醒用户核对后说「开启 xxx」即可开始投放。"
+                 + (f"⚠️ 有 {len(failed)} 条广告没建成(见「没建成的广告」),"
+                    "**必须点名告诉用户是哪几条、为什么**,别让他以为全都建好了。"
+                    if failed else "")
+                 + ("这个广告组下面有多条广告,它们**共用同一份日预算**,"
+                    "不是每条各一份 —— 请顺带讲给用户听。" if len(made) > 1 else "")),
+    }
+
+
+def _next_ad_names(ad_account_id: str, ad_set_name: str, n: int) -> list[str]:
+    """这个广告组里接下来 n 条广告该叫什么。
+
+    序号**不是凭空数的**:扫账户里同前缀的广告名,取最大序号 +1(和 `_campaign_name`
+    同一个套路)。这样中途删过、上次已经加到 003、或者用户自己在后台加过,都不会撞名。
+    前缀由广告组名去掉尾部序号得到:`260904-Window-001` → `AD-260904-Window-`。
+    **按整个账户扫而不是只扫这个组**:同一支计划里两个组(`-001`/`-002`)的广告
+    前缀是一样的,只看本组会和兄弟组撞名,而报表里只有一列 name,撞了就分不出来。
+    """
+    import re as _re
+    base = _re.sub(r"-\d+$", "", str(ad_set_name or "").strip())
+    prefix = f"AD-{base}-" if base else "AD-"
+    used = []
+    try:
+        rows = nb.list_ads(ad_account_id, search=prefix, limit=200).get("items") or []
+    except Exception:
+        rows = []          # 查不到就从 001 起,总比建不出来强(和计划名同一条)
+    pat = _re.compile(_re.escape(prefix) + r"(\d+)$", _re.I)
+    for row in rows:
+        m = pat.match(str(row.get("name") or "").strip())
+        if m:
+            try:
+                used.append(int(m.group(1)))
+            except ValueError:
+                pass
+    start = (max(used) + 1) if used else 1
+    return [f"{prefix}{i:03d}" for i in range(start, start + max(1, n))]
+
+
+def propose_add_ad(ad_set_id: str, asset_url: str, headline: str, description: str,
+                   ad_account_id: str = "", asset_filename: str = "",
+                   call_to_action: str = "", brand_name: str = "",
+                   landing_url: str = "", ad_name: str = "",
+                   extra_creatives: list[dict] | None = None) -> dict:
+    """登记一个「往**已经建好的广告组**里再加广告」的待办(不会立即执行!)。
+
+    **什么时候用它**:计划和广告组已经存在了,用户又想放一条新素材/新文案进去 ——
+    「把第二套素材也加进 260904-Window-001」「这个组里再加一条广告」。
+
+    **绝不许拿 propose_create_campaign 干这件事。** 那个是从头建一整条计划;
+    对着同一支计划再跑一次,会在它底下多出**一个同名广告组**、多花一份日预算
+    (实测:用户以为 $20/天,实际 $40/天,而且报表里两行同名分不出来)。
+
+    必填:ad_set_id(广告组 id —— 用 get_delivery_tree(campaign_id) 查,别按名字猜)、
+    asset_url、headline(3~90字)、description(3~90字)。
+    可选:landing_url(**不填就自动沿用这个组里已有广告的落地页**)、
+    ad_name(不填就按命名规范接着已有序号往下排:已有 001 就叫 002)、
+    call_to_action / brand_name(不填就沿用组里已有广告的)、
+    extra_creatives(一次加好几条,格式和 propose_create_campaign 的一样)。
+
+    登记后必须用表格向用户完整复述(**每一条广告都要列**),
+    等用户下一条消息确认后再 confirm_action。
+    """
+    try:
+        acct = ad_account_id or _default_ad_account_id()
+    except Exception as e:
+        return {"error": str(e)}
+
+    wanted = str(ad_set_id or "").strip()
+    if not wanted:
+        return {"error": "要先知道加进哪个广告组。请用 get_delivery_tree(campaign_id) "
+                         "把计划底下的广告组列给用户,让他指名一个。"}
+    try:
+        sets = nb.list_ad_sets(acct, limit=100).get("items") or []
+    except Exception as e:
+        return {"error": f"查广告组失败: {e}"}
+    the_set = next((x for x in sets if str(x.get("id")) == wanted), None)
+    if not the_set:
+        return {"error": f"这个账户下找不到 id 为 {wanted} 的广告组。",
+                "note": "**这不是权限问题,也不是接口限制** —— 就是这个 id 不对。"
+                        "**绝不许改用名字去猜是哪个组**(同名的广告组可能不止一个,"
+                        "猜错就把广告加到别的组里去了)。请用 get_delivery_tree(campaign_id) "
+                        "把结构列给用户,让他指名。"}
+
+    # 落地页 / 按钮 / 品牌名:能从组里已有的广告借就借,别再问用户一遍,也别让模型编
+    try:
+        siblings = [x for x in (nb.list_ads(acct, limit=200).get("items") or [])
+                    if str(x.get("adSetId")) == wanted]
+    except Exception:
+        siblings = []
+    borrowed = []
+    for x in siblings:
+        content = (x.get("creative") or {}).get("content") or {}
+        if not landing_url and str(content.get("clickThroughUrl") or "").startswith("http"):
+            landing_url = str(content.get("clickThroughUrl"))
+            borrowed.append("落地页")
+        if not call_to_action and content.get("callToAction"):
+            call_to_action = str(content.get("callToAction"))
+            borrowed.append("按钮文案")
+        if not brand_name and content.get("brandName"):
+            brand_name = str(content.get("brandName"))
+            borrowed.append("品牌名")
+    if not str(landing_url or "").startswith("http"):
+        return {"error": "缺落地页链接:这个广告组里现有的广告也没读到落地页,"
+                         "请让用户给一个 http(s) 开头的完整链接(landing_url)。",
+                "note": "**绝不许自己编一个落地页地址**,哪怕只是举例。"}
+
+    ads, problems = _norm_creatives(
+        {"asset_url": asset_url, "headline": headline, "description": description,
+         "asset_filename": asset_filename, "call_to_action": call_to_action,
+         "brand_name": brand_name},
+        extra_creatives)
+    if problems:
+        return {"error": ";".join(problems)}
+
+    names = _next_ad_names(acct, str(the_set.get("name") or ""), len(ads))
+    if ad_name.strip():
+        names[0] = ad_name.strip()          # 用户自己指定的名字优先
+    taken = {str(x.get("name") or "") for x in siblings}
+    for one_name, c in zip(names, ads):
+        c["name"] = one_name
+        c["brand_name"] = (c["brand_name"] or brand_name or "")[:40]
+        c["call_to_action"] = c["call_to_action"] or call_to_action or "Learn More"
+    dup = [c["name"] for c in ads if c["name"] in taken]
+    if dup:
+        return {"error": "这些广告名在这个组里已经有了:" + "、".join(dup) + "。",
+                "note": "报表里只有一列 name,两行同名用户分不出哪个是哪个。"
+                        "**不传 ad_name 就会自动接着已有序号往下排**,建议直接重登一次。"}
+
+    candidate = {
+        "type": "add_ad",
+        "ad_account_id": acct,
+        "ad_set_id": wanted,
+        "ad_set_name": the_set.get("name"),
+        "campaign_id": str(the_set.get("campaignId") or ""),
+        "campaign_name": str(the_set.get("campaignName") or ""),
+        "landing_url": landing_url,
+        "ads": ads,                     # 快照:报给用户看的就是这几条
+        "user_id": CURRENT_USER_ID.get(), "seq": _seq(),
+    }
+    dupe = _find_duplicate(candidate)
+    if dupe:
+        return {"action_id": dupe, "note": f"这件事此前已登记过(编号 {dupe}),无需重复登记。"
+                                           f"请向用户复述并附上编号,用户同意后直接调 confirm_action。"}
+    action_id = uuid.uuid4().hex[:8]
+    _put_action(action_id, candidate)
+    print(f"[write-op] 登记加广告待办 {action_id}: {candidate['ad_set_name']} +{len(ads)} 条", flush=True)
+    return {
+        "action_id": action_id,
+        "pending": {
+            "加进哪个广告组": f"{the_set.get('name')}(id {wanted})",
+            "所属计划": candidate["campaign_name"] or f"(id {candidate['campaign_id']})",
+            "这次要加几条广告": len(ads),
+            "落地页": landing_url,
+            "广告": [{"广告名": c["name"], "标题": c["headline"], "描述": c["description"],
+                     "品牌名": c["brand_name"], "按钮": c["call_to_action"],
+                     "素材": c["asset_filename"] or c["asset_url"]} for c in ads],
+            "创建后状态": "暂停(OFF),需用户确认无误后再开启",
+            "预算": "**不动** —— 新广告和组里已有的广告共用这个组原来的预算,不会多花一份",
+        },
+        # 借来的值也要如实说,用户有权知道"我没说过的东西是谁定的"(和 defaults_used 同一条)
+        "defaults_used": [f"{w}(沿用这个广告组里已有广告的)" for w in dict.fromkeys(borrowed)],
+        "note": ("已登记待办,尚未执行。请用表格向用户完整复述,**「广告」里有几条就列几条**。"
+                 "**凡是 defaults_used 里列出的项,要说明这是沿用已有广告的、他可以改。**"),
+    }
+
+
+def _execute_add_ad(a: dict) -> dict:
+    """真往已有广告组里加广告。
+
+    执行前**再查一次**广告组还在不在、名字撞没撞 —— 待办可能在保险箱里躺了很久
+    (「两阶段流程里,校验只做在登记那一步是不够的」)。
+    """
+    acct = a["ad_account_id"]
+    ads = _ads_from(a)
+    try:
+        exists = any(str(x.get("id")) == a["ad_set_id"]
+                     for x in (nb.list_ad_sets(acct, limit=100).get("items") or []))
+    except Exception as e:
+        return {"error": f"查广告组失败,**什么都没建**: {e}"}
+    if not exists:
+        return {"error": f"广告组 {a['ad_set_id']}(登记时叫「{a.get('ad_set_name')}」)现在找不到了,"
+                         f"可能已经被删掉。**什么都没建。**"}
+    try:
+        taken = {str(x.get("name") or "") for x in (nb.list_ads(acct, limit=200).get("items") or [])
+                 if str(x.get("adSetId")) == a["ad_set_id"]}
+    except Exception:
+        taken = set()
+    clash = [c["name"] for c in ads if c["name"] in taken]
+    if clash:
+        return {"error": "这些广告名已经被占用了:" + "、".join(clash) + "。**什么都没建。**",
+                "note": "登记之后这个组里又多了广告。**别硬着头皮建同名的** —— "
+                        "报表里只有一列 name,两行同名分不出来。请重新登记一次"
+                        "(不传 ad_name,序号会自动接着往下排)。"}
+
+    made, failed = _create_ads(a["ad_set_id"], ads, a["landing_url"])
+    out = {"done": bool(made), "加进了": f"{a.get('ad_set_name')}(id {a['ad_set_id']})",
+           "建成的广告": made, "建成的广告条数": f"{len(made)} / {len(ads)}"}
+    if failed:
+        out["没建成的广告"] = failed
+    if not made:
+        return {"error": "广告全部创建失败:"
+                         + ";".join(f"{f['name']}: {f['error']}" for f in failed),
+                "note": "**什么都没建成。** 请把每条的原因原样告诉用户。"}
+    out["note"] = ("已加进这个广告组,状态是暂停(OFF)。"
+                   "**这个组的预算没有变** —— 新广告和组里原有的广告共用同一份,不会多花一份钱。"
+                   + (f"⚠️ 有 {len(failed)} 条没建成(见「没建成的广告」),"
+                      "**必须点名告诉用户是哪几条、为什么**。" if failed else ""))
+    return out
+
+
+def _no_such_action(action_id: str, verb: str = "执行") -> dict:
+    """「这个编号不存在」—— **话要说死,别留想象空间。**
+
+    原来返回的是「找不到待办 xxx(**可能已执行/已取消,或 id 有误**)」。
+    2026-09-07 线上实测:模型自己**编了一个编号** `0d51be21` 报给用户(服务器日志里
+    从来没有这个编号),用户回「确认」,拿到这句话之后它没有承认编错,而是从括号里
+    那三个「可能」里挑了个最不用担责的,对用户说「**系统的待办编号由于超时或刷新
+    重置了**」,然后重新登记了一条 —— 用户完全看不出是编的。
+
+    这和「拒绝必须带出路,否则模型会自己编一个」是同一条,只是这次编的是**理由**:
+    **含糊的措辞本身就是编造的素材。** 所以两层:
+      ① 明说系统根本没有「重置编号」这回事,把那条退路堵死;
+      ② **把真实存在的编号列出来** —— 正确答案摆在眼前就不用编了
+        (和落地页预览 404 页面直接列出盘上真实文件是同一个做法)。
+    只列**他自己的、这个工作室管得了的**:别人的编号不该给他看,更不该指使他去确认。
+    """
+    mine = []
+    mode = CURRENT_CHAT_MODE.get()
+    me = CURRENT_USER_ID.get()
+    for aid, one in PENDING_ACTIONS.items():
+        if one.get("user_id") and me and one.get("user_id") != me:
+            continue
+        if mode in FULL_ACCESS_MODES or one.get("type") in _mode_action_types(mode):
+            mine.append(f"{aid}({one.get('type')})")
+    return {
+        "error": f"没有编号为 {action_id or '(空)'} 的待办,什么都没{verb}。",
+        "现在保险箱里有": mine or "(一条都没有)",
+        "note": ("**系统不会「重置」「刷新」或「超时作废」待办编号 —— 从来没有这回事。**"
+                 "绝不许对用户说「编号超时了 / 被重置了 / 被刷新了」这类话。"
+                 "编号不存在只有两种可能:记错了,或者根本没登记过。**这也不是权限问题。**"
+                 + ("请从「现在保险箱里有」里挑正确的那个编号再试。" if mine else
+                    "保险箱是空的,说明这件事还没登记过 —— 请重新登记,并如实告诉用户"
+                    "「刚才那个编号是我记错了」,别编一个系统故障出来。")),
+    }
 
 
 def confirm_action(action_id: str) -> dict:
     """执行之前登记的待办。只能在用户于新消息中明确同意后调用。"""
     action = PENDING_ACTIONS.get(action_id)
     if not action:
-        return {"error": f"找不到待办 {action_id}(可能已执行/已取消,或 id 有误)"}
+        return _no_such_action(action_id, "执行")
     if action.get("user_id") and CURRENT_USER_ID.get() and action.get("user_id") != CURRENT_USER_ID.get():
         return {"error": "这个待办属于另一个账号，不能执行。"}
     if action["seq"] == _seq():
@@ -2309,6 +2720,8 @@ def confirm_action(action_id: str) -> dict:
                 "done": True, "detail": f"定时任务已生效(编号 {r['task_id']}),首次执行:{r.get('next_run', '-')}"}
         elif action.get("type") == "create_campaign":
             result = _execute_create_campaign(action)
+        elif action["type"] == "add_ad":
+            result = _execute_add_ad(action)
         elif action.get("type") == "make_creatives":
             result = _execute_make_creatives(action)
         elif action.get("type") == "publish_landing_pages":
@@ -2647,7 +3060,11 @@ def cancel_action(action_id: str) -> dict:
     removed = PENDING_ACTIONS.pop(action_id, None)
     _save_actions()
     print(f"[write-op] 取消待办 {action_id}: {'成功' if removed else '不存在'}", flush=True)
-    return {"cancelled": removed is not None, "action_id": action_id}
+    if not removed:
+        # 取消一个不存在的编号也要把话说死 —— 否则模型同样会编个「已经自动过期了」
+        # 糊弄过去,而用户以为那件事被取消了,其实待办还好端端躺在保险箱里。
+        return _no_such_action(action_id, "取消")
+    return {"cancelled": True, "action_id": action_id}
 
 
 # 工具清单:递给 Gemini,它会自动挑选、自动执行、自动把结果编进回答
@@ -2660,7 +3077,7 @@ NEWSBREAK_TOOLS = [
     propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
-    propose_status_change, propose_create_campaign, confirm_action, cancel_action,
+    propose_status_change, propose_create_campaign, propose_add_ad, confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
     propose_schedule, list_schedules, cancel_schedule,
 ]
@@ -3554,9 +3971,9 @@ def _tool_call(name: str, args: dict) -> dict:
             # 加一个工作室这里就会指鹿为马(说成「落地页工作室」)
             label = STUDIO_LABELS.get(CURRENT_CHAT_MODE.get(), "当前")
             if not action:
-                return {"error": f"找不到待办 {args.get('action_id') or '(空)'}"
-                                 "(可能已执行/已取消,或编号有误)。"
-                                 "**这不是权限问题**,可以调 list_pending_actions 查一下现有编号。"}
+                # 措辞和 confirm_action 用同一份 —— 两处话不一样的话,模型会挑软的那句来编
+                return _no_such_action(str(args.get("action_id") or ""),
+                                       "执行" if name == "confirm_action" else "取消")
             # 待办确实存在,只是不归这个工作室管 —— 同样给去处,别让用户卡住
             return {
                 "handoff": {
@@ -4001,8 +4418,39 @@ OPENAI_TOOL_SCHEMAS = [
               "budget_type": {"type": "string", "enum": ["DAILY", "TOTAL"], "description": "DAILY=日预算 TOTAL=总预算"},
               "brand_name": {"type": "string", "description": "品牌名,默认用关键词"},
               "call_to_action": {"type": "string", "description": "按钮文案,默认 Learn More"},
-              "campaign_name": {"type": "string", "description": "手动指定计划名(可选)"}},
+              "campaign_name": {"type": "string", "description": "手动指定计划名(可选)"},
+              "extra_creatives": {
+                  "type": "array",
+                  "description": "**一个广告组下面要放第二条、第三条广告时用这个**(用户说"
+                                 "「一个 ad set 下面两个 ad」「这两套素材各做一条」)。第一套走上面的 "
+                                 "asset_url/headline/description,第二套起放这里,广告名自动排 001/002/…。"
+                                 "**绝不许为了放第二套素材去建第二条计划或第二个广告组**",
+                  "items": {"type": "object", "properties": {
+                      "asset_url": {"type": "string"}, "headline": {"type": "string"},
+                      "description": {"type": "string"}, "asset_filename": {"type": "string"},
+                      "call_to_action": {"type": "string"}, "brand_name": {"type": "string"}}}}},
              ["ad_account_id", "keyword", "landing_url", "headline", "description", "asset_url"]),
+    _oa_tool("propose_add_ad",
+             "往**已经建好的广告组**里再加一条(或几条)广告。"
+             "用户说「把第二套素材也加进 xxx 广告组」「这个组里再加一条广告」时用它。"
+             "**绝不许改用 propose_create_campaign 干这件事** —— 那会在同一支计划底下"
+             "多出一个同名广告组、多花一份日预算,而且报表里两行同名分不出来。不会立即执行,须用户确认",
+             {"ad_set_id": {"type": "string", "description": "广告组 id,用 get_delivery_tree 查,别按名字猜"},
+              "asset_url": {"type": "string", "description": "素材地址(用户上传后系统消息里的 assetUrl)"},
+              "headline": {"type": "string", "description": "广告标题,3~90 字符"},
+              "description": {"type": "string", "description": "广告描述,3~90 字符"},
+              "ad_account_id": _ID,
+              "asset_filename": {"type": "string", "description": "素材文件名(用于判断图片/视频)"},
+              "call_to_action": {"type": "string", "description": "按钮文案(可选,不填沿用组里已有广告的)"},
+              "brand_name": {"type": "string", "description": "品牌名(可选,不填沿用组里已有广告的)"},
+              "landing_url": {"type": "string", "description": "落地页(可选,**不填就自动沿用组里已有广告的**)"},
+              "ad_name": {"type": "string", "description": "广告名(可选,不填就接着已有序号往下排:已有 001 就叫 002)"},
+              "extra_creatives": {"type": "array", "description": "一次加多条时,第二条起放这里",
+                                  "items": {"type": "object", "properties": {
+                                      "asset_url": {"type": "string"}, "headline": {"type": "string"},
+                                      "description": {"type": "string"}, "asset_filename": {"type": "string"},
+                                      "call_to_action": {"type": "string"}, "brand_name": {"type": "string"}}}}},
+             ["ad_set_id", "asset_url", "headline", "description"]),
     _oa_tool("confirm_action", "执行之前登记的待办(仅在用户新消息中明确同意后)", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("cancel_action", "取消之前登记的待办", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("list_pending_actions", "查看保险箱里所有已登记待确认的待办(含编号);忘了编号用它查,严禁重复登记", {}, []),
@@ -4210,7 +4658,8 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     decompose_creative, summarize_creative_patterns,
     use_found_creative, propose_make_creatives, get_delivery_tree,
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads,
-    get_report, propose_status_change, propose_create_campaign, confirm_action, cancel_action,
+    get_report, propose_status_change, propose_create_campaign, propose_add_ad,
+    confirm_action, cancel_action,
     list_pending_actions, list_conversion_events,
     propose_schedule, list_schedules, cancel_schedule,
 ]}

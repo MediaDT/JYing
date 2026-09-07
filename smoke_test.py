@@ -1767,13 +1767,21 @@ def test_validation():
         if got != "NB-Roof-260817-01":
             bad.append(f"去年的同月同日被算进来了:{got}(应为 01)")
 
-        sn, an = srv._child_names("Roof", "260817")
+        sn, ad_names = srv._child_names("Roof", "260817")
         if sn != "260817-Roof-001":
             bad.append(f"广告组命名不对:{sn}")
-        if an != "AD-260817-Roof-001":
-            bad.append(f"广告命名不对:{an}(广告要带 AD- 前缀)")
-        if sn == an:
+        if ad_names != ["AD-260817-Roof-001"]:
+            bad.append(f"广告命名不对:{ad_names}(广告要带 AD- 前缀)")
+        if sn in ad_names:
             bad.append("广告组和广告同名 —— 按名字搜就分不出是哪一层")
+        # **一个广告组下面多条广告,序号要顺排。** 这里原来写死只出一条 001,
+        # 于是用户说「一个组下面两条广告」时没地方接住第二条,模型只能再建一整条计划
+        # → 两个同名广告组各带一份预算(实测 $20 变 $40)。
+        sn3, three = srv._child_names("Roof", "260817", 3)
+        if three != ["AD-260817-Roof-001", "AD-260817-Roof-002", "AD-260817-Roof-003"]:
+            bad.append(f"多条广告的序号没顺排:{three}")
+        if sn3 != sn:
+            bad.append(f"多建几条广告不该改变广告组名:{sn3}")
         return bad or True
 
     def t_naming_end_to_end():
@@ -1795,8 +1803,11 @@ def test_validation():
                 bad.append(f"计划名不合规范:{p.get('计划名')}")
             if p.get("广告组名") != f"{ymd}-Smoketype-001":
                 bad.append(f"广告组名不合规范:{p.get('广告组名')}")
-            if p.get("广告名") != f"AD-{ymd}-Smoketype-001":
-                bad.append(f"广告名不合规范:{p.get('广告名')}")
+            ads = p.get("广告") or []
+            if len(ads) != 1:
+                bad.append(f"只给了一套素材,却排了 {len(ads)} 条广告")
+            elif ads[0].get("广告名") != f"AD-{ymd}-Smoketype-001":
+                bad.append(f"广告名不合规范:{ads[0].get('广告名')}")
         finally:
             srv.cancel_action(r.get("action_id", ""))
         return bad or True
@@ -3637,11 +3648,15 @@ def test_studio_handoff():
     def missing_action_is_not_a_permission_error():
         # 编号打错和「没有权限」是两码事,混着报会让人跑去切工作室,而真正该做的是查编号
         r = gate("landing", "confirm_action", {"action_id": "no-such-id"})
-        err = str(r.get("error") or "")
         if r.get("handoff"):
             return "编号不存在却给了一张移交单,切过去照样找不到"
-        if "不是权限问题" not in err:
-            return "没说清这不是权限问题:%r" % err[:80]
+        # **查整个返回,不只是 error 字段** —— 模型看到的是整个 dict,
+        # 说明白话的那句现在在 note 里(和「现在保险箱里有」一起)。
+        blob = str(r)
+        if "不是权限问题" not in blob:
+            return "没说清这不是权限问题:%r" % blob[:120]
+        if "重置" not in blob:
+            return "没堵死「编号被重置了」这条编造路径:%r" % blob[:120]
         return True
     check("编号根本不存在 → 说清「不是权限问题」,别指错路", missing_action_is_not_a_permission_error)
 
@@ -3935,6 +3950,371 @@ def test_per_user_holes():
                 return "agent_server 里还有 %s(第 %r 行附近)—— 全放行档要走 FULL_ACCESS_MODES" % (bad, where)
         return True
     check("模式判断收成一份表,全文件都不再硬编码 campaign", one_source_of_truth)
+
+
+# ============ 3.52 一个广告组里放几条广告 ============
+
+def test_multi_ad():
+    """2026-09-04 线上实测:用户给了两套素材、明说「一个 ad set 下面两个 ad」,
+    结果建出来的是**两个同名广告组**,各带一份日预算($20 → $40),
+    报表里两行同名分不出来。根因是代码里压根没有「多条广告」这个概念。
+    """
+    import contextlib
+    import agent_server as srv
+
+    print("\n【3.52】一个广告组里放几条广告")
+
+    @contextlib.contextmanager
+    def platform(campaigns=(), ad_sets=(), ads=()):
+        """把平台那几个接口换成假的。**建东西的调用全部记进 calls**,
+        测试查的是「到底往平台发了几个广告组、几条广告」——不是查返回话术。"""
+        calls = {"ad_set": [], "ad": [], "campaign": []}
+        real = {k: getattr(srv.nb, k) for k in
+                ("list_campaigns", "list_ad_sets", "list_ads", "list_events",
+                 "create_campaign", "create_ad_set", "create_ad")}
+        srv.nb.list_campaigns = lambda acct, **k: {"items": list(campaigns)}
+        srv.nb.list_ad_sets = lambda acct, **k: {"items": list(ad_sets)}
+        srv.nb.list_ads = lambda acct, **k: {"items": list(ads)}
+        srv.nb.list_events = lambda acct: [{"id": "ev1", "eventType": "submit_form", "name": "submit"}]
+        srv.nb.create_campaign = lambda acct, name, status="OFF": (
+            calls["campaign"].append(name) or {"id": "C1"})
+        srv.nb.create_ad_set = lambda cid, name, bt, bc, tid, status="OFF": (
+            calls["ad_set"].append(name) or {"id": "S1"})
+        srv.nb.create_ad = lambda sid, name, creative, status="OFF": (
+            calls["ad"].append((sid, name, creative.get("assetUrl"))) or {"id": "A" + str(len(calls["ad"]))})
+        try:
+            yield calls
+        finally:
+            for k, v in real.items():
+                setattr(srv.nb, k, v)
+
+    def clean_box(fn):
+        """保险箱是持久化的,测试造的待办不能留在用户的箱子里。"""
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            return fn()
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+
+    BASE = dict(ad_account_id="ACC", keyword="window",
+                landing_url="https://example.com/lp", headline="Headline One",
+                description="Description one here.", asset_url="https://cdn.example.com/1.jpg")
+    SECOND = {"asset_url": "https://cdn.example.com/2.jpg",
+              "headline": "Headline Two", "description": "Description two here."}
+
+    # ---------- 登记:两套素材 = 一个组两条广告 ----------
+    def two_creatives_one_group():
+        def go():
+            with platform():
+                srv._new_turn()
+                r = srv.propose_create_campaign(extra_creatives=[SECOND], **BASE)
+            if "error" in r:
+                return "登记失败:%s" % r["error"]
+            ads = (r.get("pending") or {}).get("广告") or []
+            if len(ads) != 2:
+                return "两套素材只排了 %d 条广告" % len(ads)
+            names = [a["广告名"] for a in ads]
+            if not (names[0].endswith("-001") and names[1].endswith("-002")):
+                return "广告序号没顺排:%r" % names
+            if names[0][:-3] != names[1][:-3]:
+                return "两条广告不在同一套命名下:%r" % names
+            a = srv.PENDING_ACTIONS[r["action_id"]]
+            if len({c["asset_url"] for c in a["ads"]}) != 2:
+                return "两条广告用的是同一张图 —— 素材没跟着排"
+            return True
+        return clean_box(go)
+    check("两套素材 → 一个广告组下面两条广告(001/002)", two_creatives_one_group)
+
+    def second_creative_is_checked_too():
+        # 原来只查第一条:第二条标题超长会一路放行,到平台才报错
+        def go():
+            with platform():
+                srv._new_turn()
+                r = srv.propose_create_campaign(
+                    extra_creatives=[dict(SECOND, headline="x" * 200)], **BASE)
+            if "error" not in r:
+                return "第二条标题 200 字符也放行了"
+            if "第2条" not in r["error"]:
+                return "报错没点名是第几条:%r" % r["error"][:90]
+            return True
+        return clean_box(go)
+    check("第二条广告的文案一样要体检,而且点名第几条", second_creative_is_checked_too)
+
+    def identical_ads_refused():
+        # 同一个组里两条一模一样 = 花两份钱跑同一条,而且数据上分不出胜负
+        def go():
+            with platform():
+                srv._new_turn()
+                r = srv.propose_create_campaign(
+                    extra_creatives=[{"asset_url": BASE["asset_url"],
+                                      "headline": BASE["headline"],
+                                      "description": BASE["description"]}], **BASE)
+            if "error" not in r:
+                return "两条完全一样也让登记了"
+            return True
+        return clean_box(go)
+    check("同一个组里两条一模一样的广告 → 拒绝登记", identical_ads_refused)
+
+    # ---------- 执行:只建一个组,逐条建广告 ----------
+    def execute_makes_one_group_n_ads():
+        def go():
+            with platform() as calls:
+                srv._new_turn()
+                r = srv.propose_create_campaign(extra_creatives=[SECOND], **BASE)
+                out = srv._execute_create_campaign(srv.PENDING_ACTIONS[r["action_id"]])
+            if not out.get("done"):
+                return "执行失败:%r" % str(out)[:140]
+            if len(calls["ad_set"]) != 1:
+                return "建了 %d 个广告组(应该只有 1 个)" % len(calls["ad_set"])
+            if len(calls["ad"]) != 2:
+                return "建了 %d 条广告(应该 2 条)" % len(calls["ad"])
+            if len({c[0] for c in calls["ad"]}) != 1:
+                return "两条广告没挂在同一个广告组下:%r" % [c[0] for c in calls["ad"]]
+            if len({c[2] for c in calls["ad"]}) != 2:
+                return "两条广告用了同一张图:%r" % [c[2] for c in calls["ad"]]
+            return True
+        return clean_box(go)
+    check("执行时:一个广告组 + 两条广告,不是两个广告组", execute_makes_one_group_n_ads)
+
+    def legacy_action_still_runs():
+        # 保险箱是持久化的,里面可能躺着「支持多条」之前登记的老待办(只有单套字段)
+        old = {"type": "create_campaign", "ad_account_id": "ACC", "campaign_name": "NB-Old-260101-01",
+               "ad_set_name": "260101-Old-001", "ad_name": "AD-260101-Old-001",
+               "landing_url": "https://example.com/lp", "budget_type": "DAILY",
+               "budget_cents": 2000, "tracking_id": "ev1", "headline": "Old Headline",
+               "description": "Old description.", "brand_name": "Old",
+               "call_to_action": "Learn More", "asset_url": "https://cdn.example.com/old.jpg",
+               "asset_filename": "old.jpg", "user_id": "", "seq": 1}
+        with platform() as calls:
+            out = srv._execute_create_campaign(old)
+        if not out.get("done"):
+            return "老待办执行不了了:%r" % str(out)[:140]
+        if [c[1] for c in calls["ad"]] != ["AD-260101-Old-001"]:
+            return "老待办没回落成一条广告:%r" % [c[1] for c in calls["ad"]]
+        return True
+    check("加多素材之前登记的老待办照样能执行", legacy_action_still_runs)
+
+    # ---------- 同名广告组:登记时拦、执行时再拦一次 ----------
+    # **广告组名是按今天的日期算的**(北京时间),不能在测试里写死一个日期 ——
+    # 写死的话名字对不上,这条测试会变成「什么都没测到还全绿」。
+    import scheduler as _sched
+    _YMD = _sched.now_beijing().strftime("%y%m%d")
+    EXIST_C = {"id": "C1", "name": f"NB-Window-{_YMD}-01"}
+    EXIST_S = {"id": "S9", "campaignId": "C1", "name": f"{_YMD}-Window-001"}
+
+    def refuse_duplicate_group_at_propose():
+        def go():
+            with platform(campaigns=[EXIST_C], ad_sets=[EXIST_S]):
+                srv._new_turn()
+                r = srv.propose_create_campaign(campaign_name=EXIST_C["name"],
+                                                extra_creatives=[SECOND], **BASE)
+            if "error" not in r:
+                return "同名广告组已存在,却照样登记了"
+            if "propose_add_ad" not in str(r):
+                return "拒了但没告诉他该改用 propose_add_ad:%r" % str(r)[:140]
+            return True
+        return clean_box(go)
+    check("同名广告组已存在 → 登记时就拦住,并指向 propose_add_ad", refuse_duplicate_group_at_propose)
+
+    def refuse_duplicate_group_at_execute():
+        # **登记时查过不代表执行时还成立** —— 待办会在保险箱里躺很久
+        a = {"type": "create_campaign", "ad_account_id": "ACC",
+             "campaign_name": EXIST_C["name"], "ad_set_name": EXIST_S["name"],
+             "ads": [{"name": f"AD-{_YMD}-Window-001", "asset_url": "https://cdn.example.com/1.jpg",
+                      "asset_filename": "", "headline": "H", "description": "Desc here.",
+                      "call_to_action": "Learn More", "brand_name": "W"}],
+             "landing_url": "https://example.com/lp", "budget_type": "DAILY",
+             "budget_cents": 2000, "tracking_id": "ev1", "user_id": "", "seq": 1}
+        with platform(campaigns=[EXIST_C], ad_sets=[EXIST_S]) as calls:
+            out = srv._execute_create_campaign(a)
+        if "error" not in out:
+            return "执行时没再查一遍,又建了一个同名广告组"
+        if calls["ad_set"] or calls["ad"]:
+            return "说拒绝了却还是建了东西:%r" % calls
+        return True
+    check("执行时再查一次同名广告组,登记之后才出现的也拦得住", refuse_duplicate_group_at_execute)
+
+    # ---------- propose_add_ad ----------
+    SET = {"id": "S1", "campaignId": "C1", "name": "260904-Window-001",
+           "campaignName": "NB-Window-260904-01"}
+    SIB = {"id": "A1", "adSetId": "S1", "name": "AD-260904-Window-001",
+           "creative": {"content": {"clickThroughUrl": "https://real.example.com/lp",
+                                    "callToAction": "Get Quote", "brandName": "PAA"}}}
+
+    def add_ad_numbers_and_borrows():
+        def go():
+            with platform(ad_sets=[SET], ads=[SIB]):
+                srv._new_turn()
+                r = srv.propose_add_ad(ad_set_id="S1", asset_url="https://cdn.example.com/2.jpg",
+                                       headline="Second Headline",
+                                       description="Second description here.",
+                                       ad_account_id="ACC")
+            if "error" in r:
+                return "登记失败:%s" % r["error"]
+            pend = r["pending"]
+            if pend["广告"][0]["广告名"] != "AD-260904-Window-002":
+                return "序号没接着已有的往下排:%r" % pend["广告"][0]["广告名"]
+            if pend["落地页"] != "https://real.example.com/lp":
+                return "没沿用组里已有广告的落地页:%r" % pend["落地页"]
+            if pend["广告"][0]["按钮"] != "Get Quote":
+                return "没沿用已有的按钮文案:%r" % pend["广告"][0]["按钮"]
+            if not any("落地页" in x for x in (r.get("defaults_used") or [])):
+                return "借来的值没如实列进 defaults_used:%r" % r.get("defaults_used")
+            return True
+        return clean_box(go)
+    check("加广告:序号接着已有的排,落地页/按钮沿用同组已有广告", add_ad_numbers_and_borrows)
+
+    def add_ad_really_reuses_the_group():
+        def go():
+            with platform(ad_sets=[SET], ads=[SIB]) as calls:
+                srv._new_turn()
+                r = srv.propose_add_ad(ad_set_id="S1", asset_url="https://cdn.example.com/2.jpg",
+                                       headline="Second Headline",
+                                       description="Second description here.", ad_account_id="ACC")
+                out = srv._execute_add_ad(srv.PENDING_ACTIONS[r["action_id"]])
+            if not out.get("done"):
+                return "执行失败:%r" % str(out)[:140]
+            if calls["ad_set"] or calls["campaign"]:
+                return "居然又建了广告组/计划:%r" % calls
+            if [c[0] for c in calls["ad"]] != ["S1"]:
+                return "没挂进原来那个广告组:%r" % [c[0] for c in calls["ad"]]
+            return True
+        return clean_box(go)
+    check("加广告:一个广告组/计划都不新建,只往原组里挂", add_ad_really_reuses_the_group)
+
+    def add_ad_bad_id_refuses_guessing():
+        with platform(ad_sets=[SET], ads=[SIB]):
+            srv._new_turn()
+            r = srv.propose_add_ad(ad_set_id="不存在", asset_url="https://cdn.example.com/2.jpg",
+                                   headline="H2", description="Desc two here.", ad_account_id="ACC")
+        if "error" not in r:
+            return "id 不对也让登记了"
+        blob = str(r)
+        if "绝不许改用名字去猜" not in blob:
+            return "报错没堵死「改用名字去猜」这条退路:%r" % blob[:140]
+        if "权限" not in blob:
+            return "没说清这不是权限问题 —— 模型会转述成「我没有权限」"
+        return "错" if "接口限制" in blob.replace("也不是接口限制", "") else True
+    check("加广告:广告组 id 不对 → 明确报错,禁止改用名字猜", add_ad_bad_id_refuses_guessing)
+
+    def add_ad_name_clash_refused():
+        def go():
+            with platform(ad_sets=[SET], ads=[SIB]) as calls:
+                srv._new_turn()
+                r = srv.propose_add_ad(ad_set_id="S1", asset_url="https://cdn.example.com/2.jpg",
+                                       headline="H2", description="Desc two here.",
+                                       ad_account_id="ACC", ad_name="AD-260904-Window-001")
+                if "error" not in r:
+                    return "重名也让登记了"
+                # 执行那一层也要拦:登记之后用户可能自己在后台加了广告
+                a = {"type": "add_ad", "ad_account_id": "ACC", "ad_set_id": "S1",
+                     "ad_set_name": "260904-Window-001", "landing_url": "https://x.com/lp",
+                     "ads": [{"name": "AD-260904-Window-001", "asset_url": "https://cdn.example.com/2.jpg",
+                              "asset_filename": "", "headline": "H2", "description": "Desc two here.",
+                              "call_to_action": "Learn More", "brand_name": "W"}],
+                     "user_id": "", "seq": 1}
+                out = srv._execute_add_ad(a)
+                if "error" not in out:
+                    return "执行时没拦住重名"
+                if calls["ad"]:
+                    return "说拒绝了却还是建了广告"
+            return True
+        return clean_box(go)
+    check("加广告:广告名撞了就停下,登记和执行两层都拦", add_ad_name_clash_refused)
+
+
+# ============ 3.53 「找不到待办」不许留想象空间 ============
+
+def test_no_such_action():
+    """线上实测:模型**编了一个待办编号**报给用户(日志里从来没有那个编号),
+    用户回「确认」,代码回「找不到待办 xxx(可能已执行/已取消,或 id 有误)」——
+    它从括号里那三个「可能」里挑了个最不用担责的,对用户说
+    「**系统的待办编号由于超时或刷新重置了**」,然后重新登记了一条。用户看不出是编的。
+    """
+    import contextvars
+    import agent_server as srv
+
+    print("\n【3.53】「找不到待办」的措辞")
+
+    def as_user(uid, mode, fn):
+        def go():
+            srv.CURRENT_USER_ID.set(uid)
+            srv.CURRENT_SEQ.set(1)
+            srv.CURRENT_CHAT_MODE.set(mode)
+            return fn()
+        return contextvars.Context().run(go)
+
+    def wording_leaves_no_room():
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        srv.PENDING_ACTIONS["real1234"] = {"type": "create_campaign", "seq": 1, "user_id": "uA"}
+        try:
+            blob = str(as_user("uA", "campaign", lambda: srv.confirm_action("0d51be21")))
+            # ① 把「超时/重置/刷新」这条退路堵死
+            for word in ("重置", "刷新", "超时"):
+                if word not in blob:
+                    return "报错里没有明说系统不会「%s」编号 —— 模型会拿它编理由" % word
+            # ②「可能已执行/已取消,或 id 有误」这类含糊措辞**本身就是编造的素材** ——
+            # 模型正是从这三个「可能」里挑了个最不用担责的,说成「编号被重置了」。
+            # 光在 note 里补一句「不会重置」不够:两句话打架时它会引用软的那句。
+            for vague in ("可能已执行", "或 id 有误", "可能已取消"):
+                if vague in blob:
+                    return "报错里还留着含糊措辞「%s」—— 模型会拿它编理由" % vague
+            # ③ 真实编号要列出来:有正确答案摆着就不用编了
+            if "real1234" not in blob:
+                return "没把真实存在的编号列出来:%r" % blob[:160]
+            if "权限" not in blob:
+                return "没说清这不是权限问题"
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+        return True
+    check("编号不存在:明说系统不会重置编号,并列出真实编号", wording_leaves_no_room)
+
+    def does_not_leak_other_peoples_ids():
+        # 列编号是为了让他挑对一个,不是把别人的待办摊开
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        srv.PENDING_ACTIONS["hisonly1"] = {"type": "create_campaign", "seq": 1, "user_id": "uA"}
+        try:
+            blob = str(as_user("uB", "campaign", lambda: srv.confirm_action("nope0000")))
+            if "hisonly1" in blob:
+                return "把别人的待办编号列给他看了 —— 还等于指使他去确认别人的东西"
+            if "一条都没有" not in blob:
+                return "该说「一条都没有」的:%r" % blob[:160]
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+        return True
+    check("列编号只列自己的,不把别人的摊出来", does_not_leak_other_peoples_ids)
+
+    def all_three_doors_say_the_same():
+        # 三个入口话不一样的话,模型会挑最软的那句来编
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            blobs = {
+                "confirm_action": str(as_user("uA", "campaign", lambda: srv.confirm_action("zzz00000"))),
+                "cancel_action": str(as_user("uA", "campaign", lambda: srv.cancel_action("zzz00000"))),
+                # **闸门在 _tool_call 里,直接调函数测不到**(和跨工作室那条同一类)
+                "_tool_call": str(as_user("landing" and "uA", "landing",
+                                          lambda: srv._tool_call("confirm_action",
+                                                                 {"action_id": "zzz00000"}))),
+            }
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+        for where, blob in blobs.items():
+            if "重置" not in blob:
+                return "%s 那条路上的措辞没堵死「编号被重置了」:%r" % (where, blob[:140])
+        return True
+    check("confirm / cancel / 工具分发层,三处用同一份措辞", all_three_doors_say_the_same)
 
 
 def test_per_user_isolation():
@@ -4374,6 +4754,8 @@ if __name__ == "__main__":
     test_oal_filter_combo()
     test_studio_handoff()
     test_per_user_holes()
+    test_multi_ad()
+    test_no_such_action()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()
