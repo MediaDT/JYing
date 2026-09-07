@@ -2992,18 +2992,38 @@ def test_fake_preview_link():
     def independent_of_pending_box():
         # 老的 ⚠️ 拆穿章只在"保险箱里还有待办"时才触发。编链接和待办**毫无关系**,
         # 挂在那条分支下面的话,保险箱一空就什么都抓不到了。
-        import inspect
-        src = _no_comments(inspect.getsource(srv._finalize))
-        if src.count("_fake_preview_note(") < 3:
-            return "只在部分分支上查了链接,另外的分支漏掉"
+        # **真走三条分支验行为**,不数源码里调了几次 —— 那几处后来收成了一个
+        # `_extra_notes()`,数次数就会为错误的原因红/绿(改法本身是对的)。
+        import contextvars
         saved = dict(srv.PENDING_ACTIONS)
-        srv.PENDING_ACTIONS.clear()          # 保险箱空着,老的拆穿章不会触发
+        reply = "好了:/landing-pages/" + made_up
+
+        def run(box, executed):
+            def go():
+                srv.CURRENT_USER_ID.set("u")
+                srv.CURRENT_CHAT_MODE.set("campaign")
+                srv.CURRENT_EXECUTED.set(executed)
+                return srv._finalize(reply, "zh")["reply"]
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(box)
+            return contextvars.Context().run(go)
+
         try:
-            out = srv._finalize("好了:/landing-pages/" + made_up, "zh")["reply"]
+            branches = {
+                "本轮真执行过": run({}, [{"id": "aabbccdd", "ok": True, "detail": "x"}]),
+                "保险箱里还有待办": run({"aabbccdd": {"type": "create_campaign", "seq": 1,
+                                                "user_id": "u"}}, []),
+                "两条都没命中": run({}, []),
+            }
         finally:
+            srv.PENDING_ACTIONS.clear()
             srv.PENDING_ACTIONS.update(saved)
-        if made_up not in out or "系统核验" not in out:
-            return "保险箱空着时抓不到编造的链接"
+            srv._save_actions()
+        for name, out in branches.items():
+            # **判据要挑只属于「预览拆穿章」的那句。** 用「系统核验」判会被
+            # 🔒 执行钢印满足、用 made_up 判会被回复原文满足 —— 两个都撞过。
+            if "上面给出的预览链接" not in out:
+                return "「%s」这条分支上抓不到编造的链接" % name
         return True
     check("保险箱空着也照样抓(和待办无关)", independent_of_pending_box)
 
@@ -4936,6 +4956,211 @@ def test_landing_images():
     check("预览配图:读不到别人的,目录穿越也拦住", t_preview_images_are_per_user)
 
 
+# ============ 3.57 编造的待办编号 / 花费闸门算错账 ============
+
+def test_fabricated_action_ids():
+    """2026-09-07 线上实测两次,一次比一次糟:
+
+    · 素材工作室里模型**根本没登记**(闸门给了移交单,它收到了也没照做),
+      却编了个编号 `a21c97ef` 让用户「回复确认」;确认后 confirm_action 说没这个编号,
+      它又编了个理由(「**临时归档**原因没对上」)和第二个编号 —— 服务器日志里
+      这两个编号一次都没出现过。
+    · 发布待办 `36085d6c` **已经执行成功了**,它还说「**文件路径索引的小意外**,
+      重新发起发布登记」并给了个编的编号,用户以为还要再发一次。
+
+    上一轮的修法是在报错话术里禁掉「超时/重置/刷新」这几个词 —— **没用**,
+    模型换个说法就绕过去了。**禁词表是打地鼠。** 只能代码回查。
+    """
+    import contextvars
+    import agent_server as srv
+
+    print("\n【3.57】编造的待办编号")
+
+    def finalize(uid, reply, box=None, executed=None, mode="campaign", lang="zh"):
+        def go():
+            srv.CURRENT_USER_ID.set(uid)
+            srv.CURRENT_CHAT_MODE.set(mode)
+            srv.CURRENT_EXECUTED.set(executed or [])
+            return srv._finalize(reply, lang)["reply"]
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        srv.PENDING_ACTIONS.update(box or {})
+        try:
+            return contextvars.Context().run(go)
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+
+    def made_up_id_gets_called_out():
+        # 线上原话
+        out = finalize("u", "刚才的待办编号由于临时归档原因没对上,我已经为你重新规范登记了。\n"
+                            "新待办编号: 99c08d08\n请问确认执行创建吗?")
+        if "99c08d08" not in out.split("---")[-1]:
+            return "编造的编号没被拆穿 —— 用户会回「确认」,然后什么也不会发生"
+        tail = out.split("---")[-1]
+        if "别按它说的回复" not in tail:
+            return "拆穿了但没告诉用户「别确认」:%r" % tail[:100]
+        return True
+    check("回复里编造的待办编号 → 当场拆穿", made_up_id_gets_called_out)
+
+    def real_id_is_not_flagged():
+        out = finalize("u", "待办编号: aabbccdd,请核对后回复确认。",
+                       box={"aabbccdd": {"type": "create_campaign", "seq": 1, "user_id": "u"}})
+        if "根本不存在" in out:
+            return "真实存在的编号被误判成编的了 —— 用户会不敢确认"
+        return True
+    check("真实存在的编号不许误报", real_id_is_not_flagged)
+
+    def just_executed_id_is_not_flagged():
+        # 刚执行掉的编号已经不在保险箱里了,但提它是**诚实**的
+        out = finalize("u", "待办 36085d6c 已经执行成功,页面发布好了。",
+                       executed=[{"id": "36085d6c", "ok": True, "detail": "发布成功"}])
+        if "根本不存在" in out:
+            return "本轮刚执行掉的编号被误判成编的了"
+        return True
+    check("本轮刚执行掉的编号不许误报", just_executed_id_is_not_flagged)
+
+    def preview_filename_not_mistaken_for_id():
+        # 预览文件名就是 `<8位十六进制>-xxx.html`,裸搜 8 位十六进制会把它当成编号
+        out = finalize("u", "预览在这里:/landing-pages/c1caa5db-version-a---x.html")
+        # **判据要挑只属于「待办拆穿章」的那句** —— 预览拆穿章里也有「不存在」,
+        # 用模糊的词判会撞车(这条第一版就撞了,看着像误伤其实没有)。
+        if "上面提到的待办编号" in out:
+            return "把预览文件名误当成待办编号了"
+        return True
+    check("预览文件名不被误当成待办编号", preview_filename_not_mistaken_for_id)
+
+    def works_on_every_finalize_branch():
+        """`_finalize` 有三条返回路径(真执行过 / 谎报拆穿 / 都没命中)。
+        原来 `_fake_preview_note` 在三处各调一次 —— 加第二道核验就要改三处,
+        漏一处就有一条路上不生效(和「同一个判断散在三处」同一条)。"""
+        fake = "编号 deadbeef 已登记"
+        cases = {
+            "真执行过": dict(executed=[{"id": "aabbccdd", "ok": True, "detail": "x"}]),
+            "谎报拆穿": dict(box={"aabbccdd": {"type": "create_campaign", "seq": 1, "user_id": "u"}},
+                          reply="我已创建完成。编号 deadbeef 已登记"),
+            "都没命中": dict(),
+        }
+        for name, kw in cases.items():
+            reply = kw.pop("reply", fake)
+            out = finalize("u", reply, **kw)
+            if "deadbeef" not in out.split("---")[-1]:
+                return "「%s」这条路径上没盖拆穿章" % name
+        return True
+    check("三条 _finalize 路径上都会拆穿", works_on_every_finalize_branch)
+
+    def english_too():
+        out = finalize("u", "Pending action deadbeef is registered.", lang="en")
+        if "do not exist" not in out:
+            return "英文模式下不拆穿 —— 钢印是代码直出的,两种语言都要有"
+        return True
+    check("英文模式也拆穿", english_too)
+
+    def no_such_action_refuses_to_invent_reasons():
+        """不再列禁词(打地鼠),改成正面要求:**唯一诚实的说法是「我记错了」**。"""
+        blob = str(srv._no_such_action("0d51be21", "执行"))
+        if "唯一诚实的说法" not in blob:
+            return "没给出唯一允许的说法,模型还会自己发明一个理由"
+        for word in ("归档", "索引", "缓存", "同步"):
+            if word not in blob:
+                return "没堵住「%s」这类新编法 —— 上一版只禁了超时/重置/刷新,它换个词就绕过去了" % word
+        return True
+    check("「编号不存在」:不许发明任何系统故障当理由", no_such_action_refuses_to_invent_reasons)
+
+
+def test_cost_gate_counts_output():
+    """线上实测:用户在投放助手里说「上广告」,7 轮就被闸门停掉,
+    报的是 `输入 111K + 输出/思考 0K`。**模型根本没在打转** ——
+    是这段对话很长,整段历史每轮重发一遍,输入自然涨到 111K。
+
+    两个错叠在一起:①闸门算的是 输入+输出,而输入随对话长度涨,不随打转涨;
+    ②Gemini 那条路的用量按「覆盖」记,最后一个 chunk 只带 prompt 不带 candidates 时,
+    前面记到的输出被抹成 0 —— 于是闸门变成了一个纯粹的「对话长度闸门」。
+    """
+    import agent_server as srv
+
+    print("\n【3.58】花费闸门要按输出算")
+
+    def budget_ignores_input():
+        g = srv.LoopGuard()
+        # 一段长对话:每轮输入 16K,输出很少 —— 这是**正常在干活**,不该停
+        for _ in range(7):
+            g.add_usage(16000, 300)
+            if g.before_round():
+                return ("长对话被误杀了:输入 %dK 就停了,而输出才 %dK —— "
+                        "闸门算的还是输入" % (g.tokens_in / 1000, g.tokens_out / 1000))
+        return True
+    check("长对话不该被花费闸门误杀(输入不算数)", budget_ignores_input)
+
+    def budget_catches_real_burning():
+        g = srv.LoopGuard()
+        stopped = 0
+        for i in range(10):
+            g.add_usage(3000, 9000)      # 一轮重推理 ≈ 9K 输出
+            if g.before_round():
+                stopped = i + 1
+                break
+        if not stopped:
+            return "真在烧输出也不停 —— %dK 输出都过去了" % (g.tokens_out / 1000)
+        if stopped > 7:
+            return "拖到第 %d 轮才停,轮数上限(10)先到了,这道闸门等于没用" % stopped
+        return True
+    check("真在烧「思考 token」时要停得住", budget_catches_real_burning)
+
+    def message_says_what_it_counted():
+        g = srv.LoopGuard()
+        for _ in range(6):
+            g.add_usage(3000, 9000)
+            if g.before_round():
+                break
+        zh = g.message("zh")
+        # **只看「发生了什么」那一段** —— 后面的「这一条消息花掉」里本来就有「输出」,
+        # 在全文里搜的话,把原因那句退回成「用掉了它的额度」照样绿(退回验证抓到的)。
+        why = zh.split("**这一条消息花掉**")[0]
+        if "输出" not in why:
+            return "没说清停的原因是**输出**额度,用户会以为是自己问得太多"
+        if str(int(g.tokens_out / 1000)) not in why:
+            return "没报出到底想掉了多少输出:%r" % why[-90:]
+        if "只按输出算" not in g.spent():
+            return "花费明细里没说清闸门按什么算"
+        return True
+    check("停下来那句话要说清是「输出」额度", message_says_what_it_counted)
+
+    def gemini_usage_survives_a_chunk_without_output():
+        """Gemini 流式:每个 chunk 带的是**累计值**,所以要覆盖不能累加 ——
+        但最后一个 chunk 可能只带 prompt 不带 candidates,直接覆盖就把输出抹成 0。
+        取 max 两头都对。"""
+        import inspect
+        src = _no_comments(inspect.getsource(srv._gemini_loop))
+        if "max(usage[1]" not in src.replace(" ", "").replace("max(usage[1],", "max(usage[1]"):
+            if "max(usage[1]," not in src:
+                return "Gemini 的用量还是直接覆盖 —— 一个缺字段的 chunk 就能把输出抹成 0"
+
+        class U:                       # 假的 usage_metadata
+            def __init__(self, p, c, t):
+                self.prompt_token_count, self.candidates_token_count = p, c
+                self.thoughts_token_count = t
+
+        class Chunk:
+            def __init__(self, u):
+                self.usage_metadata = u
+
+        # 直接验行为:把 take_usage 的逻辑按同样规则跑一遍
+        usage = [0, 0]
+
+        def take(u):
+            usage[0] = max(usage[0], int(getattr(u, "prompt_token_count", 0) or 0))
+            usage[1] = max(usage[1], int(getattr(u, "candidates_token_count", 0) or 0)
+                           + int(getattr(u, "thoughts_token_count", 0) or 0))
+        take(U(1000, 200, 5000))
+        take(U(1000, 0, 0))            # 最后一个 chunk 只带 prompt
+        if usage[1] != 5200:
+            return "最后一个 chunk 把输出抹掉了:%r" % usage
+        return True
+    check("Gemini 用量:缺字段的 chunk 不许把输出抹成 0", gemini_usage_survives_a_chunk_without_output)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -5378,6 +5603,8 @@ if __name__ == "__main__":
     test_read_side_isolation()
     test_stream_carries_context()
     test_landing_images()
+    test_fabricated_action_ids()
+    test_cost_gate_counts_output()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()

@@ -2737,8 +2737,11 @@ def _no_such_action(action_id: str, verb: str = "执行") -> dict:
     return {
         "error": f"没有编号为 {action_id or '(空)'} 的待办,什么都没{verb}。",
         "现在保险箱里有": mine or "(一条都没有)",
-        "note": ("**系统不会「重置」「刷新」或「超时作废」待办编号 —— 从来没有这回事。**"
-                 "绝不许对用户说「编号超时了 / 被重置了 / 被刷新了」这类话。"
+        "note": ("**代码里没有任何一种机制会让待办编号消失或对不上** —— 不存在"
+                 "超时、重置、刷新、归档、索引、路径、同步、缓存这类事。"
+                 "所以**绝不许发明一个系统故障当理由**(上一版只禁了几个词,"
+                 "模型换个说法就绕过去了,所以这里说的是:任何这类理由都是编的)。"
+                 "**唯一诚实的说法是「刚才那个编号是我弄错的」。**"
                  "编号不存在只有两种可能:记错了,或者根本没登记过。**这也不是权限问题。**"
                  + ("请从「现在保险箱里有」里挑正确的那个编号再试。" if mine else
                     "保险箱是空的,说明这件事还没登记过 —— 请重新登记,并如实告诉用户"
@@ -4093,7 +4096,10 @@ TOOL_REPEAT_LIMIT = int(os.environ.get("TOOL_REPEAT_LIMIT", "3"))
 # 一条用户消息累计允许用掉多少 token(输入 + 输出 + 看不见的思考)。
 # 按一轮 ≈ 15K 估,10 万大约是第 6~7 轮的位置 —— 正常问答 1~3 轮根本碰不到,
 # 而真绕住的时候能在花掉一半之前就掐住。填 0 = 不限。
-TURN_TOKEN_BUDGET = int(os.environ.get("TURN_TOKEN_BUDGET", "100000"))
+# **这个数算的是「输出(含思考)」,不是输入+输出。** 一轮重推理 ≈ 7~9K 输出,
+# 所以 40K 大约是第 5 轮的位置,在轮数上限(10)之前,能拦住"轮数不多但每轮极贵"。
+# 填 0 = 不限。别把它调成十万级:那样永远轮不到它,等于没有这道闸门。
+TURN_TOKEN_BUDGET = int(os.environ.get("TURN_TOKEN_BUDGET", "40000"))
 
 
 class LoopGuard:
@@ -4137,7 +4143,12 @@ class LoopGuard:
         # **只有真拿到用量才判花费**。上游不给用量时(有些中转不返回 usage),
         # 本地估不出模型的思考 token —— 那才是大头,估出来的数会小得离谱,
         # 拿它当闸门等于没有闸门。宁可这条不生效,也不能给人"已经管住了"的错觉。
-        if TURN_TOKEN_BUDGET and self.usage_seen and self.tokens > TURN_TOKEN_BUDGET:
+        # **只算输出。** 原来算的是 输入+输出,而输入会随对话变长而涨
+        # (整段历史每轮都重发一遍):实测一段长对话里每轮输入 15K+,
+        # 7 轮就 111K —— 闸门当场误杀,而模型**根本没在打转**,是在正常干活。
+        # 输出才是该盯的:①它占成本约 89%(见第六之十九节那笔账);
+        # ②它只随「真的又想了一轮」而涨,不随对话长度涨。
+        if TURN_TOKEN_BUDGET and self.tokens_out > TURN_TOKEN_BUDGET:
             self.stop = "tokens"
             return self.stop
         return ""
@@ -4166,12 +4177,14 @@ class LoopGuard:
         if english:
             if not self.usage_seen:
                 return "%d model calls (this provider returns no usage data)" % self.rounds
-            return ("%d model calls, roughly %.0fK tokens (%.0fK in + %.0fK out/thinking)"
+            return ("%d model calls, roughly %.0fK tokens (%.0fK in + %.0fK out/thinking; "
+                    "the budget counts output only)"
                     % (self.rounds, self.tokens / 1000,
                        self.tokens_in / 1000, self.tokens_out / 1000))
         if not self.usage_seen:
             return "问了 %d 轮模型(这家中转没有返回用量,具体多少查不到)" % self.rounds
-        return ("问了 %d 轮模型,大约 %.1f 万 token(输入 %.0fK + 输出/思考 %.0fK)"
+        return ("问了 %d 轮模型,大约 %.1f 万 token(输入 %.0fK + 输出/思考 %.0fK;"
+                "**闸门只按输出算**,输入会随对话变长而涨,拿它当闸门会误杀)"
                 % (self.rounds, self.tokens / 10000,
                    self.tokens_in / 1000, self.tokens_out / 1000))
 
@@ -4193,8 +4206,9 @@ class LoopGuard:
                            "not making progress." % (self.detail_en or self.detail)),
                 "rounds": ("I went %d rounds of looking things up without reaching "
                            "a conclusion." % (self.rounds - 1)),
-                "tokens": ("This one question has already used up its budget without "
-                           "reaching a conclusion."),
+                "tokens": ("This one question burned through its thinking budget "
+                           "(%.0fK output tokens) without reaching a conclusion."
+                           % (self.tokens_out / 1000)),
             }.get(self.stop, "I stopped making progress.")
             return ("⚠️ **I stopped on purpose — going further would just cost money "
                     "for nothing.**" + br
@@ -4207,7 +4221,8 @@ class LoopGuard:
             "repeat": ("我连着用**一模一样的条件**去查同一样东西(%s),每次拿回来的都一样"
                        " —— 说明我卡住了,没有在往前走。" % self.detail),
             "rounds": "我查了 %d 轮还是没能得出结论。" % (self.rounds - 1),
-            "tokens": "这一条问题已经用掉了它的额度,还是没能得出结论。",
+            "tokens": ("这一条问题已经想掉了 %.0fK 的输出额度(思考占大头),"
+                       "还是没能得出结论。" % (self.tokens_out / 1000)),
         }.get(self.stop, "我没有继续往前走了。")
         return ("⚠️ **我主动停下来了 —— 再问下去只是白花钱。**" + br
                 + "**发生了什么**:" + why + br
@@ -4365,9 +4380,13 @@ def _gemini_loop(client, model: str, contents: list, lang: str) -> str:
             u = getattr(obj, "usage_metadata", None)
             if u is None:
                 return
-            usage[0] = int(getattr(u, "prompt_token_count", 0) or 0)
-            usage[1] = (int(getattr(u, "candidates_token_count", 0) or 0)
-                        + int(getattr(u, "thoughts_token_count", 0) or 0))
+            # **取 max,不是直接覆盖。** 累计值只会往上走,而**最后一个 chunk
+            # 可能只带 prompt 不带 candidates**(实测过一整轮下来输出被记成 0)——
+            # 直接覆盖就把前面记到的输出抹掉了,花费闸门跟着失灵。
+            usage[0] = max(usage[0], int(getattr(u, "prompt_token_count", 0) or 0))
+            usage[1] = max(usage[1],
+                           int(getattr(u, "candidates_token_count", 0) or 0)
+                           + int(getattr(u, "thoughts_token_count", 0) or 0))
 
         def take(part):
             """收下模型吐出来的一个 part。
@@ -4956,6 +4975,68 @@ _CLAIM_KEYWORDS = [
 _PREVIEW_LINK = _re.compile(r"/landing-pages/([A-Za-z0-9._-]+\.html)")
 
 
+# 回复里「待办编号 xxx」这种提法。**只认紧跟在「待办/编号/action_id」后面的那串**,
+# 不裸搜 8 位十六进制 —— 落地页预览文件名就是 `<8位十六进制>-xxx.html`,裸搜会误伤。
+_ACTION_ID_MENTION = _re.compile(
+    r"(?:待办|编号|action[ _]?id|pending action)[^0-9a-zA-Z]{0,10}([0-9a-f]{8})(?![0-9a-fA-F])",
+    _re.I)
+
+
+def _fake_action_note(reply: str, english: bool) -> str:
+    """回复里报出来的待办编号,拿保险箱回查一遍 —— **编的当场拆穿**。
+
+    2026-09-07 线上实测两次,而且一次比一次糟:
+      · 在素材工作室里模型**根本没登记**(闸门给了移交单,它收到了、也没照做),
+        却编了个编号 `a21c97ef` 让用户「回复确认」;用户确认后 `confirm_action`
+        说没这个编号,它又编了个理由(「**临时归档**原因没对上」)和第二个编号;
+      · 发布待办 `36085d6c` **已经执行成功了**,它还说「**文件路径索引的小意外**,
+        重新发起发布登记」并给了个编的编号 —— 用户以为还要再发一次。
+
+    上一轮的修法是在报错话术里禁掉「超时/重置/刷新」这几个词。**没用** ——
+    模型换个说法就绕过去了。**禁词表是打地鼠**:能编理由的位置有无限多种措辞。
+    真正管用的是这道:**凡是给出去的编号,代码都回查一遍**
+    (和预览链接那道 `_fake_preview_note` 一模一样的思路)。
+    """
+    said: list = []
+    for m in _ACTION_ID_MENTION.finditer(reply):
+        aid = m.group(1).lower()
+        if aid not in said:
+            said.append(aid)
+    if not said:
+        return ""
+    # 本轮真执行掉的编号也算数 —— 它已经不在保险箱里了,但提它是诚实的
+    alive = set(PENDING_ACTIONS)
+    for rec in _executed():
+        if isinstance(rec, dict) and rec.get("id"):
+            alive.add(str(rec["id"]).lower())
+    fake = [a for a in said if a not in alive]
+    if not fake:
+        return ""
+    mine = [aid for aid, a in PENDING_ACTIONS.items() if _my_action(a)]
+    if english:
+        return ("⚠️ **System verification**: the pending-action id(s) mentioned above "
+                "(%s) **do not exist** — the code checked the safe box. The assistant most "
+                "likely did not register anything this turn, so **do not reply \"confirm\"** — "
+                "nothing would happen. Real pending actions right now: %s."
+                % (", ".join(fake), ", ".join(mine) or "(none)"))
+    return ("⚠️ **系统核验**:上面提到的待办编号(%s)**在保险箱里根本不存在**"
+            "(代码回查过的)。多半是助手编的 —— 它这一轮其实没有登记任何待办,"
+            "**别按它说的回复「确认」**,确认了什么也不会发生。"
+            "现在真实存在的待办:%s。"
+            % ("、".join(fake), "、".join(mine) or "(一条都没有)"))
+
+
+def _extra_notes(reply: str, english: bool) -> str:
+    """回复末尾要额外贴的几道代码层核验(编造的预览链接 / 编造的待办编号)。
+
+    **收成一处**:原来 `_fake_preview_note` 在 `_finalize` 的三个分支里各调一次,
+    加第二道核验就要改三处、漏一处就有一条路上不生效
+    (和「同一个判断散在三处,加一种就漏一处」是同一条)。
+    """
+    return "\n\n".join(x for x in (_fake_preview_note(reply, english),
+                                    _fake_action_note(reply, english)) if x)
+
+
 def _fake_preview_note(reply: str, english: bool) -> str:
     """回复里给出的落地页预览链接,**逐个回到盘上查一遍**;编的就当场拆穿。
 
@@ -5010,7 +5091,7 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
         label = ("🔒 **System verification** (recorded by code, not written by the AI): "
                  if english else "🔒 **系统核验**(代码层记录,非 AI 生成):")
         stamped = f"{reply}\n\n---\n{label}{'; '.join(parts)}"
-        fake = _fake_preview_note(reply, english)
+        fake = _extra_notes(reply, english)
         return {"reply": stamped + ("\n\n" + fake if fake else "")}
 
     # 谎报匹配不分大小写:AI 写的是 "Successfully created",关键词表里是小写
@@ -5028,12 +5109,12 @@ def _finalize(reply: str, lang: str = "zh") -> dict:
                 if english else
                 f"⚠️ **系统核验**:本轮实际上没有执行任何操作,保险箱里仍有待办({ids})。"
                 f"如果上面说\"已创建/已执行\",那是 AI 的幻觉,请回复「执行待办 {ids}」重试。")
-        fake = _fake_preview_note(reply, english)
+        fake = _extra_notes(reply, english)
         return {"reply": f"{reply}\n\n---\n{note}" + ("\n\n" + fake if fake else "")}
 
-    # 编造的预览链接是**独立**的一道:它和保险箱里有没有待办无关,
-    # 上面两条分支都可能没命中,而链接照样是编的。
-    fake = _fake_preview_note(reply, english)
+    # 编造的预览链接 / 编造的待办编号都是**独立**的:它们和保险箱里有没有待办无关,
+    # 上面两条分支都可能没命中,而链接和编号照样是编的。
+    fake = _extra_notes(reply, english)
     if fake:
         return {"reply": f"{reply}\n\n---\n{fake}"}
     return {"reply": reply}
