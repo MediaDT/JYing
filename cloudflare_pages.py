@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -501,6 +502,33 @@ def _wrangler_deploy(directory: Path, project: str, slug: str) -> str:
     return urls[-1] if urls else f"https://{project}.pages.dev"
 
 
+_IMG_REF = re.compile(r"""\bsrc\s*=\s*["\']img/([A-Za-z0-9._-]+)["\']""", re.I)
+
+
+def _copy_images(source_html: Path, html: str, dest_dir: Path) -> list[str]:
+    """把页面**真正引用到的**配图从生成目录复制进发布目录。
+
+    只复制引用到的那几张,不是整个图库目录 —— 发布是上传一个目录,
+    多传的每一张都是白花的时间,而且会把这个人别的实验用过的图一起公开出去。
+    源图找不到就跳过并如实返回(调用方会把它并进结果里)——
+    **不能因为一张图挡住整次发布**,但也绝不能不吭声。
+    """
+    src_dir = source_html.parent / "img"
+    missing: list[str] = []
+    names = set(_IMG_REF.findall(html))
+    if not names:
+        return missing
+    out = dest_dir / "img"
+    out.mkdir(parents=True, exist_ok=True)
+    for name in sorted(names):
+        one = (src_dir / name).resolve()
+        if one.parent != src_dir.resolve() or not one.is_file():
+            missing.append(name)
+            continue
+        shutil.copy2(one, out / name)
+    return missing
+
+
 def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
                cta_url: str, tracking_script: str, user_id: str = "",
                allow_replace: bool = False, tracking_script_b: str = "") -> dict:
@@ -536,6 +564,12 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
         (target / "b").mkdir(parents=True, exist_ok=True)
         (target / "a" / "index.html").write_text(html_a, encoding="utf-8")
         (target / "b" / "index.html").write_text(html_b, encoding="utf-8")
+        # **配图要跟着页面一起传上去。** 页面里写的是相对路径 `img/xxx.jpg`,
+        # 所以 A、B 各自目录下都要有一份自己的 img/。少了这一步,页面发上去
+        # 图全是裂的 —— 而这正是「发布成功 = 打得开」那条规矩防的事:
+        # 接口返回 200 不等于用户看到的是一个完好的页面。
+        lost = (_copy_images(variant_a, html_a, target / "a")
+                + _copy_images(variant_b, html_b, target / "b"))
         # 根路径放一个中性静态页,**不跳转、也不列出实验清单**。
         # 跳转有两个坏处:①裸访问域名会算到 A 版头上;②平台/审核抓根域名时
         # 看到的是一个跳转页。列清单则等于把在跑的实验公开给同行看。
@@ -572,6 +606,9 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
 
     return {
         "done": True,
+        **({"⚠️请立刻告诉用户": "有 %d 张配图没能一起传上去(见「⚠️配图丢了」),"
+                              "线上页面那几个位置是裂图。**别说成发布完全成功。**"
+                              % len(set(lost))} if lost else {}),
         "created": {
             "pages_project": project,
             "project_action": "新建" if created else "复用",
@@ -585,6 +622,9 @@ def publish_ab(domain: str, slug: str, variant_a: Path, variant_b: Path,
             "clickflare_lander_b_url": f"https://{domain}/{slug}/b/?cpid={{campaign_id}}",
             "cta_links_injected": {"A": count_a, "B": count_b},
             "追踪脚本": "A/B 各用各的" if script_b != tracking_script else "两版共用同一段",
+            # 少一张图不挡发布(整次发布回滚代价更大),但**绝不能不吭声** ——
+            # 「发布成功」的定义是「打得开而且是完好的」,不是「接口返回 200」。
+            **({"⚠️配图丢了": sorted(set(lost))} if lost else {}),
         },
         "note": (
             ("⏳ 域名还在签发证书(状态 " + str(domain_state.get("status")) + ")，"

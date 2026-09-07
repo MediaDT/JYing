@@ -148,6 +148,7 @@ _TOOL_LABELS = {
     "propose_status_change": "正在登记开关待办…",
     "propose_create_campaign": "正在登记建广告待办…",
     "propose_add_ad": "正在登记加广告待办…",
+    "swap_landing_image": "正在换落地页上的配图…",
     "propose_schedule": "正在登记定时任务…",
     "confirm_action": "正在执行你确认的操作…",
     "cancel_action": "正在取消待办…",
@@ -1272,6 +1273,27 @@ def _generated_landing_file(filename: str) -> Path:
     if path is None:
         raise ValueError(f"找不到生成的落地页文件：{Path(str(filename or '')).name or '(空)'}")
     return path
+
+
+def swap_landing_image(landing_file: str, slot: int, query: str) -> dict:
+    """把已经生成好的落地页里**某一张图**换成按新关键词重新找的一张,别的一个字不动。
+
+    用户说「第 2 张图不合适,换成正在装屋顶的工人」时用它。
+    `landing_file` 是生成结果里的 `file`;`slot` 是第几张(页面里 data-slot 的编号);
+    `query` **必须是英文**关键词,写具体些(`metal roof installation crew` 比 `roof` 好)。
+
+    **别为了换一张图去重新生成整页** —— 那要等模型再出一整页、再花一次钱,
+    而且文案版式全会跟着变,用户刚看顺眼的东西就没了。
+    """
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        return {"error": "slot 要是个数字(第几张图)"}
+    r = lp.swap_image(landing_file, slot, str(query or "").strip(),
+                      owner=CURRENT_USER_ID.get() or "")
+    if "error" in r:
+        return r
+    return _absolute_previews([r | {"preview_url": f"/landing-pages/{Path(landing_file).name}"}])[0]
 
 
 def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
@@ -3096,7 +3118,7 @@ NEWSBREAK_TOOLS = [
     list_organizations, list_ad_accounts, list_campaigns, list_ad_sets, list_ads, get_report,
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
-    list_cloudflare_landing_resources, propose_publish_landing_pages,
+    list_cloudflare_landing_resources, propose_publish_landing_pages, swap_landing_image,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
     propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,
@@ -3471,6 +3493,24 @@ def dashboard_page():
     return FileResponse(Path(__file__).with_name("static") / "dashboard.html")
 
 
+# 页面里写的是相对路径 `img/xxx.jpg`,预览时会被解析成 `/landing-pages/img/xxx.jpg`。
+# **必须排在 `/landing-pages/{filename}` 前面**登记,虽然路径参数不跨 `/`、
+# 今天不会冲突,但顺序摆对了以后加通配也不会打架。
+@app.get("/landing-pages/img/{filename}")
+def landing_page_image(filename: str):
+    """预览页里的配图。**只给当前这个人自己的** —— 和页面本身同一条规矩。"""
+    name = Path(str(filename or "")).name
+    if not name or name != filename or name.startswith("."):
+        return JSONResponse(status_code=400, content={"error": "无效的图片名"})
+    base = lp._img_dir(CURRENT_USER_ID.get() or "")
+    path = (base / name).resolve()
+    if path.parent != base.resolve() or not path.is_file():
+        return JSONResponse(status_code=404, content={"error": "图片不存在"})
+    return FileResponse(path, headers={"X-Content-Type-Options": "nosniff",
+                                       "Referrer-Policy": "no-referrer",
+                                       "Cache-Control": "public, max-age=3600"})
+
+
 @app.get("/landing-pages/{filename}")
 def landing_page_preview(filename: str):
     """预览本机生成的落地页；只允许访问生成目录下的 HTML 文件。"""
@@ -3501,7 +3541,11 @@ def landing_page_preview(filename: str):
                 + "<p>回到聊天里说一句「重新生成落地页」,让它真跑一遍。</p>")
         return HTMLResponse(content=body, status_code=404)
     return FileResponse(path, media_type="text/html; charset=utf-8", headers={
-        "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+        # `img-src 'self'` 是配图之后加的:页面用相对路径 `img/xxx.jpg` 引自家的图。
+        # **仍然不给 https:** —— 外部图片一律在生成那一步就被摘掉了,
+        # 这里再堵一道,免得哪天漏进来一个外链把用户的浏览行为报给第三方。
+        "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; "
+                                    "img-src 'self' data:; "
                                     "font-src data:; form-action 'none'; base-uri 'none'; sandbox"),
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
@@ -3906,6 +3950,7 @@ LANDING_TOOL_NAMES = {
     "native_market_scan", "search_competitor_ads", "search_competitor_landing_pages",
     "decompose_landing_page", "summarize_landing_page_patterns",
     "list_cloudflare_landing_resources", "propose_publish_landing_pages",
+    "swap_landing_image",
     "list_clickflare_campaigns", "describe_clickflare_campaign", "create_clickflare_landers",
     "propose_swap_campaign_landers", "clickflare_publish_kit",
     "confirm_action", "cancel_action", "list_pending_actions",
@@ -4478,6 +4523,13 @@ OPENAI_TOOL_SCHEMAS = [
                                       "description": {"type": "string"}, "asset_filename": {"type": "string"},
                                       "call_to_action": {"type": "string"}, "brand_name": {"type": "string"}}}}},
              ["ad_set_id", "asset_url", "headline", "description"]),
+    _oa_tool("swap_landing_image",
+             "把已生成落地页里的**某一张配图**换掉,别的内容一个字不动。"
+             "用户说「第2张图换成xxx」时用它,**别为了换图重新生成整页**",
+             {"landing_file": {"type": "string", "description": "生成结果里的 file 字段"},
+              "slot": {"type": "integer", "description": "第几张图(页面里 data-slot 的编号)"},
+              "query": {"type": "string", "description": "**英文**搜索关键词,越具体越好"}},
+             ["landing_file", "slot", "query"]),
     _oa_tool("confirm_action", "执行之前登记的待办(仅在用户新消息中明确同意后)", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("cancel_action", "取消之前登记的待办", {"action_id": {"type": "string"}}, ["action_id"]),
     _oa_tool("list_pending_actions", "查看保险箱里所有已登记待确认的待办(含编号);忘了编号用它查,严禁重复登记", {}, []),
@@ -4679,7 +4731,7 @@ OPENAI_TOOL_SCHEMAS = [
 OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
-    list_cloudflare_landing_resources, propose_publish_landing_pages,
+    list_cloudflare_landing_resources, propose_publish_landing_pages, swap_landing_image,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
     propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import html
 import ipaddress
 import json
+import hashlib
 import re
 import socket
 import uuid
@@ -21,6 +22,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+
+import creative_search as cs
 
 TIMEOUT = 18.0
 MAX_TEXT_CHARS = 12000
@@ -378,7 +381,15 @@ def summarize(models: list[dict], brand: str = "", offer: str = "",
 4. 重点分析为什么表现好:排版、文字描述、offer、表单、信任背书、CTA 节奏。
 5. {"生成的两个页面要方向不同,方便 A/B test。" if many else
    "**只要 1 个页面**,别多给 —— 用户明确只要一个,多出来的那版是白花钱。"}
-6. HTML 要完整可预览,但不要引用外部 JS/CSS/图片;可以用 CSS 做干净版式。
+6. **配图**:需要放图的地方写 `<img src="[[IMAGE_1]]" alt="...">`,
+   编号从 1 开始、本页内不重复;并在这一版的 `"配图"` 里说明每个编号要找什么图。
+   `搜索词`**必须是英文**(图库按英文搜),写得具体些:
+   `metal roof installation crew` 比 `roof` 强得多。
+   **绝不许自己写任何图片网址**(http、https、data: 都不行)——
+   图片由后端从正规授权图库找好、下载下来、逐字替换进去;你写出来的网址一定是编的,
+   用户点开是一张裂图,而买来的流量已经落在上面了。
+   一页 2~3 张就够,**首屏那张最有用**。真的不需要图就别写 `<img>`,也别留空占位框。
+   除了图片,**不要引用外部 JS/CSS/字体**;版式用 CSS 做。
 7. **今年是 {this_year()} 年**(北京时间 {_today_str()})。页面里任何地方出现年份 ——
    页脚版权、标题里的「XXXX 年提醒」、文中的「XXXX 年新规」—— **一律用 {this_year()}**,
    绝不许写更早的年份。写成过期年份的话,用户一眼就看出这是张旧页面,信任感当场没了。
@@ -414,6 +425,9 @@ offer: {offer or "(未提供,请用可替换占位表达,不要编具体价格)"
       "首屏主标题": "",
       "首屏副标题": "",
       "表单策略": "",
+      "配图": [
+        {{"编号": 1, "搜索词": "英文关键词", "说明": "放在哪儿、为什么要这张"}}
+      ],
       "html": "<!doctype html>..."
     }},
     {{
@@ -519,6 +533,188 @@ def _check_publishable(html: str) -> tuple[str, list[str]]:
     return html, problems
 
 
+_IMAGE_MARK = re.compile(r"\[\[IMAGE_(\d+)\]\]")
+# 带着某个占位符的整个 <img> 标签 —— 找不到图时要把整个标签摘掉,不能留个破图
+_IMG_TAG = r"<img\b[^>]*%s[^>]*>"
+# 外部图片地址:模型偶尔还是会写一个出来(提示词管不住,见坑表)
+_EXTERNAL_IMG = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"\']\s*(?:https?:|//|data:)[^>]*>", re.I)
+IMG_SUBDIR = "img"
+MAX_IMAGES_PER_PAGE = 4
+
+
+def _img_dir(owner: str = "") -> Path:
+    """这个人的落地页配图目录。和页面同级放在 `img/` 下面 ——
+    页面里用**相对路径** `img/xxx.jpg` 引用,这样本地预览和发布到
+    Cloudflare(`/<slug>/a/index.html` + `/<slug>/a/img/xxx.jpg`)**同一套写法都成立**,
+    不用在两个地方各拼一次绝对地址。
+    """
+    d = _owner_dir(owner) / IMG_SUBDIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# 这一轮里有哪几家图库已经确认连不上了 —— **同一次生成里不再重试**。
+# 实测:这台机器连不上 Openverse(20 秒读超时)。一页最多 4 张图,
+# 每张都白等一次就是 80 秒 —— 用户那头看着像卡死,还可能撞上前端的空闲上限。
+# 只在一次 attach_images 里生效,不做进程级缓存:钥匙/网络随时可能变好。
+_DEAD_SOURCES: set = set()
+
+
+def _pick_image(query: str) -> dict | None:
+    """按关键词去授权图库找一张最好的。找不到返回 None。
+
+    **只走 `creative_search`**:那里已经把「只要可商用」写死在请求参数里
+    (Openverse 强制 `license=cc0,pdm`),换个地方找图就绕过了那道闸门。
+    """
+    ready = [x["id"] for x in cs.available_sources() if x.get("ready")]
+    if ready and all(x in _DEAD_SOURCES for x in ready):
+        return None            # 这一轮所有图库都确认连不上了,后面几张不再白等
+    try:
+        got = cs.search(query, count=6)
+    except Exception:
+        return None
+    # 这次哪几家超时/报错了,记下来,后面几张图不再等它
+    for line in (got.get("errors") or []):
+        _DEAD_SOURCES.add(str(line).split(":")[0].strip())
+    for one in got.get("results") or []:
+        if one.get("quality", {}).get("可用") is False:
+            continue                     # 分辨率不够 / 竖图,一票否决(见第六之十一节)
+        return one
+    return (got.get("results") or [None])[0]
+
+
+def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, list]:
+    """把 `[[IMAGE_n]]` 换成真实图片。返回 (新 html, 用了哪些图, 问题清单)。
+
+    **模型永远不碰图片网址** —— 它只写编号和「我要什么图」,
+    找图、下载、落盘、替换全是 Python 做的确定性动作。
+    和 CTA 追踪链接同一条规矩:凡是绝不许编的东西,连举例都不许它写。
+
+    找不到图时**把整个 `<img>` 标签摘掉**,不留破图 ——
+    页面少一张图只是丑一点,留一张裂图是「买来的流量落在坏页面上」。
+    """
+    used: list = []
+    problems: list = []
+    _DEAD_SOURCES.clear()          # 每次生成重新试一遍,别把上一轮的坏运气带过来
+    by_no = {}
+    for one in (specs or []):
+        if isinstance(one, dict):
+            try:
+                by_no[int(one.get("编号"))] = str(one.get("搜索词") or "").strip()
+            except (TypeError, ValueError):
+                continue
+
+    # 模型偶尔还是会直接写一个外链地址出来。**代码层摘掉并如实报告**,
+    # 别指望提示词能管住(和「提示词管不住文案照抄」是同一条)。
+    outside = _EXTERNAL_IMG.findall(html)
+    if _EXTERNAL_IMG.search(html):
+        html = _EXTERNAL_IMG.sub("", html)
+        problems.append("页面里有 %d 处直接写死的外部图片地址,已经摘掉 —— "
+                        "那种地址多半是模型编的,而且外链哪天失效就是一张裂图"
+                        % len(outside))
+
+    slots = []
+    for m in _IMAGE_MARK.finditer(html):
+        n = int(m.group(1))
+        if n not in slots:
+            slots.append(n)
+    if len(slots) > MAX_IMAGES_PER_PAGE:
+        problems.append("这一版要 %d 张图,只配前 %d 张(多了页面慢、也没必要)"
+                        % (len(slots), MAX_IMAGES_PER_PAGE))
+
+    for n in slots[:MAX_IMAGES_PER_PAGE]:
+        query = by_no.get(n) or ""
+        pick = _pick_image(query) if query else None
+        if pick:
+            try:
+                data, fname, _mime = cs.download(pick["image_url"])
+            except Exception as e:
+                pick, problems = None, problems + [
+                    "第 %d 张图(%s)下载失败:%s" % (n, query, str(e)[:80])]
+            else:
+                ext = (Path(fname).suffix or ".jpg").lower()
+                if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                    ext = ".jpg"
+                name = hashlib.sha256(data).hexdigest()[:16] + ext
+                (_img_dir(owner) / name).write_bytes(data)
+                # `data-slot` 留着,以后只换某一张时靠它定位(见 swap_image)
+                html = re.sub(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n),
+                              lambda mm: mm.group(0)
+                              .replace("[[IMAGE_%d]]" % n, "%s/%s" % (IMG_SUBDIR, name))
+                              .replace("<img", '<img data-slot="%d"' % n, 1),
+                              html)
+                used.append({"编号": n, "搜索词": query, "文件": name,
+                             "来自": pick.get("source"), "许可证": pick.get("license"),
+                             "原图页": pick.get("source_page"),
+                             "尺寸": "%dx%d" % (pick.get("width") or 0, pick.get("height") or 0)})
+                continue
+        # 没找到 / 下载失败 → 整个标签摘掉,别留破图
+        html = re.sub(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n), "", html)
+        if query and not any(p.startswith("第 %d 张图" % n) for p in problems):
+            problems.append("第 %d 张图没找到合适的(搜的是「%s」),这个位置留空了" % (n, query))
+        elif not query:
+            problems.append("第 %d 张图没说要找什么,这个位置留空了" % n)
+
+    # **「没找到合适的图」和「图库根本连不上」要分开报。**
+    # 混着报的话用户会去换关键词 —— 而真正该做的是配一把钥匙,换多少词都没用。
+    # 和坑表「5xx 里可能写着确定性的原因,别一律说成稍后再试」是同一条。
+    if slots and not used:
+        ready = [x["id"] for x in cs.available_sources() if x.get("ready")]
+        if not ready:
+            problems.insert(0, "⚠️ **一个图库都没启用,所以这页一张图都配不上。**"
+                               "Pexels 和 Pixabay 的钥匙都是免费申请的,填进 .env 的 "
+                               "PEXELS_API_KEY / PIXABAY_API_KEY 再重启就行 —— "
+                               "**这不是关键词的问题,换多少个词都一样。**")
+        elif all(x in _DEAD_SOURCES for x in ready):
+            problems.insert(0, "⚠️ **图库这会儿连不上**(%s),所以这页一张图都配不上。"
+                               "**不是关键词的问题。** 可以过一会儿再试;"
+                               "如果一直这样,建议去申请一把 Pexels 或 Pixabay 的免费钥匙"
+                               "(填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY),"
+                               "它们比 Openverse 稳得多、家装类的图也多得多。"
+                               % "、".join(sorted(_DEAD_SOURCES)))
+
+    # 剩下的占位符(没包在 <img> 里的)一律清掉,不能让 [[IMAGE_n]] 露在页面上
+    html = _IMAGE_MARK.sub("", html)
+    return html, used, problems
+
+
+def swap_image(filename: str, slot: int, query: str, owner: str = "") -> dict:
+    """把已经生成好的页面里第 `slot` 张图换成按 `query` 重新找的一张。
+
+    **为什么值得单独做一个**:不满意一张图就整页重生成的话,
+    要等模型再出一整页(实测 61 秒)、还要再花一次钱,而且**其它内容也会跟着变**,
+    用户刚看顺眼的文案就没了。
+    """
+    path = resolve_preview(filename, owner)
+    if path is None:
+        return {"error": "找不到这个落地页文件:%s" % (Path(str(filename or "")).name or "(空)")}
+    html = path.read_text(encoding="utf-8")
+    tag = re.compile(r'<img\b[^>]*\bdata-slot="%d"[^>]*>' % int(slot), re.I)
+    if not tag.search(html):
+        have = re.findall(r'data-slot="(\d+)"', html)
+        return {"error": "这一版里没有第 %s 张图。现有的是:%s"
+                         % (slot, "、".join(have) or "(一张都没有)")}
+    pick = _pick_image(query)
+    if not pick:
+        return {"error": "按「%s」没找到可商用的图,页面一个字都没动。换个关键词再试" % query}
+    try:
+        data, fname, _mime = cs.download(pick["image_url"])
+    except Exception as e:
+        return {"error": "图找到了但下载失败:%s。页面一个字都没动" % str(e)[:100]}
+    ext = (Path(fname).suffix or ".jpg").lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg"
+    name = hashlib.sha256(data).hexdigest()[:16] + ext
+    (_img_dir(owner) / name).write_bytes(data)
+    html = tag.sub(lambda m: re.sub(r'(\bsrc\s*=\s*")[^"]*(")',
+                                    r"\1%s/%s\2" % (IMG_SUBDIR, name), m.group(0)), html, count=1)
+    path.write_text(html, encoding="utf-8")
+    return {"换好了": True, "文件": filename, "第几张": slot,
+            "新图": {"搜索词": query, "文件": name, "来自": pick.get("source"),
+                    "许可证": pick.get("license"), "原图页": pick.get("source_page")},
+            "note": "**页面其它内容一个字都没动。** 让用户刷新预览看看。"}
+
+
 def save_pages(pages: list[dict], limit: int = 2, owner: str = "") -> list[dict]:
     """把生成的页面落盘。`limit` 是**这次要几版** —— 别再写死 2。
 
@@ -534,6 +730,9 @@ def save_pages(pages: list[dict], limit: int = 2, owner: str = "") -> list[dict]
             raw = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>" + raw + "</body></html>"
         raw, problems = _check_publishable(raw)
         raw, year_fixed, year_stale = fix_stale_years(raw)
+        # **配图排在可发布性检查之后**:那两步是免费的,先做完再去联网找图下载
+        # (和「花钱/可能失败的步骤排最后」同理)。
+        raw, imgs, img_problems = attach_images(raw, p.get("配图") or [], owner)
         name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(p.get("命名") or f"landing-{i}")).strip("-").lower()
         filename = f"{uuid.uuid4().hex[:8]}-{name or 'landing'}.html"
         path = _owner_dir(owner) / filename
@@ -543,6 +742,8 @@ def save_pages(pages: list[dict], limit: int = 2, owner: str = "") -> list[dict]
             "preview_url": f"/landing-pages/{filename}",
             "可发布": not problems,
             "CTA占位符数量": raw.count(CTA_MARK),
+            **({"配图": imgs} if imgs else {}),
+            **({"⚠️配图问题": img_problems} if img_problems else {}),
             **({"⚠️问题": problems} if problems else {}),
             # 版权年是代码改的,如实告诉用户一声(别偷偷改了不说)
             **({"已自动更新版权年": year_fixed} if year_fixed else {}),

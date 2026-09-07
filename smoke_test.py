@@ -4598,6 +4598,344 @@ def test_stream_carries_context():
     check("流式:线程里拿得到当前用户/凭据/模式/保险丝/闸门", t_stream_thread_context)
 
 
+# ============ 3.56 落地页里的配图 ============
+
+def test_landing_images():
+    """线上实测:生成的落地页里是一个灰色占位框,写着「[ Image: ... ]」。
+    三层都堵着 —— 提示词明写「不要引用外部图片」、归纳工具没有任何图片参数、
+    预览 CSP 是 `img-src data:`。模型只能画个占位框,**它不是偷懒,是手上没有图**。
+
+    现在:模型只写 `[[IMAGE_n]]` + 英文搜索词,**找图/下载/落盘/替换全是 Python 做的**
+    (和 CTA 追踪链接同一条规矩:绝不许编的东西,连举例都不许它写)。
+    """
+    import tempfile
+    from pathlib import Path as _P
+    import agent_server as srv
+    import landing_lab as lp
+    import cloudflare_pages as cfp
+
+    print("\n【3.56】落地页里的配图")
+
+    PAGE = ('<!doctype html><html><body>'
+            '<img src="[[IMAGE_1]]" alt="roof">'
+            '<p>hi</p><img src="[[IMAGE_2]]" alt="crew">'
+            '<a href="[[CLICKFLARE_CTA_URL]]">go</a>'
+            '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+
+    def fake_lib(ok=True):
+        """把图库换成假的,不联网。"""
+        real = (lp.cs.search, lp.cs.download)
+        lp.cs.search = lambda q, count=6: {"results": ([{
+            "image_url": "https://stock.example/%s.jpg" % q.replace(" ", "-"),
+            "source": "pexels", "license": "Pexels License(可商用,无需署名)",
+            "source_page": "https://pexels.com/x", "width": 1600, "height": 1067,
+            "quality": {"可用": True, "score": 90}}] if ok else [])}
+        lp.cs.download = lambda url: (b"JPEG:" + url.encode(), "x.jpg", "image/jpeg")
+        return real
+
+    def t_prompt_asks_for_placeholders():
+        """**把提示词真渲染出来再断言**,不搜源码。
+
+        搜源码会为错误的原因通过:`"配图"` 这个串在 `save_pages` 里也有一处
+        (`p.get("配图")`),把提示词里的字段删掉照样搜得到 —— 退回验证时抓到的。
+        和坑表「测试用 index() 找源码会命中注释」是同一类。
+        """
+        seen = {}
+        real = lp._ask_json
+        lp._ask_json = lambda prompt: seen.setdefault("p", prompt) and {}
+        try:
+            lp.summarize([{"页面": "x", "为什么转化好": "y"}], brand="B", n_variants=2)
+        except Exception:
+            pass
+        finally:
+            lp._ask_json = real
+        got = seen.get("p") or ""
+        if not got:
+            return "没渲染出提示词,这条测试什么都没验"
+        bad = []
+        if "不要引用外部 JS/CSS/图片" in got:
+            bad.append("提示词里还写着「不要引用外部图片」—— 模型只会继续画占位框")
+        if "[[IMAGE_1]]" not in got:
+            bad.append("提示词没告诉模型用 [[IMAGE_n]] 占位符")
+        # **只在「输出格式:」之后那段里找** —— 规则 6 的正文里也提到了 `"配图"`,
+        # 在全文里搜的话,把输出格式里的字段删掉照样绿(退回验证抓到的)。
+        schema = got.split("输出格式:")[-1]
+        if '"配图"' not in schema:
+            bad.append("输出格式的 JSON 里没有「配图」字段,模型没地方给搜索词")
+        if "绝不许自己写任何图片网址" not in got:
+            bad.append("没禁止模型自己写图片网址 —— 它写出来的一定是编的")
+        if "搜索词" not in got or "英文" not in got:
+            bad.append("没要求搜索词用英文 —— 图库按英文搜,中文搜不到东西")
+        return bad or True
+    check("提示词:只许写占位符 + 英文搜索词,不许写网址", t_prompt_asks_for_placeholders)
+
+    def t_placeholders_become_real_images():
+        real = fake_lib()
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P(d)
+                out, used, probs = lp.attach_images(
+                    PAGE, [{"编号": 1, "搜索词": "metal roof"},
+                           {"编号": 2, "搜索词": "roofing crew"}], owner="uA")
+                if "[[IMAGE" in out:
+                    return "还有占位符残留在页面上:%r" % out[:120]
+                if len(used) != 2:
+                    return "两个位置只配上了 %d 张图" % len(used)
+                files = [f.name for f in (_P(d) / "uA" / "img").glob("*")]
+                if len(files) != 2:
+                    return "图没真的落盘:%r" % files
+                for f in files:
+                    if "img/" + f not in out:
+                        return "页面里没引用到落盘的图 %s" % f
+                if 'data-slot="1"' not in out or 'data-slot="2"' not in out:
+                    return "没打 data-slot —— 以后想只换某一张就定位不到了"
+                if probs:
+                    return "不该有问题却报了:%r" % probs
+                # 许可证要如实带出来(投广告是商业用途,来源必须可查证)
+                if not all(u.get("许可证") and u.get("原图页") for u in used):
+                    return "没带上许可证/原图页:%r" % used
+        finally:
+            lp.cs.search, lp.cs.download = real
+            lp.GENERATED_DIR = keep
+        return True
+    check("占位符被换成真实图片,并落盘、带许可证", t_placeholders_become_real_images)
+
+    def t_no_broken_images():
+        """找不到图时**把整个 <img> 摘掉**,不留破图。
+        页面少一张图只是丑一点;留一张裂图是「买来的流量落在坏页面上」。"""
+        real = fake_lib(ok=False)
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P(d)
+                out, used, probs = lp.attach_images(
+                    PAGE, [{"编号": 1, "搜索词": "nothing here"}], owner="uA")
+                if "<img" in out:
+                    return "没找到图却把 <img> 留在页面上了 —— 用户看到的是裂图"
+                if "[[IMAGE" in out:
+                    return "占位符原样露在页面上了"
+                if used:
+                    return "什么都没找到,却报告用了图:%r" % used
+                if not probs:
+                    return "图没配上却一声不吭 —— 用户以为页面是好的"
+        finally:
+            lp.cs.search, lp.cs.download = real
+            lp.GENERATED_DIR = keep
+        return True
+    check("找不到图:整个 <img> 摘掉,不留破图,而且要说出来", t_no_broken_images)
+
+    def t_external_images_stripped():
+        """提示词里禁了,**但提示词管不住模型**(坑表里反复的那条)——
+        代码层摘掉并如实报告。外链还有别的坏处:哪天失效就是裂图,
+        而且会把用户的浏览行为报给第三方。"""
+        real = fake_lib()
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P(d)
+                page = ('<html><body><img src="https://evil.example/x.jpg">'
+                        "<img src='data:image/png;base64,AAAA'>"
+                        '<img src="//cdn.example/y.png"></body></html>')
+                out, _used, probs = lp.attach_images(page, [], owner="uA")
+                if "evil.example" in out or "data:image" in out or "cdn.example" in out:
+                    return "外部图片地址没被摘掉:%r" % out[:140]
+                if not probs:
+                    return "摘掉了却不告诉用户"
+        finally:
+            lp.cs.search, lp.cs.download = real
+            lp.GENERATED_DIR = keep
+        return True
+    check("模型硬写的外部图片地址:摘掉并报告", t_external_images_stripped)
+
+    def t_library_down_says_so():
+        """**「没找到合适的图」和「图库根本连不上」要分开报。**
+        混着报的话用户会去换关键词,而真正该做的是配一把钥匙 —— 换多少词都没用。
+        顺带守住「连不上就别一张一张白等」:一页 4 张 × 20 秒读超时 = 80 秒,
+        用户那头看着像卡死,还可能撞上前端的空闲上限。
+        """
+        real_src, real_avail = lp.cs.search, lp.cs.available_sources
+        calls = []
+        lp.cs.search = lambda q, count=6: (calls.append(q) or
+                                           {"results": [], "errors": ["openverse: timed out"]})
+        lp.cs.available_sources = lambda: [{"id": "openverse", "ready": True},
+                                           {"id": "pexels", "ready": False}]
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P(d)
+                page = "".join('<img src="[[IMAGE_%d]]">' % i for i in range(1, 5))
+                specs = [{"编号": i, "搜索词": "roof %d" % i} for i in range(1, 5)]
+                _out, used, probs = lp.attach_images(page, specs, owner="uA")
+                if used:
+                    return "图库全挂了却报告配上了图"
+                if len(calls) != 1:
+                    return ("图库确认连不上之后还在一张一张白等(打了 %d 次)—— "
+                            "一页 4 张就是 80 秒,用户看着像卡死" % len(calls))
+                head = probs[0] if probs else ""
+                if "连不上" not in head:
+                    return "没说清是图库连不上,用户会去换关键词:%r" % head[:90]
+                if "不是关键词的问题" not in head:
+                    return "没点明「换关键词没用」"
+                # 一把钥匙都没有时,措辞要不一样(该做的是去配钥匙)
+                lp.cs.available_sources = lambda: [{"id": "pexels", "ready": False}]
+                _o2, _u2, p2 = lp.attach_images(page, specs, owner="uA")
+                if "一个图库都没启用" not in (p2[0] if p2 else ""):
+                    return "一把钥匙都没配时,没说清该去配钥匙:%r" % ((p2[0] if p2 else "")[:90])
+        finally:
+            lp.cs.search, lp.cs.available_sources = real_src, real_avail
+            lp.GENERATED_DIR = keep
+        return True
+    check("图库连不上/没钥匙:说清原因,而且不一张一张白等", t_library_down_says_so)
+
+    def t_swap_one_image_only():
+        real = fake_lib()
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P(d)
+                rows = lp.save_pages([{"命名": "aaa", "html": PAGE,
+                                       "配图": [{"编号": 1, "搜索词": "roof one"},
+                                              {"编号": 2, "搜索词": "roof two"}]}],
+                                     limit=1, owner="uA")
+                fname = rows[0]["file"]
+                before = lp.resolve_preview(fname, "uA").read_text(encoding="utf-8")
+                r = lp.swap_image(fname, 2, "brand new crew photo", owner="uA")
+                if "error" in r:
+                    return "换图失败:%s" % r["error"]
+                after = lp.resolve_preview(fname, "uA").read_text(encoding="utf-8")
+                import re as _re
+                srcs = lambda h: _re.findall(r'data-slot="(\d)"[^>]*src="([^"]+)"', h)
+                b, a = dict(srcs(before)), dict(srcs(after))
+                if b.get("1") != a.get("1"):
+                    return "只让换第 2 张,第 1 张也被动了"
+                if b.get("2") == a.get("2"):
+                    return "第 2 张压根没换"
+                # 除了那一处 src,别的一个字都不该变
+                if before.replace(b.get("2", "@@"), a.get("2", "@@")) != after:
+                    return "换图顺手改了页面别的地方"
+                if "error" not in lp.swap_image(fname, 9, "x", owner="uA"):
+                    return "换一个不存在的编号也说成功了"
+        finally:
+            lp.cs.search, lp.cs.download = real
+            lp.GENERATED_DIR = keep
+        return True
+    check("换图:只动那一张,别的一个字不改", t_swap_one_image_only)
+
+    def t_publish_carries_images():
+        """**发布是上传一个目录**,图不跟着传上去,线上就全是裂图 ——
+        而接口照样返回 200。「发布成功」的定义是「打得开而且完好」。"""
+        real = fake_lib()
+        keep_gen = lp.GENERATED_DIR
+        keep = (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._api, cfp.owned_zone, cfp._guard_domain,
+                cfp._project_exists, cfp._project_has_content, cfp._ensure_project,
+                cfp._ensure_domain, cfp._wrangler_deploy, cfp._ensure_dns)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tmp = _P(d)
+                lp.GENERATED_DIR = tmp / "gen"
+                cfp.SITES_DIR, cfp.MAPPING_FILE = tmp / "s", tmp / "m.json"
+                cfp._api = lambda *a, **k: {"success": True, "result": []}
+                cfp.owned_zone = lambda x: "example.com"
+                cfp._guard_domain = lambda x: None
+                cfp._project_exists = lambda n: False
+                cfp._project_has_content = lambda n: False
+                cfp._ensure_project = lambda n: True
+                cfp._ensure_domain = lambda pr, dm: {"name": dm, "status": "active"}
+                cfp._ensure_dns = lambda dm, pr: {"状态": "已存在"}
+                cfp._wrangler_deploy = lambda a, b, c: "https://x.pages.dev"
+
+                rows = lp.save_pages([{"命名": "aaa", "html": PAGE,
+                                       "配图": [{"编号": 1, "搜索词": "roof"},
+                                              {"编号": 2, "搜索词": "crew"}]}],
+                                     limit=1, owner="uA")
+                fa = lp.resolve_preview(rows[0]["file"], "uA")
+                # B 版故意只用一张图,验证「只复制引用到的」
+                fb = fa.parent / "b.html"
+                import re as _re
+                fb.write_text(_re.sub(r'<img[^>]*data-slot="2"[^>]*>', "",
+                                      fa.read_text(encoding="utf-8")), encoding="utf-8")
+
+                r = cfp.publish_ab("lp.example.com", "exp1", fa, fb,
+                                   "https://trk.example.com/cf/click/1",
+                                   '<script src="https://trk.example.com/l.js"></script>')
+                proj = r["created"]["pages_project"]
+                base = cfp.SITES_DIR / proj / "exp1"
+                a_imgs = sorted(x.name for x in (base / "a" / "img").glob("*"))
+                if len(a_imgs) != 2:
+                    return "A 版的图没跟着传上去(只有 %d 张)" % len(a_imgs)
+                b_dir = base / "b" / "img"
+                b_imgs = sorted(x.name for x in b_dir.glob("*")) if b_dir.is_dir() else []
+                if len(b_imgs) != 1:
+                    return "B 版只引用 1 张,却传了 %d 张 —— 把没用到的图也公开出去了" % len(b_imgs)
+                html_a = (base / "a" / "index.html").read_text(encoding="utf-8")
+                for name in a_imgs:
+                    if "img/" + name not in html_a:
+                        return "传上去的图和页面里引用的对不上"
+
+                # 源图丢了 → 不挡发布,但必须报出来
+                for one in (fa.parent / "img").glob("*"):
+                    one.unlink()
+                r2 = cfp.publish_ab("lp.example.com", "exp2", fa, fb,
+                                    "https://trk.example.com/cf/click/1",
+                                    '<script src="https://trk.example.com/l.js"></script>',
+                                    allow_replace=True)
+                if not r2["created"].get("⚠️配图丢了"):
+                    return "配图丢了却报成完全成功 —— 线上是裂图,用户完全不知道"
+                if "⚠️请立刻告诉用户" not in r2:
+                    return "只在深处记了一笔,模型多半不会讲给用户听"
+        finally:
+            lp.cs.search, lp.cs.download = real
+            lp.GENERATED_DIR = keep_gen
+            (cfp.SITES_DIR, cfp.MAPPING_FILE, cfp._api, cfp.owned_zone, cfp._guard_domain,
+             cfp._project_exists, cfp._project_has_content, cfp._ensure_project,
+             cfp._ensure_domain, cfp._wrangler_deploy, cfp._ensure_dns) = keep
+        return True
+    check("发布:图跟着页面一起传,只传引用到的,丢了要报出来", t_publish_carries_images)
+
+    def t_preview_can_show_images():
+        src = _no_comments(open("agent_server.py", encoding="utf-8").read())
+        bad = []
+        if "img-src 'self'" not in src:
+            bad.append("预览的 CSP 没放开 'self' —— 页面里的图会被浏览器拦掉,还是看不见")
+        if "img-src 'self' https:" in src or "img-src * " in src:
+            bad.append("CSP 放得太宽了:外部图片一律该在生成那一步就摘掉,这里不该再开口子")
+        if '@app.get("/landing-pages/img/{filename}")' not in src:
+            bad.append("没有取配图的路由,预览里的图全是 404")
+        return bad or True
+    check("预览:CSP 放开自家图片,并有取图的路由", t_preview_can_show_images)
+
+    def t_preview_images_are_per_user():
+        real = fake_lib()
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P(d)
+                lp.attach_images(PAGE, [{"编号": 1, "搜索词": "roof"}], owner="uA")
+                name = [f.name for f in (_P(d) / "uA" / "img").glob("*")][0]
+                import contextvars
+
+                def fetch(uid):
+                    def go():
+                        srv.CURRENT_USER_ID.set(uid)
+                        return srv.landing_page_image(name)
+                    return contextvars.Context().run(go)
+                if getattr(fetch("uB"), "status_code", 200) != 404:
+                    return "B 拿文件名就能读到 A 的配图"
+                if getattr(fetch("uA"), "status_code", 200) == 404:
+                    return "A 自己反而读不到"
+                if getattr(fetch("../../../etc/passwd"), "status_code", 200) == 200:
+                    return "目录穿越没拦住"
+                if getattr(fetch("uA") and srv.landing_page_image("../x.jpg"),
+                           "status_code", 200) == 200:
+                    return "图片名里的 ../ 没拦住"
+        finally:
+            lp.cs.search, lp.cs.download = real
+            lp.GENERATED_DIR = keep
+        return True
+    check("预览配图:读不到别人的,目录穿越也拦住", t_preview_images_are_per_user)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -5039,6 +5377,7 @@ if __name__ == "__main__":
     test_no_such_action()
     test_read_side_isolation()
     test_stream_carries_context()
+    test_landing_images()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()
