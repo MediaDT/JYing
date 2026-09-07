@@ -280,6 +280,8 @@ SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBrea
 第3步 素材:**先问他"你这条广告主要推什么?有现成的图片/视频吗?"**
    · 有 → 请他点输入框左侧的 📎 按钮上传;上传成功后会自动出现一条带 assetUrl 的消息,记住 assetUrl 和文件名;
    · **没有 / 说"帮我推荐" → 先调 recommend_creatives**,把账户里效果好的历史素材列给他挑。
+     (这个工具**不只用在这一步** —— 用户任何时候问「我账户里有哪些素材图」都调它,
+     它是唯一能拿到账户历史素材的接口。)
      用表格展示,每个素材用 `![素材N](asset_url)` 插图让他直接看到,并附上真实的 CTR/转化/花费。
      说清两点:①这些是他自己账户投过的,**版权和平台审核都没问题**;②选哪个说编号就行。
      他选了之后,直接用那个 asset_url 继续(不用再上传)。
@@ -443,6 +445,8 @@ Step 3 Creative: **first ask "what is this ad promoting, and do you already have
    · If yes → ask them to click the 📎 button to the left of the input box and upload. After a successful upload
      a message with an assetUrl appears automatically — remember that assetUrl and the filename;
    · If no / they ask for suggestions → **call recommend_creatives first** and show the account's best past
+     (this tool is NOT limited to this step — call it whenever the user asks what creatives their account has;
+     it is the ONLY way to reach the account's past creatives)
      creatives. Use a table, embed each one with `![Creative N](asset_url)` so they can actually see it, and
      include the real CTR / conversions / spend. Make two things clear: (1) these are from their own account, so
      licensing and ad review are not an issue; (2) they just reply with a number to pick one. Then reuse that
@@ -673,9 +677,17 @@ def get_delivery_tree(campaign_id: str, ad_account_id: str = "") -> dict:
 
 
 def recommend_creatives(ad_account_id: str = "", days: int = 90, top_n: int = 5) -> dict:
-    """推荐素材:从**这个账户自己投过的广告**里,挑效果最好的几个素材给用户复用。
+    """**列出/查看这个账户已有的素材图** —— 从它自己投过的广告里取,顺带按效果排好序。
 
-    建新广告第3步(素材)时,用户说"没有素材"/"帮我推荐"就调它。
+    **这是本项目唯一能拿到账户历史素材的工具,没有别的接口。**
+    所以用户只要问到「我账户里有哪些图」「有什么素材能用」「历史素材看一下」
+    「帮我推荐素材」,一律调它。**绝不许回答「接口限制/没有权限/拿不到」** ——
+    线上实测出过这种事:工具明明可用,模型却编了一句「由于系统接口的限制,
+    我暂时无法为您拉取账户里的历史素材图」,用户完全看不出那是编的。
+
+    建新广告第3步(素材)只是**其中一个**使用场景,不是唯一场景 ——
+    原来的说明把动作锁死在"推荐"、场景锁死在"第3步",于是「账户上的素材图有哪些」
+    这种问法对不上号,模型就去编理由了。
 
     为什么只推荐账户自己的素材:①有真实投放数据背书,不是凭空说"这个好";
     ②版权干净 —— 从网上找图投广告会有法律风险,平台也可能拒审。
@@ -3421,16 +3433,78 @@ def _tool_allowed(name: str) -> bool:
     return True
 
 
+STUDIO_LABELS = {"campaign": "投放助手", "creative": "素材工作室", "landing": "落地页工作室"}
+
+
+def _studio_that_can(name: str) -> str:
+    """这个工具在哪个工作室能用?返回模式名。
+
+    **投放助手放行全部工具**,所以任何被拦下的工具在那儿一定能用;
+    但如果隔壁那个工作室也有,就优先指到隔壁 —— 离用户正在做的事更近。
+    """
+    here = CURRENT_CHAT_MODE.get()
+    sibling = "landing" if here == "creative" else "creative"
+    sib_set = LANDING_TOOL_NAMES if sibling == "landing" else CREATIVE_TOOL_NAMES
+    return sibling if name in sib_set else "campaign"
+
+
+def _handoff(name: str, why: str, say: str = "") -> dict:
+    """被工作室闸门拦下时,返回一张**带去处的移交单**,而不是一句死话。
+
+    **为什么不能只说「当前工作室不能执行这项操作」**:那是死胡同 ——
+    用户不知道该去哪个工作室、切过去之后刚才聊的还在不在。更糟的是,
+    模型拿到一句光秃秃的拒绝,就会自己**编一个理由**转述给用户
+    (线上实测:「我刚才切到落地页工作室的视角了,没有权限直接在图库里帮您找图」)。
+    把「去哪、为什么、到那边第一句说什么」由**代码**写好,模型只能原样转述。
+    """
+    to = _studio_that_can(name)
+    return {
+        "handoff": {
+            "到哪个工作室": STUDIO_LABELS.get(to, to),
+            "switch_to": to,
+            "为什么": why,
+            "到那边第一句可以说": say or "接着刚才的事继续",
+        },
+        "note": ("**这件事是能做的,只是要换个工作室 —— 绝不许说成「我没有权限」"
+                 "「接口限制」「系统不支持」。** 请把上面这张移交单讲给用户:"
+                 f"顶栏点「{STUDIO_LABELS.get(to, to)}」就能过去,"
+                 "**切换时选「带着这段对话过去」,刚才聊的内容不会丢**。"
+                 "然后就停在这儿等他,别再自己找别的办法绕。"),
+    }
+
+
 def _tool_call(name: str, args: dict) -> dict:
     """执行模型工具；工作室模式在代码层拦住投放写操作。"""
     if not _tool_allowed(name):
-        return {"error": "当前工作室不能执行这项投放操作。请切换到投放助手。"}
+        # `_tool_label` 出的是进度用语(「正在从授权图库里找素材…」),
+        # 直接塞进句子读着别扭,剥掉「正在」和省略号再用
+        what = _tool_label(name).replace("正在", "").rstrip("…").strip() or name
+        return _handoff(
+            name,
+            f"「{what}」这件事当前工作室做不了,"
+            f"要在「{STUDIO_LABELS.get(_studio_that_can(name))}」里做。",
+            say=f"帮我{what}")
     if CURRENT_CHAT_MODE.get() in ("creative", "landing") and name in ("confirm_action", "cancel_action"):
         action = PENDING_ACTIONS.get(str(args.get("action_id") or ""))
         allowed = _mode_action_types(CURRENT_CHAT_MODE.get())
         if not action or action.get("type") not in allowed:
             label = "素材" if CURRENT_CHAT_MODE.get() == "creative" else "落地页"
-            return {"error": f"{label}工作室不能确认或取消其它工作区的待办。"}
+            if not action:
+                return {"error": f"找不到待办 {args.get('action_id') or '(空)'}"
+                                 "(可能已执行/已取消,或编号有误)。"
+                                 "**这不是权限问题**,可以调 list_pending_actions 查一下现有编号。"}
+            # 待办确实存在,只是不归这个工作室管 —— 同样给去处,别让用户卡住
+            return {
+                "handoff": {
+                    "到哪个工作室": STUDIO_LABELS["campaign"],
+                    "switch_to": "campaign",
+                    "为什么": f"待办 {args.get('action_id')} 是「{action.get('type')}」类型的,"
+                              f"{label}工作室管不了它。",
+                    "到那边第一句可以说": f"执行待办 {args.get('action_id')}",
+                },
+                "note": ("**别说成「没有权限」** —— 这个待办好好地存着,只是要在投放助手里确认。"
+                         "请把去处讲给用户,并提醒他切换时选「带着这段对话过去」。"),
+            }
     fn = OPENAI_TOOL_FUNCS.get(name)
     return fn(**args) if fn else {"error": f"未知工具 {name}"}
 
@@ -3874,8 +3948,11 @@ OPENAI_TOOL_SCHEMAS = [
              {"campaign_id": {"type": "string", "description": "广告计划 id"},
               "ad_account_id": _ID}, ["campaign_id"]),
     _oa_tool("recommend_creatives",
-             "推荐素材:从这个账户投过的广告里挑效果最好的几个素材给用户复用(带真实数据,版权干净)。"
-             "建新广告第3步用户说没素材/要推荐时调它",
+             "**列出/查看这个账户已有的素材图**(从它自己投过的广告里取，带真实 CTR/花费，版权干净)。"
+             "用户问「我账户里有哪些图」「有什么素材能用」「看下历史素材」「帮我推荐素材」都调它。"
+             "**这是本项目唯一能拿到账户历史素材的工具，没有别的接口** —— "
+             "所以绝不许回答「接口限制/没有权限/拿不到」，调一次就知道。"
+             "建新广告第3步只是其中一个使用场景，不是唯一场景",
              {"ad_account_id": _ID,
               "days": {"type": "integer", "description": "看最近多少天的数据,默认90"},
               "top_n": {"type": "integer", "description": "推荐几个,默认5,最多10"}}, []),

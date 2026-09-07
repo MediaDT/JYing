@@ -52,11 +52,13 @@ console.log("\n【1.5】三个工作区能独立切换");
   t("能切到落地页工作室", landing && landing.mode === "landing");
   t("落地页 Tab 显示选中", app.registry["landing-mode"].classList.contains("active"));
   t("页面标题切成落地页工作室", app.registry["app-title"].textContent === "落地页工作室");
+  // **空对话原地切,不新建。** 原来每点一下标签就开一段新的空对话,
+  // 用户随手点两下就在左栏留下两个空壳。空的本来就没什么可带,直接换视角。
+  t("空对话切工作室 = 原地切,不留空壳", app.convs().length === 1, `实际 ${app.convs().length} 段`);
   app.registry["creative-mode"].fire("click");
   const creative = app.convs().find((c) => c.id === app.curId());
   t("能继续切到素材工作室", creative && creative.mode === "creative");
-  t("两个工作区各自保存为独立会话", app.convs().some((c) => c.mode === "landing") &&
-                                      app.convs().some((c) => c.mode === "creative"));
+  t("再切一次还是同一段", app.convs().length === 1, `实际 ${app.convs().length} 段`);
 }
 
 console.log("\n【2】已有两个会话:打开的是当前那个");
@@ -90,6 +92,71 @@ const tick = () => new Promise((r) => setImmediate(r));
 const settle = async () => { for (let i = 0; i < 10; i++) await tick(); };
 
 (async () => {
+
+console.log("\n【1.6】有内容时切工作室:必须问,不能静默丢上下文");
+{
+  // **这是线上踩到的死胡同的另一半。** 助手让用户「去素材工作室」,
+  // 他切过去发现刚才聊的全没了 —— 原来 startNewConversation() 直接开一段空的。
+  const mk = () => boot({
+    "adbot-conversations": JSON.stringify([
+      { id: "c1", title: "聊了一半", mode: "campaign", updatedAt: 2,
+        messages: [{ role: "user", content: "帮我做落地页" },
+                   { role: "assistant", content: "好的" }] }]),
+    "adbot-current-conv": "c1" });
+
+  {
+    const app = mk();
+    app.registry["landing-mode"].fire("click");
+    t("有内容时不静默切,先弹框问", app.registry["confirm-overlay"].classList.contains("show"));
+    const conv = app.convs().find((c) => c.id === "c1");
+    t("问的时候一个字都还没改", conv && conv.mode === "campaign" && conv.messages.length === 2);
+    t("弹框里给了「带着这段过去」这个选项", !app.registry["confirm-alt"].hidden);
+    t("非破坏性操作不顶着垃圾桶图标", app.registry["confirm-icon"].hidden === true);
+  }
+
+  {
+    const app = mk();
+    app.registry["landing-mode"].fire("click");
+    app.registry["confirm-alt"].fire("click");
+    await tick();
+    const c = app.convs();
+    t("选「带着过去」→ 还是同一段", app.curId() === "c1" && c.length === 1, `${c.length} 段`);
+    t("选「带着过去」→ 消息一条没丢", c[0].messages.length === 2);
+    t("选「带着过去」→ 视角换成了落地页", c[0].mode === "landing", c[0].mode);
+  }
+
+  {
+    const app = mk();
+    app.registry["creative-mode"].fire("click");
+    app.registry["confirm-ok"].fire("click");
+    await tick();
+    const c = app.convs();
+    t("选「另开一段」→ 新开了一段", app.curId() !== "c1" && c.length === 2, `${c.length} 段`);
+    t("选「另开一段」→ 老的原样留着", c.some((x) => x.id === "c1" && x.messages.length === 2));
+    t("选「另开一段」→ 新的那段是素材工作室",
+      (c.find((x) => x.id === app.curId()) || {}).mode === "creative");
+  }
+
+  {
+    const app = mk();
+    app.registry["landing-mode"].fire("click");
+    app.registry["confirm-cancel"].fire("click");
+    await tick();
+    const conv = app.convs().find((c) => c.id === "c1");
+    t("点「再想想」→ 什么都没变", conv && conv.mode === "campaign" && app.convs().length === 1);
+  }
+
+  {
+    // 正在生成的那一段带不过去:在飞的请求带的是旧视角,半路换挡只会让人以为切了却没切
+    const app = mk();
+    app.win.running().set("c1", { note: "", text: "" });
+    app.registry["landing-mode"].fire("click");
+    t("那一段还在生成时,不给「带过去」这个选项", app.registry["confirm-alt"].hidden === true);
+    t("并且说清了为什么",
+      String(app.registry["confirm-text"].textContent).includes("还在生成"),
+      app.registry["confirm-text"].textContent);
+  }
+}
 
 console.log("\n【4】删除会话");
 {

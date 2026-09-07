@@ -1034,11 +1034,34 @@ def test_pure_logic():
         # 就往用户真实的 ClickFlare 账号发一次请求 —— 测试不许碰真实数据。
         import clickflare_client as cfc
         real_apply = cfc.apply_flow
-        cfc.apply_flow = lambda *a, **k: {"done": True, "已经生效": True, "flow_id": "test"}
+        ran = False
+
+        def _stub(*a, **k):
+            nonlocal ran
+            ran = True
+            return {"done": True, "已经生效": True, "flow_id": "test"}
+
+        cfc.apply_flow = _stub
         try:
             for want in srv.LANDING_ACTION_TYPES:
                 if want not in ("publish_landing_pages", "swap_campaign_landers"):
                     return f"落地页待办类型清单里多了没预期的:{want}"
+            # **跨工作室这一关要先测。** 原来放在后面,而落地页那次确认成功会把待办
+            # 从保险箱里弹出去 —— 于是素材工作室那次撞的是「找不到待办」,
+            # 根本没走到跨工作室闸门。测试一直为错误的原因通过。
+            m = srv.CURRENT_CHAT_MODE.set("creative")
+            try:
+                r = srv._tool_call("confirm_action", {"action_id": aid})
+                if r.get("done") or ran:
+                    return "素材工作室居然真的执行了换落地页的待办"
+                if aid not in srv.PENDING_ACTIONS:
+                    return "被拒了却把待办弄没了"
+                # 拦住之后还要给去处,别把用户留在死胡同里(见 3.50)
+                h = r.get("handoff") or {}
+                if h.get("switch_to") != "campaign":
+                    return "拦是拦了,但没告诉用户该去哪儿:%r" % str(r)[:120]
+            finally:
+                srv.CURRENT_CHAT_MODE.reset(m)
             m = srv.CURRENT_CHAT_MODE.set("landing")
             try:
                 listed = str(srv.list_pending_actions())
@@ -1049,15 +1072,10 @@ def test_pure_logic():
                 if "[已算好" not in listed:
                     return "put_body 没有脱敏标记"
                 r = srv._tool_call("confirm_action", {"action_id": aid})
-                if "不能确认" in str(r.get("error", "")):
+                if r.get("handoff") or "不能确认" in str(r.get("error", "")):
                     return "落地页工作室确认自己的换页待办被拒了"
-            finally:
-                srv.CURRENT_CHAT_MODE.reset(m)
-            m = srv.CURRENT_CHAT_MODE.set("creative")
-            try:
-                r = srv._tool_call("confirm_action", {"action_id": aid})
-                if "不能确认" not in str(r.get("error", "")):
-                    return "素材工作室居然能确认换落地页的待办"
+                if not ran:
+                    return "落地页工作室确认了,却没真的执行"
             finally:
                 srv.CURRENT_CHAT_MODE.reset(m)
         finally:
@@ -3521,6 +3539,124 @@ def test_oal_filter_combo():
     check("「只看在投中」改由本地筛,并且如实说明", active_only_is_honored_locally)
 
 
+# ============ 3.50 别把「换个工作室」说成「我没有权限」 ============
+
+def test_studio_handoff():
+    """线上踩到的两件事,根子是同一个:**模型拿不到出路,就自己编一个理由**。
+
+    ①用户在**投放助手**里问「账户上的素材图有哪些?」——`recommend_creatives`
+      在这个模式下完全可用(campaign 放行全部工具),模型却答
+      「由于目前系统接口的限制,我暂时无法为您拉取账户里的历史素材图」。
+      诱因很具体:那个工具的说明把动作锁死在"推荐"、场景锁死在"建广告第3步",
+      「列出账户里有哪些图」这种问法对不上号。
+    ②用户在**落地页工作室**里要图库图,被闸门挡下,模型答「我没有权限」,
+      然后让用户自己上传 —— 用户被留在死胡同里,不知道该去哪儿。
+    """
+    import contextvars
+    import inspect
+    import agent_server as srv
+
+    print("\n【3.50】工作室之间的移交")
+
+    # ---- ① 措辞:两处都要改 ----
+    def wording_covers_listing():
+        # **必须两处都查**:BRAIN=auto 时 Gemini 从 docstring/签名生成 schema,
+        # 走 ofox 时模型只看 _oa_tool 那段。只改一处等于漏一半。
+        doc = inspect.getdoc(srv.recommend_creatives) or ""
+        sch = next((x["function"]["description"] for x in srv.OPENAI_TOOL_SCHEMAS
+                    if x["function"]["name"] == "recommend_creatives"), "")
+        for where, text in (("docstring", doc), ("工具 schema", sch)):
+            if "列出" not in text:
+                return "%s 里还是只说「推荐」,对不上「账户里有哪些图」这种问法" % where
+            if "唯一" not in text:
+                return "%s 里没有那句排他声明(专治「我以为还有别的接口而我没有」)" % where
+            if "接口限制" not in text and "没有权限" not in text:
+                return "%s 里没明确禁止编造「接口限制/没有权限」" % where
+        return True
+    check("recommend_creatives 的说明:docstring 和 schema 两处都改了", wording_covers_listing)
+
+    def not_locked_to_step3():
+        sch = next((x["function"]["description"] for x in srv.OPENAI_TOOL_SCHEMAS
+                    if x["function"]["name"] == "recommend_creatives"), "")
+        if "第3步" in sch and "不是唯一" not in sch:
+            return "还把用途锁死在建广告第3步"
+        return True
+    check("不再把用途锁死在「建广告第3步」", not_locked_to_step3)
+
+    # ---- ② 闸门返回移交单 ----
+    def gate(mode, tool, args=None):
+        def go():
+            srv.CURRENT_CHAT_MODE.set(mode)
+            return srv._tool_call(tool, args or {})
+        return contextvars.Context().run(go)
+
+    def blocked_tool_gets_a_way_out():
+        r = gate("landing", "search_stock_creatives")     # Cole 实测踩到的那条
+        h = r.get("handoff")
+        if not h:
+            return "还是一句死话,没给去处:%r" % str(r)[:100]
+        if h.get("switch_to") != "creative":
+            return "指错了工作室:%r" % h.get("switch_to")
+        if not h.get("到那边第一句可以说"):
+            return "没告诉用户过去之后该说什么"
+        note = str(r.get("note") or "")
+        for banned in ("没有权限", "接口限制"):
+            if banned not in note:
+                return "note 里没明确禁止模型说「%s」" % banned
+        if "带着这段对话过去" not in note:
+            return "没提醒用户切换时可以带上上下文(否则又是丢上下文那个死胡同)"
+        return True
+    check("被闸门拦下 → 给出去处,而不是一句死话", blocked_tool_gets_a_way_out)
+
+    def points_to_the_nearest_studio():
+        # 隔壁工作室有就指隔壁(离他正在做的事更近);两边都没有才回投放助手
+        if gate("creative", "propose_publish_landing_pages")["handoff"]["switch_to"] != "landing":
+            return "落地页的活没指到落地页工作室"
+        if gate("creative", "propose_create_campaign")["handoff"]["switch_to"] != "campaign":
+            return "只有投放助手能做的事没指到投放助手"
+        return True
+    check("指到最近的那个工作室(隔壁能做就指隔壁)", points_to_the_nearest_studio)
+
+    def wrong_studio_action_also_gets_a_way_out():
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS["smoke-handoff"] = {
+            "type": "create_campaign", "seq": -1, "user_id": ""}
+        try:
+            r = gate("landing", "confirm_action", {"action_id": "smoke-handoff"})
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+        h = r.get("handoff")
+        if not h:
+            return "待办不归这个工作室管时,还是一句死话:%r" % str(r)[:100]
+        if h.get("switch_to") != "campaign":
+            return "没指到能执行它的工作室"
+        return True
+    check("待办不归本工作室管 → 也给去处", wrong_studio_action_also_gets_a_way_out)
+
+    def missing_action_is_not_a_permission_error():
+        # 编号打错和「没有权限」是两码事,混着报会让人跑去切工作室,而真正该做的是查编号
+        r = gate("landing", "confirm_action", {"action_id": "no-such-id"})
+        err = str(r.get("error") or "")
+        if r.get("handoff"):
+            return "编号不存在却给了一张移交单,切过去照样找不到"
+        if "不是权限问题" not in err:
+            return "没说清这不是权限问题:%r" % err[:80]
+        return True
+    check("编号根本不存在 → 说清「不是权限问题」,别指错路", missing_action_is_not_a_permission_error)
+
+    def campaign_mode_blocks_nothing():
+        # 投放助手放行全部工具 —— 这条要守住,否则「问题一」会从幻觉变成真闸门
+        def go():
+            srv.CURRENT_CHAT_MODE.set("campaign")
+            return [n for n in srv.OPENAI_TOOL_FUNCS if not srv._tool_allowed(n)]
+        blocked = contextvars.Context().run(go)
+        if blocked:
+            return "投放助手里竟然有工具被拦:%r" % blocked[:5]
+        return True
+    check("投放助手仍然放行全部工具", campaign_mode_blocks_nothing)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -3956,6 +4092,7 @@ if __name__ == "__main__":
     test_stale_years()
     test_dns_and_rule_paths()
     test_oal_filter_combo()
+    test_studio_handoff()
     test_per_user_isolation()
     test_brain_relay()
     test_newsbreak_readonly()
