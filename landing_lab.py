@@ -553,8 +553,9 @@ def _img_dir(owner: str = "") -> Path:
     return d
 
 
-# 这一轮里有哪几家图库已经确认连不上了 —— **同一次生成里不再重试**。
-# 实测:这台机器连不上 Openverse(20 秒读超时)。一页最多 4 张图,
+# 这一轮里有哪几家图库已经确认**没反应**了 —— 同一次生成里不再重试。
+# **别写成「连不上」** —— 2026-09-08 查实:DNS 18ms / TCP 20ms / TLS 123ms 全正常,
+# 是 Openverse 自己的服务器在磨(同一分钟内 0.5~32 秒乱跳)。一页最多 4 张图,
 # 每张都白等一次就是 80 秒 —— 用户那头看着像卡死,还可能撞上前端的空闲上限。
 # 只在一次 attach_images 里生效,不做进程级缓存:钥匙/网络随时可能变好。
 _DEAD_SOURCES: set = set()
@@ -666,11 +667,12 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
                                "PEXELS_API_KEY / PIXABAY_API_KEY 再重启就行 —— "
                                "**这不是关键词的问题,换多少个词都一样。**")
         elif all(x in _DEAD_SOURCES for x in ready):
-            problems.insert(0, "⚠️ **图库这会儿连不上**(%s),所以这页一张图都配不上。"
-                               "**不是关键词的问题。** 可以过一会儿再试;"
-                               "如果一直这样,建议去申请一把 Pexels 或 Pixabay 的免费钥匙"
-                               "(填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY),"
-                               "它们比 Openverse 稳得多、家装类的图也多得多。"
+            problems.insert(0, "⚠️ **图库这会儿没反应**(%s 请求超时),所以这页一张图都配不上。"
+                               "**不是关键词的问题。** 实测 Openverse 的响应时间在 0.5~32 秒之间乱跳,"
+                               "而且家装类(roof / gutter 这些)本来就没多少可商用的图。"
+                               "**正解是去申请一把 Pexels 或 Pixabay 的免费钥匙**"
+                               "(填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY,再重启)——"
+                               "它们快得多、家装类的图也多得多。"
                                % "、".join(sorted(_DEAD_SOURCES)))
 
     # 剩下的占位符(没包在 <img> 里的)一律清掉,不能让 [[IMAGE_n]] 露在页面上
@@ -707,8 +709,9 @@ def swap_image(filename: str, slot: int, query: str, owner: str = "") -> dict:
                              "填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY 再重启就行。"
                              "**这不是关键词的问题。** 页面一个字都没动。"}
         if all(x in _DEAD_SOURCES for x in ready):
-            return {"error": "**图库这会儿连不上**(%s),不是关键词的问题。页面一个字都没动,"
-                             "过一会儿再试。" % "、".join(sorted(_DEAD_SOURCES))}
+            return {"error": "**图库这会儿没反应**(%s 请求超时),不是关键词的问题。"
+                             "页面一个字都没动。配一把 Pexels / Pixabay 的免费钥匙会稳得多。"
+                             % "、".join(sorted(_DEAD_SOURCES))}
         return {"error": "按「%s」没找到可商用的图,页面一个字都没动。换个关键词再试" % query}
     try:
         data, fname, _mime = cs.download(pick["image_url"])

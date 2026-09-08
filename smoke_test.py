@@ -4793,10 +4793,13 @@ def test_landing_images():
                     return ("图库确认连不上之后还在一张一张白等(打了 %d 次)—— "
                             "一页 4 张就是 80 秒,用户看着像卡死" % len(calls))
                 head = probs[0] if probs else ""
-                if "连不上" not in head:
-                    return "没说清是图库连不上,用户会去换关键词:%r" % head[:90]
+                # **断言真实的不变量,不是某个词。** 措辞从「连不上」改成过「没反应」
+                # (查实那不是网络问题,是对方服务器慢),盯着字面就会为了改措辞而改测试。
+                # 这里要守的是:①说清不是关键词的问题;②给出真正该做的事(配钥匙)。
                 if "不是关键词的问题" not in head:
-                    return "没点明「换关键词没用」"
+                    return "没点明「换关键词没用」,用户会一直换词:%r" % head[:90]
+                if "PEXELS_API_KEY" not in head and "钥匙" not in head:
+                    return "没告诉用户真正该做的是配一把免费钥匙:%r" % head[:90]
                 # 一把钥匙都没有时,措辞要不一样(该做的是去配钥匙)
                 lp.cs.available_sources = lambda: [{"id": "pexels", "ready": False}]
                 _o2, _u2, p2 = lp.attach_images(page, specs, owner="uA")

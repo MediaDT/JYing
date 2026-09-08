@@ -23,6 +23,19 @@ import httpx
 
 TIMEOUT = 20.0
 
+# **Openverse 单独给一个长得多的超时。** 2026-09-08 实测(同一台机器、同一分钟内):
+#   q=roof+repair              → 31s
+#   q=metal+roof+installation  → 32s
+#   q=window+replacement       → 1.7s
+#   q=contractor+house         → 0.5s
+# 响应时间在 0.5~32 秒之间乱跳,**而原来的超时正好是 20 秒** —— 卡在生死线上,
+# 快的过、慢的挂,表现出来就像"时好时坏的网络问题"(我一度写成"连不上",是错的:
+# DNS 18ms、TCP 20ms、TLS 123ms 全正常,是它自己的服务器在磨)。
+# 给它 45 秒之后至少不是掷骰子;真挂了也只白等一次 —— `landing_lab._DEAD_SOURCES`
+# 会把这一轮剩下的几张图直接跳过(第六之二十三节)。
+# Pexels / Pixabay 有钥匙时排在它前面,所以这个长超时平时根本用不上。
+_SOURCE_TIMEOUT = {"openverse": 45.0}
+
 # 下载素材时的 User-Agent。**格式不能随便写**:Openverse 的图大量托管在
 # Wikimedia,而它的机器人政策要求 UA 里带**联系方式**(括号里那段),否则 403。
 # 实测过:浏览器 UA、curl 的 UA、以及不带括号联系方式的自定义 UA,**全部 403**;
@@ -198,7 +211,8 @@ def _openverse(query: str, count: int) -> list[dict]:
     只取 CC0 和公有领域,是因为这两种既可商用、又不要求在广告里署名 ——
     CC-BY 虽然也能商用,但要求署名,广告图上没地方放。
     """
-    r = httpx.get("https://api.openverse.org/v1/images/", timeout=TIMEOUT, trust_env=False,
+    r = httpx.get("https://api.openverse.org/v1/images/",
+                  timeout=_SOURCE_TIMEOUT["openverse"], trust_env=False,
                   params={"q": query, "license": "cc0,pdm", "size": "large",
                           "page_size": count, "mature": "false"})
     r.raise_for_status()
