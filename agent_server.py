@@ -149,6 +149,7 @@ _TOOL_LABELS = {
     "propose_create_campaign": "正在登记建广告待办…",
     "propose_add_ad": "正在登记加广告待办…",
     "swap_landing_image": "正在换落地页上的配图…",
+    "propose_landing_images": "正在登记落地页配图待办…",
     "propose_schedule": "正在登记定时任务…",
     "confirm_action": "正在执行你确认的操作…",
     "cancel_action": "正在取消待办…",
@@ -1296,6 +1297,121 @@ def swap_landing_image(landing_file: str, slot: int, query: str) -> dict:
     return _absolute_previews([r | {"preview_url": f"/landing-pages/{Path(landing_file).name}"}])[0]
 
 
+def propose_landing_images(landing_file: str, slots: str = "") -> dict:
+    """登记一个「**用 AI 把落地页上没配上的图生出来**」的待办(不会立即执行!)。
+
+    什么时候用:生成落地页之后,返回里说「第 N 张图没配上,位置留着但不显示」——
+    那是图库没找到(家装类的可商用图本来就薄)。用这个把它们生出来。
+
+    **生图要花钱**(每张约 $%.2f),所以走和建广告一样的保险箱:先报价、
+    用户在**下一条消息**明确同意,才 `confirm_action`。
+
+    `landing_file` 是生成结果里的 `file`;
+    `slots` 可选,像 "1,3" 那样指定只生哪几张,留空 = 全部没配上的都生。
+    画面描述**直接用当初写在页面上的那句**,不许在这一步另写 ——
+    否则报价时说的是 A、做出来的是 B。
+    """ % cr.COST_PER_IMAGE_USD
+    owner = CURRENT_USER_ID.get() or ""
+    todo = lp.pending_image_slots(landing_file, owner)
+    if not todo:
+        return {"error": "这一版落地页没有「还没配上图」的位置。",
+                "note": "**这不是出错** —— 要么图已经配齐了,要么这一版本来就没安排配图。"
+                        "想换掉某一张已有的图,用 swap_landing_image。"}
+    if slots.strip():
+        want = set()
+        for piece in _re.split(r"[^0-9]+", slots):
+            if piece.strip():
+                want.add(int(piece))
+        todo = [x for x in todo if x["slot"] in want]
+        if not todo:
+            return {"error": "指定的位置里没有等着配图的。现在空着的是第 %s 张。"
+                             % "、".join(str(x["slot"]) for x in lp.pending_image_slots(landing_file, owner))}
+
+    cost = len(todo) * cr.COST_PER_IMAGE_USD
+    # **免费又可能失败的事排在花钱之前**:余额查一下,不够就现在说,别等他点完头才发现
+    left = None
+    try:
+        left = cr.check_balance()
+    except Exception:
+        pass
+    if left is not None and left < cost:
+        return {"error": "生图通道余额不够:还剩 $%.2f,这一单大约要 $%.2f。请先充值。" % (left, cost),
+                "note": "**没有登记任何待办**,充完值直接再说一次就行。"}
+
+    candidate = {
+        "type": "make_landing_images",
+        "landing_file": Path(str(landing_file)).name,
+        # **快照**:报价时给他看的是这几句画面描述,执行时照着这份做。
+        # 不存「第几张」再回去现查 —— 页面可能被 swap_landing_image 改过。
+        "slots": todo,
+        "user_id": CURRENT_USER_ID.get(), "seq": _seq(),
+    }
+    dup = _find_duplicate(candidate)
+    if dup:
+        return {"action_id": dup, "note": f"这一单之前已经登记过(编号 {dup}),不要重复登记,"
+                                          f"用户同意后直接 confirm_action('{dup}')。"}
+    aid = uuid.uuid4().hex[:8]
+    _put_action(aid, candidate)
+    print(f"[write-op] 登记落地页配图待办 {aid}: {len(todo)} 张", flush=True)
+    return {
+        "action_id": aid,
+        "要生几张": len(todo),
+        "每张画什么": [{"第几张": x["slot"], "画面": x["want"]} for x in todo],
+        "尺寸": f"{cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}",
+        "预估花费": f"约 ${cost:.2f}(每张约 ${cr.COST_PER_IMAGE_USD:.2f})",
+        **({"生图通道余额": f"${left:.2f}"} if left is not None else {}),
+        "note": ("向用户复述:要生几张、每张画什么、**大概花多少钱**、以及待办编号 %s。"
+                 "说明两件事:①出的是**干净的实拍照片,图上一个字都没有**"
+                 "(落地页的标题文案是 HTML 排的,图上再来一遍就重复了);"
+                 "②**确认之后立刻扣钱**,生完直接填进页面,刷新预览就能看到。"
+                 "**在他明确同意之前绝不许 confirm_action。**" % aid),
+    }
+
+
+def _execute_make_landing_images(a: dict) -> dict:
+    """真生图、真花钱,然后填进落地页。
+
+    **有失败的要点名说是哪几张**(和三层开关、多条广告同一条规矩);
+    成功的那几张钱已经花了,页面必须留下来。
+    """
+    owner = a.get("user_id") or ""
+    todo = a.get("slots") or []
+    need = len(todo) * cr.COST_PER_IMAGE_USD
+    # 执行时再查一次余额 —— 待办可能在保险箱里躺了很久
+    try:
+        left = cr.check_balance()
+    except Exception:
+        left = None
+    if left is not None and left < need:
+        return {"error": "生图通道余额不够:还剩 $%.2f,这一单大约要 $%.2f。**一张都没生,没扣钱。**"
+                         "充完值直接说一声重新确认就行(待办还在)。" % (left, need)}
+
+    made, failed = [], []
+    for i, one in enumerate(todo):
+        tag = "第%s张" % one.get("slot")
+        try:
+            # 落地页配图**不叠字**:标题是 HTML 排的,图上再来一遍就重复了。
+            # variant=i 让同一页的几张换镜头语言,不然几张长得一样。
+            img = cr.render(str(one.get("want") or ""), variant=i)
+            # **先落盘再改页面** —— 到这一步钱已经花掉了
+            name = lp.fill_image_slot(a["landing_file"], int(one["slot"]), img, ".jpg", owner=owner)
+            made.append({"第几张": one.get("slot"), "画面": one.get("want"), "文件": name})
+        except Exception as e:
+            failed.append({"第几张": one.get("slot"), "原因": str(e)[:180]})
+
+    if not made:
+        return {"error": "一张都没生成:" + ";".join("%s %s" % (f["第几张"], f["原因"]) for f in failed),
+                "note": "**没有扣到钱的那几张不会重复计费**,查清原因后可以重新登记。"}
+    out = {"done": True, "生好并填进页面": made, "张数": "%d / %d" % (len(made), len(todo)),
+           "preview_url": "/landing-pages/" + Path(str(a["landing_file"])).name}
+    if failed:
+        out["没生成的"] = failed
+    out["note"] = ("图已经填进落地页了,**让用户刷新预览看看**。"
+                   + (f"⚠️ 有 {len(failed)} 张没生成(见「没生成的」),**必须点名告诉用户是哪几张、为什么**。"
+                      if failed else ""))
+    return _absolute_previews([out])[0]
+
+
 def propose_publish_landing_pages(domain: str, slug: str, cta_url: str,
                                    tracking_script: str = "", variant_a_file: str = "",
                                    variant_b_file: str = "",
@@ -1975,7 +2091,8 @@ def _find_duplicate(candidate: dict) -> str:
 # 原来三处(待办清单 / 提示词注入 / confirm_action 的模式闸门)各写死一个字符串,
 # 漏改任何一处的表现都不一样:待办登记得了却看不见、或者确认时被拒。
 CREATIVE_ACTION_TYPES = ("make_creatives",)
-LANDING_ACTION_TYPES = ("publish_landing_pages", "swap_campaign_landers")
+LANDING_ACTION_TYPES = ("publish_landing_pages", "swap_campaign_landers",
+                        "make_landing_images")
 
 
 # 「工作室 → 它管哪几类待办」,同样收成一份。投放助手不走这张表(它全都能看/能确认)。
@@ -2794,6 +2911,8 @@ def confirm_action(action_id: str) -> dict:
                 "done": True, "detail": f"定时任务已生效(编号 {r['task_id']}),首次执行:{r.get('next_run', '-')}"}
         elif action.get("type") == "create_campaign":
             result = _execute_create_campaign(action)
+        elif action["type"] == "make_landing_images":
+            result = _execute_make_landing_images(action)
         elif action["type"] == "add_ad":
             result = _execute_add_ad(action)
         elif action.get("type") == "make_creatives":
@@ -3147,6 +3266,7 @@ NEWSBREAK_TOOLS = [
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages, swap_landing_image,
+    propose_landing_images,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
     propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,
@@ -3978,7 +4098,7 @@ LANDING_TOOL_NAMES = {
     "native_market_scan", "search_competitor_ads", "search_competitor_landing_pages",
     "decompose_landing_page", "summarize_landing_page_patterns",
     "list_cloudflare_landing_resources", "propose_publish_landing_pages",
-    "swap_landing_image",
+    "swap_landing_image", "propose_landing_images",
     "list_clickflare_campaigns", "describe_clickflare_campaign", "create_clickflare_landers",
     "propose_swap_campaign_landers", "clickflare_publish_kit",
     "confirm_action", "cancel_action", "list_pending_actions",
@@ -4567,6 +4687,13 @@ OPENAI_TOOL_SCHEMAS = [
                                       "description": {"type": "string"}, "asset_filename": {"type": "string"},
                                       "call_to_action": {"type": "string"}, "brand_name": {"type": "string"}}}}},
              ["ad_set_id", "asset_url", "headline", "description"]),
+    _oa_tool("propose_landing_images",
+             "**用 AI 把落地页上没配上的图生出来**(图库没找到时用)。"
+             "生图要花钱,所以只登记不执行 —— 报价后要用户在下一条消息明确同意才 confirm_action",
+             {"landing_file": {"type": "string", "description": "生成结果里的 file 字段"},
+              "slots": {"type": "string",
+                        "description": "可选,像 \"1,3\" 指定只生哪几张;留空 = 所有空着的位置"}},
+             ["landing_file"]),
     _oa_tool("swap_landing_image",
              "把已生成落地页里的**某一张配图**换掉,别的内容一个字不动。"
              "用户说「第2张图换成xxx」时用它,**别为了换图重新生成整页**",
@@ -4776,6 +4903,7 @@ OPENAI_TOOL_FUNCS = {fn.__name__: fn for fn in [
     recommend_creatives, search_stock_creatives, search_competitor_ads, my_ad_categories, platform_kind, native_market_scan,
     search_competitor_landing_pages, decompose_landing_page, summarize_landing_page_patterns,
     list_cloudflare_landing_resources, propose_publish_landing_pages, swap_landing_image,
+    propose_landing_images,
     list_clickflare_campaigns, describe_clickflare_campaign, create_clickflare_landers,
     propose_swap_campaign_landers, clickflare_publish_kit,
     decompose_creative, summarize_creative_patterns,

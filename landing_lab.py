@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import html
+import html as html_mod          # 局部变量常叫 html,遮住模块名,配图那段要用转义
 import ipaddress
 import json
 import hashlib
@@ -649,12 +650,28 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
                              "原图页": pick.get("source_page"),
                              "尺寸": "%dx%d" % (pick.get("width") or 0, pick.get("height") or 0)})
                 continue
-        # 没找到 / 下载失败 → 整个标签摘掉,别留破图
-        html = re.sub(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n), "", html)
-        if query and not any(p.startswith("第 %d 张图" % n) for p in problems):
-            problems.append("第 %d 张图没找到合适的(搜的是「%s」),这个位置留空了" % (n, query))
-        elif not query:
-            problems.append("第 %d 张图没说要找什么,这个位置留空了" % n)
+        # 没找到 / 下载失败 → **绝不留破图**。但也别把位置整个丢掉:
+        # 换成一个 `hidden` 的空 <img>,把「这儿要什么图」记在标签上。
+        #   · 页面上什么都不显示(不是灰方块、不是裂图),现在发布出去也干净;
+        #   · `_copy_images` 只认 `src="img/…"`,没有 src 的它不会去复制;
+        #   · 以后用户说「用 AI 把图补上」时,`pending_image_slots()` 靠它找回位置和需求。
+        # **为什么不当场用 AI 生图**:生图 $0.20/张,而生成落地页是免费步骤 ——
+        # 一页 3 张就是 $0.6 没经用户同意。花钱的事必须走保险箱(第六之十五节)。
+        if query:
+            alt = ""
+            m2 = re.search(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n), html)
+            if m2:
+                a2 = re.search(r'\balt\s*=\s*"([^"]*)"', m2.group(0))
+                alt = a2.group(1) if a2 else ""
+            holder = ('<img data-slot="%d" data-want="%s" alt="%s" hidden>'
+                      % (n, html_mod.escape(query, quote=True), html_mod.escape(alt, quote=True)))
+            html = re.sub(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n), lambda _m: holder, html)
+            if not any(p.startswith("第 %d 张图" % n) for p in problems):
+                problems.append("第 %d 张图没配上(搜的是「%s」),位置**留着但不显示** —— "
+                                "用户说一声就能用 AI 把它生出来" % (n, query))
+        else:
+            html = re.sub(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n), "", html)
+            problems.append("第 %d 张图没说要找什么,这个位置去掉了" % n)
 
     # **「没找到合适的图」和「图库根本连不上」要分开报。**
     # 混着报的话用户会去换关键词 —— 而真正该做的是配一把钥匙,换多少词都没用。
@@ -678,6 +695,60 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
     # 剩下的占位符(没包在 <img> 里的)一律清掉,不能让 [[IMAGE_n]] 露在页面上
     html = _IMAGE_MARK.sub("", html)
     return html, used, problems
+
+
+_HOLDER = r'<img\b[^>]*\bdata-slot="%d"[^>]*>'
+
+
+def pending_image_slots(filename: str, owner: str = "") -> list[dict]:
+    """这一版落地页里还有哪几个位置没配上图(隐藏占位)。
+
+    返回 `[{"slot": 1, "want": "metal roof installation crew"}, ...]`,
+    `want` 就是当初模型写的英文搜索词 —— **AI 生图直接拿它当画面描述**,
+    不让模型在确认那一刻另写一句(那就成了"报价的是 A、做出来的是 B")。
+    """
+    path = resolve_preview(filename, owner)
+    if path is None:
+        return []
+    out = []
+    for m in re.finditer(r'<img\b[^>]*\bhidden\b[^>]*>', path.read_text(encoding="utf-8")):
+        tag = m.group(0)
+        slot = re.search(r'data-slot="(\d+)"', tag)
+        want = re.search(r'data-want="([^"]*)"', tag)
+        if slot and want:
+            out.append({"slot": int(slot.group(1)),
+                        "want": html_mod.unescape(want.group(1))})
+    return sorted(out, key=lambda x: x["slot"])
+
+
+def fill_image_slot(filename: str, slot: int, data: bytes, ext: str = ".jpg",
+                    owner: str = "") -> str:
+    """把生成好的图片**先落盘**,再填进那个隐藏占位。返回文件名。
+
+    顺序要紧:图是花过钱的,**落盘要排在改页面之前** —— 改页面失败还能重来,
+    图丢了钱就白花了(和生图那条「付过钱的产物先落盘」同一条)。
+    """
+    path = resolve_preview(filename, owner)
+    if path is None:
+        raise RuntimeError("找不到这个落地页文件:%s" % (Path(str(filename or "")).name or "(空)"))
+    if ext.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    name = hashlib.sha256(data).hexdigest()[:16] + ext
+    (_img_dir(owner) / name).write_bytes(data)          # ← 先落盘
+
+    tag = re.compile(_HOLDER % int(slot), re.I)
+    html = path.read_text(encoding="utf-8")
+    if not tag.search(html):
+        raise RuntimeError("这一版里没有第 %s 张图的位置了" % slot)
+
+    def _fill(m):
+        one = m.group(0)
+        one = re.sub(r"\s+hidden\b", "", one, flags=re.I)      # 露出来
+        one = re.sub(r'\s+src\s*=\s*"[^"]*"', "", one, flags=re.I)
+        return one[:-1].rstrip() + ' src="%s/%s">' % (IMG_SUBDIR, name)
+
+    path.write_text(tag.sub(_fill, html, count=1), encoding="utf-8")
+    return name
 
 
 def swap_image(filename: str, slot: int, query: str, owner: str = "") -> dict:

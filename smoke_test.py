@@ -1043,9 +1043,16 @@ def test_pure_logic():
 
         cfc.apply_flow = _stub
         try:
-            for want in srv.LANDING_ACTION_TYPES:
-                if want not in ("publish_landing_pages", "swap_campaign_landers"):
-                    return f"落地页待办类型清单里多了没预期的:{want}"
+            # **别写死清单** —— 加一种合法的落地页待办就会误红(实测:加
+            # make_landing_images 时红了)。要守的是真实的安全性质:
+            # 落地页和素材两边不许重叠,而且都不许碰投放助手那几种花钱的写操作。
+            CAMPAIGN_ONLY = {"update_status", "create_campaign", "add_ad"}
+            overlap = set(srv.LANDING_ACTION_TYPES) & set(srv.CREATIVE_ACTION_TYPES)
+            if overlap:
+                return f"落地页和素材工作室的待办类型重叠了:{overlap}"
+            leaked = (set(srv.LANDING_ACTION_TYPES) | set(srv.CREATIVE_ACTION_TYPES)) & CAMPAIGN_ONLY
+            if leaked:
+                return f"工作室能确认投放助手的写操作了:{leaked} —— 那是开关广告/建广告"
             # **跨工作室这一关要先测。** 原来放在后面,而落地页那次确认成功会把待办
             # 从保险箱里弹出去 —— 于是素材工作室那次撞的是「找不到待办」,
             # 根本没走到跨工作室闸门。测试一直为错误的原因通过。
@@ -4731,8 +4738,16 @@ def test_landing_images():
                 lp.GENERATED_DIR = _P(d)
                 out, used, probs = lp.attach_images(
                     PAGE, [{"编号": 1, "搜索词": "nothing here"}], owner="uA")
-                if "<img" in out:
-                    return "没找到图却把 <img> 留在页面上了 —— 用户看到的是裂图"
+                # **要守的是「用户看不到破图」,不是「一个 <img> 都不留」。**
+                # 现在配不上的位置会留一个 `hidden` 且**没有 src** 的空标签,
+                # 好让用户以后说一句就能用 AI 把图补回来(第 3.59 组)——
+                # 没有 src 浏览器就不会去请求,页面上什么也不显示。
+                import re as _re2
+                for tag in _re2.findall(r"<img\b[^>]*>", out):
+                    if "hidden" not in tag:
+                        return "没找到图却留了个会显示的 <img> —— 用户看到的是裂图:%r" % tag
+                    if _re2.search(r'\bsrc\s*=', tag):
+                        return "隐藏占位上还带着 src,浏览器照样会去请求:%r" % tag
                 if "[[IMAGE" in out:
                     return "占位符原样露在页面上了"
                 if used:
@@ -5198,6 +5213,219 @@ def test_cost_gate_counts_output():
     check("Gemini 用量:缺字段的 chunk 不许把输出抹成 0", gemini_usage_survives_a_chunk_without_output)
 
 
+# ============ 3.59 落地页配图:图库配不上时用 AI 生 ============
+
+def test_landing_ai_images():
+    """图库(尤其 Openverse)对 roof / gutter 这些词基本没图,所以要能用 AI 补。
+
+    **但生图要花钱($0.20/张),而生成落地页是免费步骤** —— 一页 3 张就是 $0.6
+    没经用户同意。所以设计成两步:生成时配不上的位置留一个**隐藏占位**
+    (不显示、不是破图、发布时也不会被当成图传上去),用户说一声再报价、确认、生成。
+    """
+    import contextlib
+    import tempfile
+    from pathlib import Path as _P
+    import agent_server as srv
+    import landing_lab as lp
+    import creative_render as cr
+    import cloudflare_pages as cfp
+
+    print("\n【3.59】落地页配图:AI 生图")
+
+    PAGE = ('<!doctype html><html><body><img src="[[IMAGE_1]]" alt="crew"><p>x</p>'
+            '<img src="[[IMAGE_2]]"><a href="[[CLICKFLARE_CTA_URL]]">go</a>'
+            '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body></html>')
+    SPECS = [{"编号": 1, "搜索词": "metal roof installation crew"},
+             {"编号": 2, "搜索词": "gutter close up detail"}]
+
+    @contextlib.contextmanager
+    def stubbed(balance=5.0, fail_on=()):
+        """图库全挂(逼出隐藏占位)+ 生图打桩(不真花钱)。`gen` 记每一次生图调用。"""
+        gen = []
+        real = (lp.cs.available_sources, lp.cs.search, cr.render, cr.check_balance,
+                lp.GENERATED_DIR)
+
+        def _render(scene, variant=0, **k):
+            gen.append((variant, scene))
+            if len(gen) in fail_on:
+                raise RuntimeError("生图失败(HTTP 400):测试造的")
+            return b"JPEG-" + scene.encode()
+
+        lp.cs.available_sources = lambda: [{"id": "openverse", "ready": True}]
+        lp.cs.search = lambda q, count=6: {"results": [], "errors": ["openverse: timed out"]}
+        cr.render = _render
+        cr.check_balance = lambda **k: balance
+        with tempfile.TemporaryDirectory() as d:
+            lp.GENERATED_DIR = _P(d)
+            try:
+                yield gen
+            finally:
+                (lp.cs.available_sources, lp.cs.search, cr.render, cr.check_balance,
+                 lp.GENERATED_DIR) = real
+
+    def in_box(fn):
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            return fn()
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+
+    def as_landing(fn):
+        import contextvars
+
+        def go():
+            srv.CURRENT_USER_ID.set("uG")
+            srv.CURRENT_CHAT_MODE.set("landing")
+            srv.CURRENT_BASE_URL.set("http://localhost:18100")
+            srv._new_turn("landing")
+            return fn()
+        return contextvars.Context().run(go)
+
+    def make(owner="uG"):
+        return lp.save_pages([{"命名": "a", "html": PAGE, "配图": SPECS}],
+                             limit=1, owner=owner)[0]["file"]
+
+    def holder_instead_of_broken_image():
+        with stubbed():
+            f = make()
+            body = lp.resolve_preview(f, "uG").read_text(encoding="utf-8")
+            if "[[IMAGE" in body:
+                return "占位符原样留在页面上了"
+            if body.count("hidden") != 2:
+                return "没留隐藏占位(有 %d 个),以后就没法把图补回去了" % body.count("hidden")
+            if 'src="' in body.split("<body>")[1].split("<a ")[0]:
+                return "隐藏占位上还带着 src —— 浏览器会去请求,变成破图"
+            todo = lp.pending_image_slots(f, "uG")
+            if [x["slot"] for x in todo] != [1, 2]:
+                return "找不回「哪几个位置要什么图」:%r" % todo
+            if todo[0]["want"] != SPECS[0]["搜索词"]:
+                return "画面描述没存住:%r" % todo[0]
+        return True
+    check("图库配不上 → 留隐藏占位,不是破图", holder_instead_of_broken_image)
+
+    def quoting_costs_nothing():
+        """**报价不许花钱。** 这是保险箱的全部意义 —— 花钱的动作只能在
+        用户下一条消息明确同意之后发生。"""
+        def go():
+            with stubbed() as gen:
+                f = make()
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f}))
+                if "error" in r:
+                    return "报价失败:%s" % r["error"]
+                if gen:
+                    return "**报价那一步就调了生图** —— 用户还没点头,钱已经花了"
+                if r.get("要生几张") != 2:
+                    return "张数不对:%r" % r.get("要生几张")
+                if "0.4" not in str(r.get("预估花费")):
+                    return "报价不对(2 张应该约 $0.40):%r" % r.get("预估花费")
+                if not r.get("每张画什么"):
+                    return "没告诉用户每张要画什么,他没法核对"
+                return True
+        return in_box(go)
+    check("报价那一步一分钱都不花", quoting_costs_nothing)
+
+    def confirm_then_generate():
+        def go():
+            with stubbed() as gen:
+                f = make()
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f}))
+                aid = r["action_id"]
+                # **走真正的分发层**:落地页工作室能不能确认这类待办,闸门在那儿
+                out = as_landing(lambda: srv._tool_call("confirm_action", {"action_id": aid}))
+                if not out.get("done"):
+                    return "落地页工作室确认不了这个待办:%r" % str(out)[:120]
+                if len(gen) != 2:
+                    return "生了 %d 张(应该 2 张)" % len(gen)
+                if len({v for v, _ in gen}) != 2:
+                    return "两张用了同一个镜头 variant，画面会几乎一样:%r" % gen
+                body = lp.resolve_preview(f, "uG").read_text(encoding="utf-8")
+                if lp.pending_image_slots(f, "uG"):
+                    return "生完了却没填进页面"
+                if body.count('src="img/') != 2:
+                    return "页面里只引用到 %d 张图" % body.count('src="img/')
+                if "hidden" in body:
+                    return "图填进去了但标签还是 hidden，用户看不见"
+                return True
+        return in_box(go)
+    check("确认之后才生成,并填进页面(两张镜头不同)", confirm_then_generate)
+
+    def not_enough_balance_registers_nothing():
+        def go():
+            with stubbed(balance=0.05) as gen:
+                f = make()
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f}))
+                if "error" not in r:
+                    return "余额不够也照样登记了待办"
+                if srv.PENDING_ACTIONS:
+                    return "说了余额不够,却还是往保险箱里塞了一条"
+                if gen:
+                    return "余额不够却还是调了生图"
+                return True
+        return in_box(go)
+    check("余额不够:当场说清,不登记也不生图", not_enough_balance_registers_nothing)
+
+    def partial_failure_names_names():
+        def go():
+            with stubbed(fail_on=(2,)) as gen:
+                f = make()
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f}))
+                out = as_landing(lambda: srv._tool_call("confirm_action",
+                                                        {"action_id": r["action_id"]}))
+                if not out.get("done"):
+                    return "一张失败就整单当失败了 —— 成功那张的钱已经花了,不能丢"
+                if not out.get("没生成的"):
+                    return "有一张没生成,却没点名说是哪一张"
+                if "1 / 2" not in str(out.get("张数")):
+                    return "没如实报张数:%r" % out.get("张数")
+                if len(lp.pending_image_slots(f, "uG")) != 1:
+                    return "失败那张的位置没留着,想重生都没地方"
+                return True
+        return in_box(go)
+    check("部分失败:点名说哪张,成功的留下,失败的位置留着", partial_failure_names_names)
+
+    def holders_do_not_get_published():
+        """隐藏占位没有 src,**发布时不该被当成图去复制** —— 复制会报「配图丢了」，
+        而那根本不是丢，是本来就没有。"""
+        with stubbed():
+            f = make()
+            src = lp.resolve_preview(f, "uG")
+            html = src.read_text(encoding="utf-8")
+            with tempfile.TemporaryDirectory() as d2:
+                missing = cfp._copy_images(src, html, _P(d2))
+            if missing:
+                return "把隐藏占位也当成图去复制了,报出「配图丢了」:%r" % missing
+        return True
+    check("隐藏占位不会被当成「配图丢了」", holders_do_not_get_published)
+
+    def nothing_to_do_is_not_an_error():
+        def go():
+            with stubbed() as gen:
+                lp.cs.search = lambda q, count=6: {"results": [{
+                    "image_url": "https://s/x.jpg", "source": "pexels", "license": "L",
+                    "source_page": "p", "width": 1600, "height": 1000,
+                    "quality": {"可用": True}}]}
+                lp.cs.download = lambda u: (b"JPG", "x.jpg", "image/jpeg")
+                f = make()                                  # 这次图库有图,全配上了
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f}))
+                if "error" not in r:
+                    return "没有空位却照样登记了待办"
+                if "不是出错" not in str(r):
+                    return "没说清这不是出错,模型会转述成「功能坏了」:%r" % str(r)[:110]
+                if gen:
+                    return "没有空位却还是生了图"
+                return True
+        return in_box(go)
+    check("图已经配齐时:明说「这不是出错」,不白花钱", nothing_to_do_is_not_an_error)
+
+
 def test_per_user_isolation():
     print("\n【3.45】按人隔离(缓存 / 方案 / 超时)")
     import agent_server as srv
@@ -5640,6 +5868,7 @@ if __name__ == "__main__":
     test_read_side_isolation()
     test_stream_carries_context()
     test_landing_images()
+    test_landing_ai_images()
     test_fabricated_action_ids()
     test_cost_gate_counts_output()
     test_per_user_isolation()
