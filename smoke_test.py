@@ -4808,13 +4808,17 @@ def test_landing_images():
                     return ("图库确认连不上之后还在一张一张白等(打了 %d 次)—— "
                             "一页 4 张就是 80 秒,用户看着像卡死" % len(calls))
                 head = probs[0] if probs else ""
-                # **断言真实的不变量,不是某个词。** 措辞从「连不上」改成过「没反应」
-                # (查实那不是网络问题,是对方服务器慢),盯着字面就会为了改措辞而改测试。
-                # 这里要守的是:①说清不是关键词的问题;②给出真正该做的事(配钥匙)。
+                # **断言真实的不变量,不是某个词。** 措辞改过两轮:先从「连不上」
+                # 改成「没反应」(查实那不是网络问题,是对方服务器慢),后来又把
+                # 「去配一把免费钥匙」整条建议撤掉了(Cole 决定不走图库这条路)。
+                # 盯着字面写的测试两次都会误红 —— 这里要守的是两条**性质**:
+                #   ①说清不是关键词的问题(否则用户会一直换词,换多少个都没用);
+                #   ②给出一条**当下真走得通**的出路(第六之二十节「拒绝必须带出路」)。
+                # 「去配钥匙」曾经是那条出路,现在那条路关了,出路是「用 AI 把图补上」。
                 if "不是关键词的问题" not in head:
                     return "没点明「换关键词没用」,用户会一直换词:%r" % head[:90]
-                if "PEXELS_API_KEY" not in head and "钥匙" not in head:
-                    return "没告诉用户真正该做的是配一把免费钥匙:%r" % head[:90]
+                if "AI" not in head:
+                    return "没给出一条真走得通的出路(现在是「用 AI 把图补上」):%r" % head[:110]
                 # 一把钥匙都没有时,措辞要不一样(该做的是去配钥匙)
                 lp.cs.available_sources = lambda: [{"id": "pexels", "ready": False}]
                 _o2, _u2, p2 = lp.attach_images(page, specs, owner="uA")
@@ -5424,6 +5428,122 @@ def test_landing_ai_images():
                 return True
         return in_box(go)
     check("图已经配齐时:明说「这不是出错」,不白花钱", nothing_to_do_is_not_an_error)
+
+    # ---------- 不配图库钥匙了:所有出路都得指向 AI 生图 ----------
+
+    def generation_says_ai_not_keys():
+        """一个图库都没启用时,报出来的话必须指向「用 AI 把图补上」。
+
+        指回「去申请一把免费钥匙」是把人指进一条**已经关掉的路** ——
+        第六之二十节那条「拒绝必须带出路」要求的是**真走得通**的出路。
+        """
+        with stubbed():
+            lp.cs.available_sources = lambda: [{"id": "openverse", "ready": False}]
+            _h, used, problems = lp.attach_images(PAGE, SPECS, owner="uG")
+            whole = " ".join(problems)
+            if used:
+                return "一个图库都没启用,却说配上图了"
+            if "AI" not in whole:
+                return "没告诉用户可以用 AI 把图补上:%r" % whole[:170]
+            if "PEXELS_API_KEY" in whole:
+                return "还在让用户去配一把他明说不配的钥匙:%r" % whole[:170]
+        return True
+    check("图库全关时生成:指向 AI 生图,不是指向钥匙", generation_says_ai_not_keys)
+
+    def filled_slot_remembers_what_it_wanted():
+        """**图库配上的那张也要记着自己该画什么。**
+
+        没有图库钥匙时,「换掉这张图」只剩「用 AI 重做」一条路,
+        而重做要的正是这句画面描述 —— 配上图的那一刻不记下来,以后再也找不回来。
+        """
+        import hashlib
+        with stubbed():
+            lp.cs.search = lambda q, count=6: {"results": ([{
+                "image_url": "https://s/x.jpg", "source": "pexels", "license": "L",
+                "source_page": "p", "width": 1600, "height": 1000,
+                "quality": {"可用": True}}] if "roof" in q else [])}
+            lp.cs.download = lambda u: (b"JPG-roof", "x.jpg", "image/jpeg")
+            f = make()
+            every = lp.pending_image_slots(f, "uG", include_filled=True)
+            if [x["slot"] for x in every] != [1, 2]:
+                return "两个图位没都列出来:%r" % every
+            got = {x["slot"]: x for x in every}
+            if not got[1]["filled"]:
+                return "第 1 张明明配上了图,却报成空着的"
+            if got[1]["want"] != SPECS[0]["搜索词"]:
+                return "配上图的那张丢了画面描述,以后没法重做:%r" % got[1]
+            if got[2]["filled"]:
+                return "第 2 张没配上,却报成有图"
+            only_empty = lp.pending_image_slots(f, "uG")
+            if [x["slot"] for x in only_empty] != [2]:
+                return "只列空位时不该把已经配好的那张也带上:%r" % only_empty
+            body = lp.resolve_preview(f, "uG").read_text(encoding="utf-8")
+            if hashlib.sha256(b"JPG-roof").hexdigest()[:16] not in body:
+                return "图库那张图没真的落进页面"
+        return True
+    check("配上图的位置也记着「本来要什么图」", filled_slot_remembers_what_it_wanted)
+
+    def redo_a_filled_slot():
+        """点名重做已经有图的那一张 —— 必须做得了,而且必须说清会换掉原来那张。
+
+        做得了:没钥匙时 `swap_landing_image` 永远成功不了,不放行就是死胡同。
+        说清楚:花钱换掉一张他已经看过的图,和"把空位补上"是两件事。
+        """
+        import hashlib
+
+        def go():
+            with stubbed() as gen:
+                lp.cs.search = lambda q, count=6: {"results": ([{
+                    "image_url": "https://s/x.jpg", "source": "pexels", "license": "L",
+                    "source_page": "p", "width": 1600, "height": 1000,
+                    "quality": {"可用": True}}] if "roof" in q else [])}
+                lp.cs.download = lambda u: (b"JPG-roof", "x.jpg", "image/jpeg")
+                f = make()
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f, "slots": "1"}))
+                if "error" in r:
+                    return "点名重做第 1 张被拒了 —— 那就没路换图了:%s" % r["error"]
+                if gen:
+                    return "报价那一步就把图生了,用户还没点头"
+                if r.get("要生几张") != 1:
+                    return "张数不对:%r" % r.get("要生几张")
+                if "换掉" not in str(r.get("每张画什么")) + str(r.get("note")):
+                    return "没说清原来那张会被换掉:%r" % str(r)[:200]
+                out = as_landing(lambda: srv._tool_call("confirm_action",
+                                                        {"action_id": r["action_id"]}))
+                if not out.get("done"):
+                    return "确认执行失败:%r" % str(out)[:130]
+                body = lp.resolve_preview(f, "uG").read_text(encoding="utf-8")
+                if hashlib.sha256(b"JPG-roof").hexdigest()[:16] in body:
+                    return "钱花了,原来那张图却还挂在页面上"
+                if body.count('src="img/') != 1:
+                    return "重做完页面上有 %d 张图(应该 1 张)" % body.count('src="img/')
+                return True
+        return in_box(go)
+    check("点名重做已经有图的那张:做得了,并说清会换掉原来的", redo_a_filled_slot)
+
+    def swap_without_library_gives_a_way_out():
+        """图库全关时「换一张图」必须给一条**真走得通**的出路。
+
+        这是第六之二十节那条的直接后果:没钥匙时 swap 永远失败,
+        而它原来的建议是「去配一把钥匙」—— 那条路已经关了,等于没给出路。
+        """
+        with stubbed():
+            lp.cs.available_sources = lambda: [{"id": "pexels", "ready": False},
+                                               {"id": "openverse", "ready": False}]
+            f = make()
+            r = lp.swap_image(f, 1, "new scene", owner="uG")
+            whole = str(r)
+            if "error" not in r:
+                return "一个图库都没启用,却说换图成功了"
+            if "propose_landing_images" not in whole:
+                return "没给出「用 AI 重做这一张」这条路:%r" % whole[:180]
+            if "PEXELS_API_KEY" in whole:
+                return "还在让用户去配一把他明说不配的钥匙:%r" % whole[:180]
+        return True
+    check("图库全关时「换图」给的是 AI 重做,不是让人去配钥匙",
+          swap_without_library_gives_a_way_out)
+
 
 
 def test_per_user_isolation():

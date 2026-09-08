@@ -1312,20 +1312,28 @@ def propose_landing_images(landing_file: str, slots: str = "") -> dict:
     否则报价时说的是 A、做出来的是 B。
     """ % cr.COST_PER_IMAGE_USD
     owner = CURRENT_USER_ID.get() or ""
-    todo = lp.pending_image_slots(landing_file, owner)
-    if not todo:
-        return {"error": "这一版落地页没有「还没配上图」的位置。",
-                "note": "**这不是出错** —— 要么图已经配齐了,要么这一版本来就没安排配图。"
-                        "想换掉某一张已有的图,用 swap_landing_image。"}
     if slots.strip():
         want = set()
         for piece in _re.split(r"[^0-9]+", slots):
             if piece.strip():
                 want.add(int(piece))
-        todo = [x for x in todo if x["slot"] in want]
+        # **点名了就允许重做已经有图的那一张。** 没配图库钥匙时 `swap_landing_image`
+        # 永远成功不了,「换掉这张图」只剩这一条路 —— 不放行就是个死胡同
+        # (第六之二十节:拒绝必须带出路,而出路得是真走得通的那条)。
+        every = lp.pending_image_slots(landing_file, owner, include_filled=True)
+        todo = [x for x in every if x["slot"] in want]
         if not todo:
-            return {"error": "指定的位置里没有等着配图的。现在空着的是第 %s 张。"
-                             % "、".join(str(x["slot"]) for x in lp.pending_image_slots(landing_file, owner))}
+            return {"error": "第 %s 张图这一版里没有。这一版的图位是:%s"
+                             % ("、".join(str(n) for n in sorted(want)),
+                                "、".join("第%d张%s" % (x["slot"], "(已有图)" if x["filled"] else "(空着)")
+                                          for x in every) or "一个都没有")}
+    else:
+        todo = lp.pending_image_slots(landing_file, owner)
+        if not todo:
+            return {"error": "这一版落地页没有「还没配上图」的位置。",
+                    "note": "**这不是出错** —— 要么图已经配齐了,要么这一版本来就没安排配图。"
+                            "想**换掉**某一张已有的图,再说一次并点名第几张"
+                            "(slots 填「2」),我会用 AI 把那一张重做一遍。"}
 
     cost = len(todo) * cr.COST_PER_IMAGE_USD
     # **免费又可能失败的事排在花钱之前**:余额查一下,不够就现在说,别等他点完头才发现
@@ -1352,11 +1360,20 @@ def propose_landing_images(landing_file: str, slots: str = "") -> dict:
                                           f"用户同意后直接 confirm_action('{dup}')。"}
     aid = uuid.uuid4().hex[:8]
     _put_action(aid, candidate)
-    print(f"[write-op] 登记落地页配图待办 {aid}: {len(todo)} 张", flush=True)
+    # **重做要单独说一遍。** 花钱换掉一张他已经看过的图,和"把空位补上"是两件事,
+    # 混在一起说他不会注意到原来那张要没了(和「提案里给的地址,用户一定会点」同一条)。
+    redone = [x["slot"] for x in todo if x.get("filled")]
+    redo_note = ("**必须单独讲清楚:第 %s 张原本已经有图了,重做会把原来那张换掉、"
+                 "而且照样收费。** 问他是不是真要重做。"
+                 % "、".join(str(n) for n in redone)) if redone else ""
+    print(f"[write-op] 登记落地页配图待办 {aid}: {len(todo)} 张"
+          + (f"(其中重做 {len(redone)} 张)" if redone else ""), flush=True)
     return {
         "action_id": aid,
         "要生几张": len(todo),
-        "每张画什么": [{"第几张": x["slot"], "画面": x["want"]} for x in todo],
+        "每张画什么": [{"第几张": x["slot"], "画面": x["want"],
+                        **({"⚠️": "这个位置**已经有图了**,重做会把原来那张换掉"}
+                           if x.get("filled") else {})} for x in todo],
         "尺寸": f"{cr.AD_SIZE[0]}×{cr.AD_SIZE[1]}",
         "预估花费": f"约 ${cost:.2f}(每张约 ${cr.COST_PER_IMAGE_USD:.2f})",
         **({"生图通道余额": f"${left:.2f}"} if left is not None else {}),
@@ -1364,7 +1381,7 @@ def propose_landing_images(landing_file: str, slots: str = "") -> dict:
                  "说明两件事:①出的是**干净的实拍照片,图上一个字都没有**"
                  "(落地页的标题文案是 HTML 排的,图上再来一遍就重复了);"
                  "②**确认之后立刻扣钱**,生完直接填进页面,刷新预览就能看到。"
-                 "**在他明确同意之前绝不许 confirm_action。**" % aid),
+                 "**在他明确同意之前绝不许 confirm_action。**%s" % (aid, redo_note)),
     }
 
 

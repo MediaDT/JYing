@@ -639,11 +639,15 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
                     ext = ".jpg"
                 name = hashlib.sha256(data).hexdigest()[:16] + ext
                 (_img_dir(owner) / name).write_bytes(data)
-                # `data-slot` 留着,以后只换某一张时靠它定位(见 swap_image)
+                # `data-slot` 留着,以后只换某一张时靠它定位(见 swap_image)。
+                # **`data-want` 也要留着** —— 没有图库钥匙时,「换掉这张图」只剩
+                # 「用 AI 重做一次」这一条路,而重做要的正是这句画面描述。
+                # 这里不记,配上图的那一刻描述就丢了,以后再也找不回来。
                 html = re.sub(_IMG_TAG % re.escape("[[IMAGE_%d]]" % n),
                               lambda mm: mm.group(0)
                               .replace("[[IMAGE_%d]]" % n, "%s/%s" % (IMG_SUBDIR, name))
-                              .replace("<img", '<img data-slot="%d"' % n, 1),
+                              .replace("<img", '<img data-slot="%d" data-want="%s"'
+                                       % (n, html_mod.escape(query, quote=True)), 1),
                               html)
                 used.append({"编号": n, "搜索词": query, "文件": name,
                              "来自": pick.get("source"), "许可证": pick.get("license"),
@@ -680,16 +684,16 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
         ready = [x["id"] for x in cs.available_sources() if x.get("ready")]
         if not ready:
             problems.insert(0, "⚠️ **一个图库都没启用,所以这页一张图都配不上。**"
-                               "Pexels 和 Pixabay 的钥匙都是免费申请的,填进 .env 的 "
-                               "PEXELS_API_KEY / PIXABAY_API_KEY 再重启就行 —— "
-                               "**这不是关键词的问题,换多少个词都一样。**")
+                               "**这不是关键词的问题,换多少个词都一样。** "
+                               "位置都留着(不显示,现在发布出去也干净)——"
+                               "告诉用户:说一句「**用 AI 把图补上**」就能把它们生出来,"
+                               "会先报价、他点头才花钱。")
         elif all(x in _DEAD_SOURCES for x in ready):
             problems.insert(0, "⚠️ **图库这会儿没反应**(%s 请求超时),所以这页一张图都配不上。"
                                "**不是关键词的问题。** 实测 Openverse 的响应时间在 0.5~32 秒之间乱跳,"
                                "而且家装类(roof / gutter 这些)本来就没多少可商用的图。"
-                               "**正解是去申请一把 Pexels 或 Pixabay 的免费钥匙**"
-                               "(填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY,再重启)——"
-                               "它们快得多、家装类的图也多得多。"
+                               "位置都留着(不显示)——告诉用户:说一句「**用 AI 把图补上**」"
+                               "就能把它们生出来,会先报价、他点头才花钱。"
                                % "、".join(sorted(_DEAD_SOURCES)))
 
     # 剩下的占位符(没包在 <img> 里的)一律清掉,不能让 [[IMAGE_n]] 露在页面上
@@ -700,24 +704,32 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
 _HOLDER = r'<img\b[^>]*\bdata-slot="%d"[^>]*>'
 
 
-def pending_image_slots(filename: str, owner: str = "") -> list[dict]:
+def pending_image_slots(filename: str, owner: str = "",
+                        include_filled: bool = False) -> list[dict]:
     """这一版落地页里还有哪几个位置没配上图(隐藏占位)。
 
-    返回 `[{"slot": 1, "want": "metal roof installation crew"}, ...]`,
+    返回 `[{"slot": 1, "want": "metal roof installation crew", "filled": False}, ...]`,
     `want` 就是当初模型写的英文搜索词 —— **AI 生图直接拿它当画面描述**,
     不让模型在确认那一刻另写一句(那就成了"报价的是 A、做出来的是 B")。
+
+    **`include_filled=True` 时,已经有图的位置也一起列出来**(`filled: True`)。
+    没有图库钥匙时 `swap_image` 永远成功不了,「换掉这张图」只剩「用 AI 重做」
+    这一条路 —— 而重做的前提是先找得到那个位置和它该画什么。
     """
     path = resolve_preview(filename, owner)
     if path is None:
         return []
     out = []
-    for m in re.finditer(r'<img\b[^>]*\bhidden\b[^>]*>', path.read_text(encoding="utf-8")):
+    pat = (r'<img\b[^>]*\bdata-slot="\d+"[^>]*>' if include_filled
+           else r'<img\b[^>]*\bhidden\b[^>]*>')
+    for m in re.finditer(pat, path.read_text(encoding="utf-8")):
         tag = m.group(0)
         slot = re.search(r'data-slot="(\d+)"', tag)
         want = re.search(r'data-want="([^"]*)"', tag)
         if slot and want:
             out.append({"slot": int(slot.group(1)),
-                        "want": html_mod.unescape(want.group(1))})
+                        "want": html_mod.unescape(want.group(1)),
+                        "filled": not re.search(r"\bhidden\b", tag, re.I)})
     return sorted(out, key=lambda x: x["slot"])
 
 
@@ -776,13 +788,15 @@ def swap_image(filename: str, slot: int, query: str, owner: str = "") -> dict:
     if not pick:
         ready = [x["id"] for x in cs.available_sources() if x.get("ready")]
         if not ready:
-            return {"error": "**一个图库都没启用**,所以换不了图。Pexels / Pixabay 的钥匙是免费的,"
-                             "填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY 再重启就行。"
-                             "**这不是关键词的问题。** 页面一个字都没动。"}
+            return {"error": "**一个图库都没启用**,所以从图库换不了图。页面一个字都没动。"
+                             "**这不是关键词的问题,换多少个词都一样。**",
+                    "改用这条路": "用 AI 重做这一张:propose_landing_images(landing_file, slots=\"%d\")。"
+                                  "会先报价、用户点头才花钱。" % int(slot)}
         if all(x in _DEAD_SOURCES for x in ready):
             return {"error": "**图库这会儿没反应**(%s 请求超时),不是关键词的问题。"
-                             "页面一个字都没动。配一把 Pexels / Pixabay 的免费钥匙会稳得多。"
-                             % "、".join(sorted(_DEAD_SOURCES))}
+                             "页面一个字都没动。" % "、".join(sorted(_DEAD_SOURCES)),
+                    "改用这条路": "用 AI 重做这一张:propose_landing_images(landing_file, slots=\"%d\")。"
+                                  "会先报价、用户点头才花钱。" % int(slot)}
         return {"error": "按「%s」没找到可商用的图,页面一个字都没动。换个关键词再试" % query}
     try:
         data, fname, _mime = cs.download(pick["image_url"])
