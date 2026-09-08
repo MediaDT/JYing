@@ -694,8 +694,21 @@ def swap_image(filename: str, slot: int, query: str, owner: str = "") -> dict:
         have = re.findall(r'data-slot="(\d+)"', html)
         return {"error": "这一版里没有第 %s 张图。现有的是:%s"
                          % (slot, "、".join(have) or "(一张都没有)")}
+    # **先把「这一轮哪几家挂了」清掉。** 那份记录是给「一次生成里连配 4 张图」用的
+    # (避免一张一张白等 20 秒),而换图是用户新发起的单张请求,网络可能早恢复了。
+    # 不清的话会拿着上一次的坏运气直接返回「没找到合适的图」——
+    # 而真实原因是连不上,用户会去换关键词,换多少个都没用(和第六之二十三节那条同一个坑)。
+    _DEAD_SOURCES.clear()
     pick = _pick_image(query)
     if not pick:
+        ready = [x["id"] for x in cs.available_sources() if x.get("ready")]
+        if not ready:
+            return {"error": "**一个图库都没启用**,所以换不了图。Pexels / Pixabay 的钥匙是免费的,"
+                             "填进 .env 的 PEXELS_API_KEY / PIXABAY_API_KEY 再重启就行。"
+                             "**这不是关键词的问题。** 页面一个字都没动。"}
+        if all(x in _DEAD_SOURCES for x in ready):
+            return {"error": "**图库这会儿连不上**(%s),不是关键词的问题。页面一个字都没动,"
+                             "过一会儿再试。" % "、".join(sorted(_DEAD_SOURCES))}
         return {"error": "按「%s」没找到可商用的图,页面一个字都没动。换个关键词再试" % query}
     try:
         data, fname, _mime = cs.download(pick["image_url"])

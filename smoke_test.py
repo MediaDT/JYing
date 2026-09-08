@@ -5031,6 +5031,40 @@ def test_fabricated_action_ids():
         return True
     check("预览文件名不被误当成待办编号", preview_filename_not_mistaken_for_id)
 
+    def legit_ids_that_left_the_box_are_not_flagged():
+        """**合法的编号会离开保险箱** —— 确认执行掉、用户取消掉、或者只是在复述前几轮的事。
+        判据只看「现在还在不在箱子里」的话,**用户刚成功取消完,正确的回复反而被盖章说是编的**
+        (实测到了)。喊错一次狼,这道章以后就没人信了。
+        """
+        saved = dict(srv.PENDING_ACTIONS)
+        srv.PENDING_ACTIONS.clear()
+        try:
+            def go():
+                srv.CURRENT_USER_ID.set("u")
+                srv.CURRENT_CHAT_MODE.set("campaign")
+                srv.CURRENT_SEQ.set(1)
+                srv.CURRENT_EXECUTED.set([])
+                aid = srv.propose_status_change("campaign", "obj1", "OFF", name="X")["action_id"]
+                srv.CURRENT_SEQ.set(2)
+                srv.cancel_action(aid)
+                after_cancel = srv._finalize("好的,待办 %s 已经取消了。" % aid, "zh")["reply"]
+                srv.CURRENT_EXECUTED.set([])           # 下一轮,本轮台账是空的
+                recap = srv._finalize("上次那个待办 %s 已经处理完了。" % aid, "zh")["reply"]
+                return aid, after_cancel, recap
+            aid, after_cancel, recap = contextvars.Context().run(go)
+        finally:
+            srv.PENDING_ACTIONS.clear()
+            srv.PENDING_ACTIONS.update(saved)
+            srv._save_actions()
+        if "上面提到的待办编号" in after_cancel:
+            return "刚成功取消完,正确的回复被盖章说是编的 —— 用户会以为系统坏了"
+        if "上面提到的待办编号" in recap:
+            return "隔一轮复述一个真登记过的编号也被判成编的"
+        if aid.lower() not in srv._KNOWN_ACTION_IDS:
+            return "登记过的编号没被记下来,判据还是「现在在不在箱子里」"
+        return True
+    check("取消掉的 / 上一轮的真编号,不许误判成编的", legit_ids_that_left_the_box_are_not_flagged)
+
     def works_on_every_finalize_branch():
         """`_finalize` 有三条返回路径(真执行过 / 谎报拆穿 / 都没命中)。
         原来 `_fake_preview_note` 在三处各调一次 —— 加第二道核验就要改三处,

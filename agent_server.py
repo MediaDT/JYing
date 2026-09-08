@@ -1871,7 +1871,12 @@ def _load_actions() -> dict:
     """开机时把保险箱从磁盘捞回来(热重载/重启都不丢待办)。"""
     try:
         if _ACTIONS_FILE.exists():
-            return json.loads(_ACTIONS_FILE.read_text())
+            got = json.loads(_ACTIONS_FILE.read_text())
+            if isinstance(got, dict):
+                # 重启前登记的编号也要认 —— 否则重启之后模型一复述旧编号就被当成编的
+                for aid in got:
+                    _remember_action_id(aid)
+                return got
     except Exception:
         pass
     return {}
@@ -1918,6 +1923,25 @@ def _executed() -> list:
     return lst
 
 
+# **登记过的编号永远算数。** 拆穿章要回答的是「这个编号是不是编的」,
+# 而合法的编号会离开保险箱:确认执行掉了、用户取消掉了、或者模型只是在复述前几轮的事。
+# 只看「现在还在不在箱子里」的话,**用户刚成功取消完,正确的回复反而被盖章说是编的**
+# (实测到了)。喊错一次狼,这道章以后就没人信了。
+#
+# 只存编号本身(8 位十六进制),不存内容 —— 它只用来回答「有没有过这个编号」。
+# 上限是防长驻进程无限长大,真到了上限,最老的那些早就不会再被提起了。
+_KNOWN_ACTION_IDS: set = set()
+MAX_KNOWN_ACTION_IDS = 5000
+
+
+def _remember_action_id(action_id: str) -> None:
+    if not action_id:
+        return
+    if len(_KNOWN_ACTION_IDS) >= MAX_KNOWN_ACTION_IDS:
+        _KNOWN_ACTION_IDS.clear()          # 简单粗暴够用:清空只会退回"多提醒一次"
+    _KNOWN_ACTION_IDS.add(str(action_id).lower())
+
+
 def _put_action(action_id: str, candidate: dict) -> None:
     """把待办放进保险箱 —— **所有登记都必须走这里**。
 
@@ -1933,6 +1957,7 @@ def _put_action(action_id: str, candidate: dict) -> None:
             "归属检查和查重都会失效,不许登记。请在 candidate 里加上 "
             '"user_id": CURRENT_USER_ID.get()')
     PENDING_ACTIONS[action_id] = candidate
+    _remember_action_id(action_id)
     _save_actions()
 
 
@@ -5004,8 +5029,10 @@ def _fake_action_note(reply: str, english: bool) -> str:
             said.append(aid)
     if not said:
         return ""
-    # 本轮真执行掉的编号也算数 —— 它已经不在保险箱里了,但提它是诚实的
-    alive = set(PENDING_ACTIONS)
+    # **判据是「有没有真的登记过」,不是「现在还在不在箱子里」。**
+    # 合法的编号会离开保险箱:确认执行掉、用户取消掉、或者只是在复述前几轮的事 ——
+    # 只看箱子的话,用户刚成功取消完就会被告知「这个编号是编的」(实测到了)。
+    alive = set(PENDING_ACTIONS) | _KNOWN_ACTION_IDS
     for rec in _executed():
         if isinstance(rec, dict) and rec.get("id"):
             alive.add(str(rec["id"]).lower())
