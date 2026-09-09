@@ -1322,6 +1322,14 @@ def propose_landing_images(landing_file: str, slots: str = "") -> dict:
         # (第六之二十节:拒绝必须带出路,而出路得是真走得通的那条)。
         every = lp.pending_image_slots(landing_file, owner, include_filled=True)
         todo = [x for x in every if x["slot"] in want]
+        # **不知道该画什么就不许生。** 加 `data-want` 之前配上的图没记描述,
+        # 硬生等于拿一句空话去花 $0.20 —— 拒绝,并给一条真走得通的出路。
+        blank = [str(x["slot"]) for x in todo if not str(x.get("want") or "").strip()]
+        if blank:
+            return {"error": "第 %s 张是早先版本配的图,**当初没记下画面描述**,"
+                             "所以不知道该画什么。" % "、".join(blank),
+                    "note": "**没有登记待办,没扣钱。** 出路:重新生成一版落地页"
+                            "(新版会记住每个位置要什么图),或者先说这张要画什么。"}
         if not todo:
             return {"error": "第 %s 张图这一版里没有。这一版的图位是:%s"
                              % ("、".join(str(n) for n in sorted(want)),
@@ -1402,6 +1410,26 @@ def _execute_make_landing_images(a: dict) -> dict:
     if left is not None and left < need:
         return {"error": "生图通道余额不够:还剩 $%.2f,这一单大约要 $%.2f。**一张都没生,没扣钱。**"
                          "充完值直接说一声重新确认就行(待办还在)。" % (left, need)}
+
+    # **免费又可能失败的事,一件都不许留到花钱之后**(坑表那条,这次差点又栽)。
+    # 待办会在保险箱里躺很久,这期间页面完全可能被清理掉(KEEP_GENERATED 按人裁)
+    # 或者被重新生成挤走。原来是先 `cr.render()` 再去填,于是**整单的钱全花了、
+    # 图一张都没落盘** —— 实测两张就是 $0.40 打水漂。
+    here = {x["slot"]: x for x in lp.pending_image_slots(a.get("landing_file") or "",
+                                                         owner, include_filled=True)}
+    if not here:
+        return {"error": "这一版落地页现在找不到了(多半是被后来生成的页面挤掉了)。"
+                         "**一张都没生,没扣钱。**",
+                "dead": True,
+                "note": "**这条待办已经作废收走了**(它指向的页面没了,留着也执行不了)。"
+                        "请用户重新生成一版落地页,再说一次补图。"}
+    gone = [str(x.get("slot")) for x in todo if x.get("slot") not in here]
+    if gone:
+        return {"error": "第 %s 张的位置在这一版里已经没有了(页面这期间被改过)。"
+                         "**一张都没生,没扣钱。**" % "、".join(gone),
+                "dead": True,
+                "note": "**这条待办已经作废收走了**(它指向的位置没了)。"
+                        "请用户刷新预览看一眼现在缺哪几张,再重新说一次。"}
 
     made, failed = [], []
     for i, one in enumerate(todo):
@@ -2966,6 +2994,13 @@ def confirm_action(action_id: str) -> dict:
             _save_actions()
         else:
             _executed().append({"id": action_id, "ok": False, "detail": str(result.get("error"))[:220]})
+            # **永远不可能成功的待办要收走。** 保险箱是持久化的,而且每轮都注入进
+            # 提示词(「以下待办已登记完毕,严禁重新登记」)—— 留着一条死单,
+            # 模型会一直催用户去确认,而确认多少次都是同一个错。
+            # 只有执行方明确标了 `dead` 才收(余额不够那种充值后还能用,不算死)。
+            if result.pop("dead", False):
+                PENDING_ACTIONS.pop(action_id, None)
+                _save_actions()
         safe_action = {k: ("[已保存，不回显]" if k in ("tracking_script", "tracking_script_b")
                                     else "[已算好，不回显]" if k == "put_body" else v)
                        for k, v in action.items() if k != "seq"}

@@ -703,6 +703,43 @@ def attach_images(html: str, specs: list, owner: str = "") -> tuple[str, list, l
 
 _HOLDER = r'<img\b[^>]*\bdata-slot="%d"[^>]*>'
 
+# src 可能是双引号、单引号、不带引号,也可能**压根没有**(隐藏占位就是没有)
+_SRC_ATTR = re.compile(r'''\s+src\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)''', re.I)
+
+
+def _src_landed(tag_html: str, url: str) -> bool:
+    """这个标签最后是不是真的挂着 `url`、而且不再是隐藏的。
+
+    **别拿「页面变没变」当判据** —— 换到一张**内容一模一样**的图时,
+    文件名(内容 sha256)也一样,页面本来就不该变,那不是失败。
+    """
+    return (('src="%s"' % url) in tag_html
+            and not re.search(r"\bhidden\b", tag_html, re.I))
+
+
+def _set_src(tag_html: str, url: str) -> str:
+    """把一个 `<img>` 标签的 src 换成 `url`,顺带把 `hidden` 摘掉。
+
+    **不能假设 src 是双引号的。** 那个标签是**模型**写的,单引号、不带引号都可能;
+    隐藏占位更是连 src 都没有。原来 `fill_image_slot` 和 `swap_image` 各写了一个
+    只认双引号的正则,后果两条都很阴:
+      · 换图对单引号的图和隐藏占位**一个字都没改**,却照样返回「换好了」——
+        用户刷新预览看不出变化,只会以为是浏览器缓存;
+      · AI 重做时旧的单引号 src 剥不掉,变成**两个 src**,而浏览器用第一个 ——
+        钱花了,页面上还是那张旧图。
+    自闭合写法(`<img … />`)也要照顾到,直接砍最后一个字符会留下一个孤零零的 `/`。
+    """
+    one = re.sub(r"\s+hidden\b", "", tag_html, flags=re.I)      # 露出来
+    attr = ' src="%s"' % url
+    if _SRC_ATTR.search(one):
+        # **原地换掉,别挪位置。** 换图要是纯粹的「src 值替换」,别的一个字都不动 ——
+        # 把 src 重排到末尾虽然照样能显示,但整个标签的 diff 就脏了,
+        # 「只动那一张、别的不改」这条不变量也就没法验了。
+        return _SRC_ATTR.sub(lambda _m: attr, one, count=1)
+    one = one.rstrip()                                          # 隐藏占位:本来就没有 src
+    close = "/>" if one.endswith("/>") else ">"
+    return one[:-len(close)].rstrip() + attr + close
+
 
 def pending_image_slots(filename: str, owner: str = "",
                         include_filled: bool = False) -> list[dict]:
@@ -725,11 +762,18 @@ def pending_image_slots(filename: str, owner: str = "",
     for m in re.finditer(pat, path.read_text(encoding="utf-8")):
         tag = m.group(0)
         slot = re.search(r'data-slot="(\d+)"', tag)
+        if not slot:
+            continue
+        # **没有 `data-want` 也要把这个位置列出来。** 加这个属性之前配上的图只有
+        # `data-slot`,当时那句画面描述没记下来。整条跳过的话,用户点名重做第 1 张
+        # 会被告知「这一版没有第 1 张图」—— 那是**假话**,图明明在页面上。
+        # 回落到 `alt`(模型写的,是页面自己的东西,不是我们编的);都没有就留空,
+        # 由上层明说「不知道该画什么」并给出路。
         want = re.search(r'data-want="([^"]*)"', tag)
-        if slot and want:
-            out.append({"slot": int(slot.group(1)),
-                        "want": html_mod.unescape(want.group(1)),
-                        "filled": not re.search(r"\bhidden\b", tag, re.I)})
+        alt = re.search(r'\balt\s*=\s*"([^"]*)"', tag)
+        out.append({"slot": int(slot.group(1)),
+                    "want": html_mod.unescape((want or alt).group(1)) if (want or alt) else "",
+                    "filled": not re.search(r"\bhidden\b", tag, re.I)})
     return sorted(out, key=lambda x: x["slot"])
 
 
@@ -753,13 +797,13 @@ def fill_image_slot(filename: str, slot: int, data: bytes, ext: str = ".jpg",
     if not tag.search(html):
         raise RuntimeError("这一版里没有第 %s 张图的位置了" % slot)
 
-    def _fill(m):
-        one = m.group(0)
-        one = re.sub(r"\s+hidden\b", "", one, flags=re.I)      # 露出来
-        one = re.sub(r'\s+src\s*=\s*"[^"]*"', "", one, flags=re.I)
-        return one[:-1].rstrip() + ' src="%s/%s">' % (IMG_SUBDIR, name)
-
-    path.write_text(tag.sub(_fill, html, count=1), encoding="utf-8")
+    rel = "%s/%s" % (IMG_SUBDIR, name)
+    out = tag.sub(lambda m: _set_src(m.group(0), rel), html, count=1)
+    landed = tag.search(out)
+    if landed is None or not _src_landed(landed.group(0), rel):
+        # 钱已经花过了,图也落盘了 —— 报错也要把文件名交出去,别让它白花
+        raise RuntimeError("第 %s 张的标签改不动(写法不认识),图已经存下来了:%s" % (slot, name))
+    path.write_text(out, encoding="utf-8")
     return name
 
 
@@ -807,12 +851,23 @@ def swap_image(filename: str, slot: int, query: str, owner: str = "") -> dict:
         ext = ".jpg"
     name = hashlib.sha256(data).hexdigest()[:16] + ext
     (_img_dir(owner) / name).write_bytes(data)
-    html = tag.sub(lambda m: re.sub(r'(\bsrc\s*=\s*")[^"]*(")',
-                                    r"\1%s/%s\2" % (IMG_SUBDIR, name), m.group(0)), html, count=1)
+    rel = "%s/%s" % (IMG_SUBDIR, name)
+    same = ('src="%s"' % rel) in (tag.search(html).group(0) if tag.search(html) else "")
+    out = tag.sub(lambda m: _set_src(m.group(0), rel), html, count=1)
+    # **改不动就别说「换好了」。** 原来这里只认双引号的 src,碰上单引号的图或者
+    # 隐藏占位就一个字都没换,却照样返回成功 —— 用户刷新看不出变化,以为是缓存。
+    landed = tag.search(out)
+    if landed is None or not _src_landed(landed.group(0), rel):
+        return {"error": "第 %s 张的标签是这样写的,代码改不动它:%s"
+                         % (slot, (tag.search(html).group(0) if tag.search(html) else "")[:120]),
+                "note": "**页面一个字都没动,别说成换好了。** 请把这一版重新生成一遍。"}
+    html = out
     path.write_text(html, encoding="utf-8")
     return {"换好了": True, "文件": filename, "第几张": slot,
             "新图": {"搜索词": query, "文件": name, "来自": pick.get("source"),
                     "许可证": pick.get("license"), "原图页": pick.get("source_page")},
+            **({"⚠️": "找回来的是**同一张图**(内容一模一样),所以画面不会有变化。"
+                       "想换别的就换个关键词再来一次。"} if same else {}),
             "note": "**页面其它内容一个字都没动。** 让用户刷新预览看看。"}
 
 

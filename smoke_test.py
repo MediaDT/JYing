@@ -5246,8 +5246,10 @@ def test_landing_ai_images():
     def stubbed(balance=5.0, fail_on=()):
         """图库全挂(逼出隐藏占位)+ 生图打桩(不真花钱)。`gen` 记每一次生图调用。"""
         gen = []
+        # `cs.download` 也要存下来 —— 底下有几条会换掉它,不还原就**漏给后面的测试**,
+        # 那种"为错误的原因通过"最难查(坑表里那条老教训)。
         real = (lp.cs.available_sources, lp.cs.search, cr.render, cr.check_balance,
-                lp.GENERATED_DIR)
+                lp.GENERATED_DIR, lp.cs.download)
 
         def _render(scene, variant=0, **k):
             gen.append((variant, scene))
@@ -5265,7 +5267,7 @@ def test_landing_ai_images():
                 yield gen
             finally:
                 (lp.cs.available_sources, lp.cs.search, cr.render, cr.check_balance,
-                 lp.GENERATED_DIR) = real
+                 lp.GENERATED_DIR, lp.cs.download) = real
 
     def in_box(fn):
         saved = dict(srv.PENDING_ACTIONS)
@@ -5543,6 +5545,158 @@ def test_landing_ai_images():
         return True
     check("图库全关时「换图」给的是 AI 重做,不是让人去配钥匙",
           swap_without_library_gives_a_way_out)
+
+
+    # ---------- 改图这条链:那个 <img> 是**模型**写的,别假设它长什么样 ----------
+
+    def stock(bytes_=b"STOCK-A"):
+        """图库这一轮有货(用来造出「已经配上图」的页面)。"""
+        lp.cs.search = lambda q, count=6: {"results": [{
+            "image_url": "https://s/x.jpg", "source": "openverse", "license": "CC0",
+            "source_page": "p", "width": 1600, "height": 1000, "quality": {"可用": True}}]}
+        lp.cs.download = lambda u: (bytes_, "x.jpg", "image/jpeg")
+
+    def one_tag(f, n):
+        body = lp.resolve_preview(f, "uG").read_text(encoding="utf-8")
+        got = [t for t in body.split("<") if t.startswith("img") and 'data-slot="%d"' % n in t]
+        return got[0] if got else ""
+
+    def no_charge_when_page_is_gone():
+        """**免费又可能失败的事,一件都不许留到花钱之后。**
+
+        待办会在保险箱里躺很久,这期间页面完全可能被清理掉(`KEEP_GENERATED` 按人裁)
+        或被后来生成的挤走。原来是先 `cr.render()` 再去填 —— 实测两张 **$0.40 全打水漂**,
+        而且图连盘都没落(`fill_image_slot` 一上来就抛)。
+        """
+        def go():
+            with stubbed() as gen:
+                f = make()
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f}))
+                aid = r["action_id"]
+                lp.resolve_preview(f, "uG").unlink()             # 页面这期间没了
+                out = as_landing(lambda: srv._tool_call("confirm_action", {"action_id": aid}))
+                if gen:
+                    return "页面都没了还生了 %d 张 —— 这些钱全白花" % len(gen)
+                if not str(out.get("error") or ""):
+                    return "页面没了却没报错:%r" % str(out)[:120]
+                if "没扣钱" not in str(out):
+                    return "没明说一分钱都没花,用户会以为白花了:%r" % str(out)[:150]
+                if aid in srv.PENDING_ACTIONS:
+                    return ("这条待办永远执行不了,却还留在保险箱里 —— "
+                            "每轮都会注入提示词催用户确认,确认多少次都是同一个错")
+                return True
+        return in_box(go)
+    check("页面没了:一张不生、明说没扣钱、死待办收走", no_charge_when_page_is_gone)
+
+    def redo_strips_single_quoted_src():
+        """模型爱写 `src='...'`。原来剥旧 src 的正则**只认双引号** ——
+        重做完标签上留着**两个 src**,而浏览器用第一个,于是钱花了、画面还是旧图。"""
+        def go():
+            with stubbed() as gen:
+                stock(b"STOCK-OLD")
+                f = lp.save_pages([{"命名": "q", "html": PAGE.replace(
+                    '<img src="[[IMAGE_1]]" alt="crew">',
+                    "<img src='[[IMAGE_1]]' alt='crew'>"), "配图": SPECS}],
+                    limit=1, owner="uG")[0]["file"]
+                if "data-slot" not in one_tag(f, 1):
+                    return "第 1 张没配上图,这条测试的前提就没成立"
+                r = as_landing(lambda: srv._tool_call("propose_landing_images",
+                                                      {"landing_file": f, "slots": "1"}))
+                if "error" in r:
+                    return "点名重做被拒:%s" % r["error"]
+                as_landing(lambda: srv._tool_call("confirm_action", {"action_id": r["action_id"]}))
+                tag = one_tag(f, 1)
+                if tag.count("src=") != 1:
+                    return "标签上有 %d 个 src,浏览器会用第一个(旧图):%s" % (tag.count("src="), tag)
+                import hashlib as _h
+                if _h.sha256(b"STOCK-OLD").hexdigest()[:16] in tag:
+                    return "钱花了,挂着的还是旧图:%s" % tag
+                return True
+        return in_box(go)
+    check("AI 重做单引号 src 的图:旧 src 要剥干净", redo_strips_single_quoted_src)
+
+    def swap_really_changes_the_page():
+        """`swap_image` 原来也只认双引号的 src —— 碰上单引号的图、或者**隐藏占位**
+        (它压根没有 src),一个字都改不动,**却照样返回「换好了」**。
+        用户刷新预览看不出任何变化,只会以为是浏览器缓存。"""
+        import re as _re2
+        cases = [("隐藏占位(图库没配上的空位)", None),
+                 ("单引号 src 的图", b"STOCK-OLD")]
+        for name, pre in cases:
+            with stubbed():
+                if pre is None:
+                    f = make()                                   # 配不上 → 隐藏占位
+                    slot = 1
+                else:
+                    stock(pre)
+                    f = lp.save_pages([{"命名": "w", "html": PAGE.replace(
+                        '<img src="[[IMAGE_1]]" alt="crew">',
+                        "<img src='[[IMAGE_1]]' alt='crew'>"), "配图": SPECS}],
+                        limit=1, owner="uG")[0]["file"]
+                    slot = 1
+                stock(b"STOCK-NEW-" + name.encode())
+                before = one_tag(f, slot)
+                r = lp.swap_image(f, slot, "brand new scene", owner="uG")
+                after = one_tag(f, slot)
+                if "error" in r:
+                    return "%s:换图失败了 %r" % (name, r["error"])
+                if before == after:
+                    return "%s:返回「换好了」,页面却一个字都没变 —— 这是静默说谎" % name
+                if 'src="img/' not in after:
+                    return "%s:换完还是没挂上图:%s" % (name, after)
+                if _re2.search(r"\bhidden\b", after):
+                    return "%s:图换上了但标签还是 hidden,用户看不见" % name
+        return True
+    check("换图:隐藏占位和单引号的图都真的换得动", swap_really_changes_the_page)
+
+    def same_image_is_not_an_error():
+        """换回来的是**内容一模一样**的图时,文件名(内容 sha256)也一样、页面本来就不该变。
+        拿「页面变没变」当判据会把这种情况误报成「改不动」—— 判据要看
+        **标签最后有没有挂上那张图**。"""
+        with stubbed():
+            stock(b"ALWAYS-THE-SAME")
+            f = lp.save_pages([{"命名": "s", "html": PAGE, "配图": SPECS}],
+                              limit=1, owner="uG")[0]["file"]
+            # **换两次。** 第一次会把 src 挪到属性末尾 —— 所以第二次换到同一张图时,
+            # 标签是**逐字节相同**的,这才真正踩到「拿页面变没变当判据」那个误报。
+            lp.swap_image(f, 1, "same thing", owner="uG")
+            r = lp.swap_image(f, 1, "same thing again", owner="uG")
+            if "error" in r:
+                return "换到同一张图被误报成失败:%r" % r["error"]
+            if not r.get("换好了"):
+                return "没报成功也没报错:%r" % str(r)[:120]
+            if "同一张图" not in str(r):
+                return "没告诉用户画面不会变,他会以为功能坏了:%r" % str(r)[:150]
+        return True
+    check("换到同一张图:不误报,但要如实说画面不会变", same_image_is_not_an_error)
+
+    def unknown_description_refuses_instead_of_lying():
+        """加 `data-want` 之前配上的图只有 `data-slot`,画面描述没记下来。
+        整条跳过的话,用户点名重做第 1 张会被告知「这一版没有第 1 张图」—— **那是假话**,
+        图明明在页面上。要认出来、如实说不知道画什么、并给出路。"""
+        def go():
+            with stubbed() as gen:
+                old = lp._owner_dir("uG") / "legacy-page.html"
+                old.write_text('<body><img data-slot="1" src="img/a.jpg">'
+                               '<img data-slot="2" src="img/b.jpg"></body>', encoding="utf-8")
+                every = lp.pending_image_slots("legacy-page.html", "uG", include_filled=True)
+                if [x["slot"] for x in every] != [1, 2]:
+                    return "老页面的图位一个都认不出来:%r" % every
+                r = as_landing(lambda: srv._tool_call(
+                    "propose_landing_images", {"landing_file": "legacy-page.html", "slots": "1"}))
+                if "error" not in r:
+                    return "不知道该画什么却照样登记了待办:%r" % str(r)[:130]
+                if gen:
+                    return "不知道该画什么却还是生了图"
+                if srv.PENDING_ACTIONS:
+                    return "说了不知道画什么,却还是往保险箱里塞了一条"
+                if "没扣钱" not in str(r) and "没有登记" not in str(r):
+                    return "没说清没扣钱:%r" % str(r)[:130]
+                return True
+        return in_box(go)
+    check("老页面没记画面描述:如实说不知道,不硬生", unknown_description_refuses_instead_of_lying)
+
 
 
 
