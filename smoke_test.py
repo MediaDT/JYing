@@ -1350,6 +1350,11 @@ def test_pure_logic():
         import cloudflare_pages as cfp
         if cfp.UPLOAD_TIMEOUT_S >= idle_s:
             return f"上传超时 {cfp.UPLOAD_TIMEOUT_S}s 不小于前端 {idle_s}s"
+        # 生一张图最长 cr.TIMEOUT。**单张小于前端上限还不够** ——
+        # 生图是个循环,中间不播报的话 N 张就是 N×TIMEOUT 的静默(见下面那条测试)。
+        import creative_render as _cr
+        if _cr.TIMEOUT >= idle_s:
+            return f"生一张图的超时 {_cr.TIMEOUT}s 不小于前端 {idle_s}s"
         # 长文生成本来就慢(实测 gpt-5.5 出一整页 61 秒),不能还用聊天那个短超时
         src = _no_comments(inspect.getsource(srv._plain_completion))
         if "GEN_TIMEOUT_S" not in src:
@@ -5228,6 +5233,100 @@ def test_cost_gate_counts_output():
 
 # ============ 3.59 落地页配图:图库配不上时用 AI 生 ============
 
+def test_long_loops_keep_the_line_warm():
+    """**每一次长调用之前,前端那个「多久没动静」的闹钟都要被重置过。**
+
+    线上实测(2026-09-09):用户确认生两张广告图,付了 $0.40,**永远没等到结果**。
+    原因不是生图失败 —— 是生一张最长 240 秒(`creative_render.TIMEOUT`),
+    两张连着画中间**一个字都不吐**,最长 8 分钟静默;而前端的判据是
+    「多久没收到东西就放弃」(`IDLE_TIMEOUT_MS` = 5 分钟)。**前端先放弃了,
+    后端还在画** —— 钱照花、图照传进素材库,用户那头什么都看不到。
+
+    单看「一次调用 240s < 前端 300s」是过的,所以老的超时顺序测试抓不到它。
+    **循环要按「累计静默」算**,而正确的解法不是把超时调小,是**中间播报**
+    (前端收到任何字节都会重新计时),顺带还让用户知道在画第几张。
+    """
+    import contextvars
+    import agent_server as srv
+    import creative_render as cr
+    import newsbreak_client as nb
+
+    print("\n【3.60】长循环别把前端晾在那儿")
+
+    def run(fn, n):
+        """跑一遍执行器,按**发生顺序**记下「播报」和「长调用」。"""
+        seq = []
+        real = (cr.render, cr.check_balance, nb.upload_asset)
+        cr.render = lambda *a, **k: (seq.append("画图"), b"IMG")[1]
+        cr.check_balance = lambda **k: 100.0
+        nb.upload_asset = lambda *a, **k: {"assetUrl": "https://cdn.example/x.jpg"}
+        try:
+            def go():
+                # `_emit` 递给 CURRENT_EMIT 的是**一个 dict**,不是 (kind, **data)
+                srv.CURRENT_EMIT.set(
+                    lambda ev: seq.append("播报") if ev.get("type") == "status" else None)
+                srv.CURRENT_USER_ID.set("uL")
+                return fn()
+            contextvars.Context().run(go)
+        finally:
+            cr.render, cr.check_balance, nb.upload_asset = real
+        return seq
+
+    def warm(seq, n, what):
+        """每一次「画图」之前都必须有过「播报」 —— 否则那一段就是静默。"""
+        if seq.count("画图") != n:
+            return "%s:画了 %d 张(应该 %d)" % (what, seq.count("画图"), n)
+        said = 0
+        for i, ev in enumerate(seq):
+            if ev == "播报":
+                said += 1
+            elif ev == "画图":
+                if said < 1:
+                    return ("%s:第 %d 张开画之前一个字都没吐 —— "
+                            "这一段静默最长 %ds,前端 5 分钟就放弃了"
+                            % (what, seq[:i].count("画图") + 1, int(cr.TIMEOUT)))
+                said = 0          # 用掉了,下一张要重新播一次
+        return True
+
+    def creatives_report_progress():
+        plans = [{"命名": "v%d" % i, "主标题": "H%d" % i, "描述": "D",
+                  "画面怎么拍": "a roofer working"} for i in range(3)]
+        seq = run(lambda: srv._execute_make_creatives(
+            {"type": "make_creatives", "indexes": [0, 1, 2], "plans": plans,
+             "ad_account_id": "acct1", "user_id": "uL"}), 3)
+        return warm(seq, 3, "广告图")
+    check("生广告图:每张开画之前都吐一次进度", creatives_report_progress)
+
+    def landing_images_report_progress():
+        import landing_lab as lp
+        import tempfile
+        from pathlib import Path as _P2
+        keep = lp.GENERATED_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                lp.GENERATED_DIR = _P2(d)
+                page = ('<body>' + "".join('<img src="[[IMAGE_%d]]">' % i for i in (1, 2, 3))
+                        + '<a href="[[CLICKFLARE_CTA_URL]]">g</a>'
+                        '<!--[[CLICKFLARE_LANDER_SCRIPT]]--></body>')
+                specs = [{"编号": i, "搜索词": "scene %d" % i} for i in (1, 2, 3)]
+                real_s = (lp.cs.available_sources, lp.cs.search)
+                lp.cs.available_sources = lambda: [{"id": "openverse", "ready": True}]
+                lp.cs.search = lambda q, count=6: {"results": []}
+                try:
+                    f = lp.save_pages([{"命名": "p", "html": page, "配图": specs}],
+                                      limit=1, owner="uL")[0]["file"]
+                    todo = lp.pending_image_slots(f, "uL")
+                finally:
+                    lp.cs.available_sources, lp.cs.search = real_s
+                seq = run(lambda: srv._execute_make_landing_images(
+                    {"type": "make_landing_images", "landing_file": f,
+                     "slots": todo, "user_id": "uL"}), 3)
+                return warm(seq, 3, "落地页配图")
+        finally:
+            lp.GENERATED_DIR = keep
+    check("落地页配图:每张开画之前也要吐一次进度", landing_images_report_progress)
+
+
 def test_landing_ai_images():
     """图库(尤其 Openverse)对 roof / gutter 这些词基本没图,所以要能用 AI 补。
 
@@ -6152,6 +6251,7 @@ if __name__ == "__main__":
     test_stream_carries_context()
     test_landing_images()
     test_landing_ai_images()
+    test_long_loops_keep_the_line_warm()
     test_fabricated_action_ids()
     test_cost_gate_counts_output()
     test_per_user_isolation()

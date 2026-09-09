@@ -1434,6 +1434,13 @@ def _execute_make_landing_images(a: dict) -> dict:
     made, failed = [], []
     for i, one in enumerate(todo):
         tag = "第%s张" % one.get("slot")
+        # **每画一张之前播报一次。** 生一张最长 240 秒(`creative_render.TIMEOUT`),
+        # 而前端的判据是「**多久没收到东西**就放弃」(`IDLE_TIMEOUT_MS` = 5 分钟)——
+        # 连着画两张就是最长 **8 分钟静默**,前端先放弃,而后端还在画:
+        # **钱照花、图照传,用户那头永远等不到结果**(2026-09-09 线上实测撞到)。
+        # 播报既让前端的闹钟重新计时(收到任何字节都会 bump),
+        # 也让用户知道在画第几张 —— 干等 4 分钟看不到动静,谁都会以为卡死了。
+        _emit("status", text="正在画第 %d 张(共 %d 张),一张要一两分钟…" % (i + 1, len(todo)))
         try:
             # 落地页配图**不叠字**:标题是 HTML 排的,图上再来一遍就重复了。
             # variant=i 让同一页的几张换镜头语言,不然几张长得一样。
@@ -1900,8 +1907,15 @@ def _execute_make_creatives(a: dict) -> dict:
     import re as _re
 
     made, failed = [], []
-    for idx, plan in zip(a.get("indexes", []), plans):
+    for nth, (idx, plan) in enumerate(zip(a.get("indexes", []), plans), 1):
         tag = f"第{idx + 1}版「{plan.get('命名') or ''}」"
+        # **每画一张之前播报一次。** 生一张最长 240 秒(`creative_render.TIMEOUT`),
+        # 而前端的判据是「**多久没收到东西**就放弃」(`IDLE_TIMEOUT_MS` = 5 分钟)——
+        # 连着画两张就是最长 **8 分钟静默**,前端先放弃,而后端还在画:
+        # **钱照花、图照传,用户那头永远等不到结果**(2026-09-09 线上实测撞到)。
+        # 播报既让前端的闹钟重新计时(收到任何字节都会 bump),
+        # 也让用户知道在画第几张 —— 干等 4 分钟看不到动静,谁都会以为卡死了。
+        _emit("status", text=f"正在画第 {nth} 张(共 {len(plans)} 张),一张要一两分钟…")
         local = None      # 每轮清一次:不清的话这一版失败时会报出**上一版**的文件路径
         try:
             # **所有不花钱、但可能失败的准备工作都放在生图之前。**
