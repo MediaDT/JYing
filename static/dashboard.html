@@ -132,6 +132,8 @@
     font-size: 11.5px; color: #dc2626; margin-top: 8px; line-height: 1.5; display: none;
   }
   .date-pop .err.show { display: block; }
+  /* 「已经替你换过来了」是**办好了**,不是出错 —— 标红会把人吓一跳 */
+  .date-pop .err.note { color: var(--text-secondary); }
   .btn-primary {
     background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
     border: 0; border-radius: 999px; padding: 8px 18px; font-size: 13px; cursor: pointer;
@@ -296,6 +298,7 @@
       calTitle: function (y, m) { return y + "年" + (m + 1) + "月"; },
       pickHint: "点上面的日期框选日期",
       dateNeedBoth: "两个日期都要填",
+      dateSwapped: "开始日期比结束日期晚了,已经替你换过来",
       customFmt: function (a, b, d) { return a + " ~ " + b + " · 共 " + d + " 天"; },
       loadFail: "加载失败:",
       kpi: { cost: "花费", impressions: "展示", clicks: "点击", ctr: "点击率 CTR",
@@ -329,6 +332,7 @@
       },
       pickHint: "Click a date field above to pick a date",
       dateNeedBoth: "Please pick both dates",
+      dateSwapped: "Start was after end — swapped them for you",
       customFmt: function (a, b, d) { return a + " ~ " + b + " · " + d + " days"; },
       loadFail: "Failed to load: ",
       kpi: { cost: "Spend", impressions: "Impressions", clicks: "Clicks", ctr: "CTR",
@@ -410,11 +414,35 @@
     var el = document.getElementById("date-pop");
     if (el) el.classList.remove("show");
   }
-  function showDateErr(msg) {
+  function showDateErr(msg, note) {
     var e = document.getElementById("date-err");
     if (!e) return;
     e.textContent = msg || "";
     e.classList.toggle("show", !!msg);
+    e.classList.toggle("note", !!note);   // 「已经换好了」不该标红
+  }
+
+  /** 开始日期比结束日期还晚 → **当场换过来,并且说一句**。返回有没有换。
+   *
+   * 后端 `_resolve_range()` 早就是这么做的(「反了就替他调过来,不用报错烦他」),
+   * **可界面上那两个框还留着反的那一对** —— 于是标题写着「02-02 ~ 03-17」、
+   * 框里写着「开始 03-17 / 结束 02-02」,**两组数字自相矛盾**,用户只能怀疑是不是坏了。
+   * (线上实测撞到的。)第六之七节「替他定了必须告诉他」在这儿一样适用:
+   * **悄悄换掉和干脆不换,两头都不行。**
+   * 日期是 `YYYY-MM-DD`,直接比字符串就等于按时间比。
+   */
+  function fixDateOrder() {
+    var f = document.getElementById("date-from");
+    var e = document.getElementById("date-to");
+    if (!f || !e || !f.value || !e.value || f.value <= e.value) return false;
+    var tmp = f.value;
+    f.value = e.value;
+    e.value = tmp;
+    // 他刚点的那天现在跑到**另一个框**里去了,焦点要跟过去 ——
+    // 不跟的话日历高亮的是另一个日期,他会以为自己刚点的那下没生效
+    CAL_TARGET = (CAL_TARGET === "date-from") ? "date-to" : "date-from";
+    showDateErr(t().dateSwapped, true);
+    return true;
   }
   function toggleDatePop() {
     var el = document.getElementById("date-pop");
@@ -509,7 +537,8 @@
       b.onclick = (function (v, dd) {
         return function () {
           document.getElementById(CAL_TARGET).value = v;
-          showDateErr("");
+          // **在他还看得见的时候换**,不是等到点了「确定」弹层一关才悄悄换
+          if (!fixDateOrder()) showDateErr("");
           // 点的是上/下月那几个灰格子 → 日历跟着翻过去。
           // 不翻的话,选中的那天不在当前月里,用户看不到自己选中了什么
           CAL_VIEW = new Date(dd.getFullYear(), dd.getMonth(), 1);
@@ -531,6 +560,9 @@
     var a = document.getElementById("date-from").value;
     var b = document.getElementById("date-to").value;
     if (!a || !b) { showDateErr(t().dateNeedBoth); return; }   // 缺一个就说清楚,别静默不动
+    // 兜底:万一值是从别的路子进来的。换过来之后**先别关**,让他看一眼再点一次 ——
+    // 关掉的话他就只看到范围自己变了,不知道为什么
+    if (fixDateOrder()) return;
     CUSTOM = { start: a, end: b };
     closeDatePop();
     renderRangeBtns();

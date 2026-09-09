@@ -211,6 +211,60 @@ check("点日历上的某一天会填进输入框", () => {
          "点了没填进去:" + els["date-from"].value + " vs " + target.dataset.d);
 });
 
+// ===== 开始日期比结束日期还晚 =====
+// 线上实测:自定义里选出「开始 2026-03-17 / 结束 2026-02-02」,弹层一声不吭。
+// 后端 `_resolve_range()` 其实会替他调过来,所以标题写的是「02-02 ~ 03-17」——
+// **但那两个输入框还留着反的那一对**,标题和框里两组数字自相矛盾,
+// 用户只能怀疑是不是坏了。要在他还看得见的时候换过来,并且说一句。
+//
+// 这两条跑完都要把焦点还给「开始日期」—— 它是模块级的 `CAL_TARGET`,
+// **不还的话后面几条测试全会去填错的框**(实测连坐红了三条)。
+
+function openDatePop() {
+  els["date-pop"].classList.remove("show");     // 它是 toggle,先确保是关着的
+  els["custom-btn"].fire("click");
+}
+function focusBackToStart() {
+  els["date-from"].fire("click");               // CAL_TARGET 还原成「开始日期」
+}
+
+check("选出「开始比结束晚」→ 当场换过来,并且说一句", () => {
+  api.setLang("zh"); api.applyLang();
+  openDatePop();
+  els["date-from"].value = "2026-03-17";
+  els["date-to"].value = "2026-03-17";
+  els["date-to"].fire("click");                 // 焦点给「结束日期」,日历翻到 2026-03
+  const days = els["cal"].children.filter((c) => c.className === "cal-grid")[0]
+                 .children.filter((c) => String(c.className).indexOf("cal-day") === 0);
+  const early = days.find((d) => String(d.className).indexOf("out") < 0 &&
+                                 d.dataset.d < "2026-03-17");
+  assert(early, "这个月里找不到比 2026-03-17 更早的一天,测试前提不成立");
+  early.fire("click");
+
+  assert(els["date-from"].value === early.dataset.d,
+         "换过来之后,刚点的那天该落在「开始日期」里:" + els["date-from"].value);
+  assert(els["date-to"].value === "2026-03-17",
+         "原来的开始日期该挪到「结束日期」:" + els["date-to"].value);
+  assert(els["date-err"].classList.contains("show"),
+         "换了却一声不吭 —— 用户不知道为什么两个框自己动了");
+  assert(els["date-err"].classList.contains("note"),
+         "按「错误」标红了:事情已经替他办好了,标红会吓人");
+  focusBackToStart();
+});
+
+check("点「确定」那一层也兜得住,而且先别关弹层", () => {
+  api.setLang("zh"); api.applyLang();
+  openDatePop();
+  els["date-from"].value = "2026-08-20";
+  els["date-to"].value = "2026-08-01";
+  els["date-ok"].fire("click");
+  assert(els["date-from"].value === "2026-08-01" && els["date-to"].value === "2026-08-20",
+         "确定那一层没兜住:" + els["date-from"].value + " ~ " + els["date-to"].value);
+  assert(els["date-pop"].classList.contains("show"),
+         "换过来就把弹层关了 —— 用户只看到范围自己变了,不知道为什么");
+  focusBackToStart();
+});
+
 check("不再用浏览器原生的 date 输入框(那个换不了语言)", () => {
   // **先剥掉注释再查**:注释里正当地写着"为什么不用 <input type=date>",
   // 直接搜会把说明文字也算进去(这坑项目里踩过好几次:docstring、CSS 注释、JS 注释)
