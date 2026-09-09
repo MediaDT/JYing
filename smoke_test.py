@@ -524,6 +524,65 @@ def test_pure_logic():
         if "timeout=UPLOAD_TIMEOUT_S" not in src:
             return "常量定义了但没真的用上"
         return None
+    def t_wrangler_node_override():
+        """**别为了 wrangler 去升系统的 node。**
+
+        wrangler 4.x 启动时硬卡 Node ≥ 22,而它是靠 `#!/usr/bin/env node` 找解释器的 ——
+        很自然就会想到"把系统 node 升上去"。**实测那台服务器上还跑着 5 个别的线上服务**
+        (PM2:qianxian / znerp2 / znxp…),它们都用同一个系统 node:升级等于同时给
+        它们换了运行时,而且要等它们下次重启才暴露,到时候根本联想不到是这一步。
+        所以给一个只作用于这一次调用的出口 `WRANGLER_NODE`。
+        (和「绝不抢占一个已经在服务的域名」同一条:**改全局之前先问谁在用它**。)
+        """
+        import subprocess as _sp
+        import cloudflare_pages as cfp
+        import tempfile
+        from pathlib import Path as _P3
+
+        seen = {}
+
+        class _Done:
+            returncode = 0
+            stdout = "https://x.pages.dev"
+            stderr = ""
+
+        real = (_sp.run, cfp._env, cfp.WRANGLER)
+        try:
+            _sp.run = lambda cmd, **k: (seen.update(cmd=list(cmd)), _Done())[1]
+            cfp.WRANGLER = _P3(__file__)                      # 装了 wrangler(拿本文件冒充)
+            with tempfile.TemporaryDirectory() as d:
+                fake_node = _P3(d) / "node22"
+                fake_node.write_text("#!/bin/sh\n")
+
+                # ① 不设 WRANGLER_NODE → 行为一个字不变(直接执行 wrangler,走 shebang)
+                cfp._env = lambda n: {"CLOUDFLARE_ACCOUNT_ID": "a",
+                                      "CLOUDFLARE_API_TOKEN": "t"}.get(n, "")
+                cfp._wrangler_deploy(_P3(d), "proj", "slug")
+                if seen["cmd"][0] != str(cfp.WRANGLER):
+                    return "没设 WRANGLER_NODE 时行为变了:%r" % seen["cmd"][:2]
+
+                # ② 设了 → 用它当解释器,系统 node 一个字不碰
+                cfp._env = lambda n: {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t",
+                                      "WRANGLER_NODE": str(fake_node)}.get(n, "")
+                cfp._wrangler_deploy(_P3(d), "proj", "slug")
+                if seen["cmd"][:2] != [str(fake_node), str(cfp.WRANGLER)]:
+                    return ("WRANGLER_NODE 没被用上 —— 那就只能去升系统 node,"
+                            "会连累同一台机器上别的服务:%r" % seen["cmd"][:2])
+
+                # ③ 指了个不存在的 → 当场说清楚,别等发布跑一半才崩
+                cfp._env = lambda n: {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t",
+                                      "WRANGLER_NODE": str(_P3(d) / "nope")}.get(n, "")
+                try:
+                    cfp._wrangler_deploy(_P3(d), "proj", "slug")
+                    return "WRANGLER_NODE 指向不存在的路径却照样往下跑"
+                except cfp.CloudflarePagesError as e:
+                    if "WRANGLER_NODE" not in str(e):
+                        return "报错没点名是 WRANGLER_NODE 配错了:%s" % str(e)[:90]
+        finally:
+            _sp.run, cfp._env, cfp.WRANGLER = real
+        return True
+    check("wrangler 用自己的 Node,不逼着去升系统 node", t_wrangler_node_override)
+
     check("发布上传超时小于前端等待上限", t_upload_timeout)
 
     # 提案阶段就要把覆盖风险查出来,和占位符检查一个道理:

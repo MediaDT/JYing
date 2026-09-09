@@ -478,11 +478,28 @@ def _guard_replace(domain: str, slug: str, allow_replace: bool) -> dict:
 
 def _wrangler_deploy(directory: Path, project: str, slug: str) -> str:
     if not WRANGLER.exists():
-        raise CloudflarePagesError("服务器还没安装 Wrangler。请在项目目录执行 npm install 后再发布。")
+        raise CloudflarePagesError(
+            "服务器还没安装 Wrangler。请在项目目录执行 npm install 后再发布"
+            "（wrangler 要求 Node.js ≥ 22；服务器上若有别的服务跑在旧版 Node 上，"
+            "**别升系统 node**，装一个单独的再用 .env 的 WRANGLER_NODE 指过去）。")
     account, token = _credentials()
     env = dict(os.environ)
     env.update({"CLOUDFLARE_ACCOUNT_ID": account, "CLOUDFLARE_API_TOKEN": token})
-    cmd = [str(WRANGLER), "pages", "deploy", str(directory),
+
+    # **别为了 wrangler 去升系统的 node。** wrangler 4.x 启动时硬卡 Node ≥ 22
+    # （`MIN_NODE_VERSION`，不满足直接退出），而 `node_modules/.bin/wrangler` 是靠
+    # `#!/usr/bin/env node` 去 PATH 里找的 —— 于是很自然会想到"把系统 node 升上去"。
+    # **实测那台服务器上还跑着 5 个别的线上服务（PM2）**，它们都用同一个系统 node：
+    # 升级等于同时给它们换了运行时，原生模块可能对不上，而且要等它们下次重启才暴露，
+    # 到时候根本联想不到是这一步。（和「绝不抢占一个已经在服务的域名」同一条规矩：
+    # **凡是要改全局的东西，先问一句现在谁在用它。**）
+    # 所以给一个只作用于这一次调用的出口：`.env` 里 `WRANGLER_NODE=/opt/node22/bin/node`，
+    # 不设就照常走 PATH（本机开发、以及系统 node 本来就够新的机器，行为一个字不变）。
+    node_bin = (_env("WRANGLER_NODE") or "").strip()
+    if node_bin and not Path(node_bin).exists():
+        raise CloudflarePagesError(
+            f"WRANGLER_NODE 指向的 Node 不存在：{node_bin}。请检查 .env 里这一行。")
+    cmd = ([node_bin] if node_bin else []) + [str(WRANGLER), "pages", "deploy", str(directory),
            "--project-name", project, "--branch", "main", "--commit-dirty=true",
            "--commit-message", f"Publish landing A/B {slug}"]
     try:
