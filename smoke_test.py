@@ -4769,12 +4769,21 @@ def test_landing_images():
         try:
             with tempfile.TemporaryDirectory() as d:
                 lp.GENERATED_DIR = _P(d)
+                # **这几种写法都得摘掉。** 那段 HTML 是**模型**写的,引号可以不带、
+                # 标签不止 <img>、属性不止 src —— 三样里假设错任何一样都摘不干净,
+                # 而摘不干净**只在线上出事**:CSP 只管本地预览,发布出去的页面
+                # 我们没设过任何响应头,那张第三方图会真的去加载。
                 page = ('<html><body><img src="https://evil.example/x.jpg">'
                         "<img src='data:image/png;base64,AAAA'>"
+                        '<img src=https://naked.example/z.jpg>'          # 不带引号
+                        '<picture><source srcset="https://srcset.example/a.webp">'
+                        '<img src="img/ok.jpg"></picture>'               # <source> + srcset
                         '<img src="//cdn.example/y.png"></body></html>')
                 out, _used, probs = lp.attach_images(page, [], owner="uA")
-                if "evil.example" in out or "data:image" in out or "cdn.example" in out:
-                    return "外部图片地址没被摘掉:%r" % out[:140]
+                for host in ("evil.example", "data:image", "cdn.example",
+                             "naked.example", "srcset.example"):
+                    if host in out:
+                        return "外部图片地址没被摘掉(%s):%r" % (host, out[:150])
                 if not probs:
                     return "摘掉了却不告诉用户"
         finally:

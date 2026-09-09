@@ -537,8 +537,14 @@ def _check_publishable(html: str) -> tuple[str, list[str]]:
 _IMAGE_MARK = re.compile(r"\[\[IMAGE_(\d+)\]\]")
 # 带着某个占位符的整个 <img> 标签 —— 找不到图时要把整个标签摘掉,不能留个破图
 _IMG_TAG = r"<img\b[^>]*%s[^>]*>"
-# 外部图片地址:模型偶尔还是会写一个出来(提示词管不住,见坑表)
-_EXTERNAL_IMG = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"\']\s*(?:https?:|//|data:)[^>]*>", re.I)
+# 外部图片地址:模型偶尔还是会写一个出来(提示词管不住,见坑表)。
+# **三件事都不能假设**,不然摘不干净,而摘不干净只在**线上**出事 ——
+# CSP 只管本地预览,发布出去的页面我们没设过任何响应头:
+#   · 引号:`src=https://…` 不带引号也是合法 HTML(实测原来漏掉);
+#   · 标签:`<picture>` 里的 `<source>` 一样会去加载(实测原来完全没管);
+#   · 属性:`srcset` 和 `src` 一样能引外链。
+_EXTERNAL_IMG = re.compile(
+    r"""<(?:img|source)\b[^>]*\b(?:src|srcset)\s*=\s*["\']?\s*(?:https?:|//|data:)[^>]*>""", re.I)
 IMG_SUBDIR = "img"
 MAX_IMAGES_PER_PAGE = 4
 
