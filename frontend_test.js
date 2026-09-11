@@ -59,6 +59,21 @@ console.log("\n【1.5】三个工作区能独立切换");
   const creative = app.convs().find((c) => c.id === app.curId());
   t("能继续切到素材工作室", creative && creative.mode === "creative");
   t("再切一次还是同一段", app.convs().length === 1, `实际 ${app.convs().length} 段`);
+
+  // **切工作室时，开场的欢迎语和快捷提问也要跟着换。**
+  // 线上实测(2026-09-11)：顶栏、副标题、输入框提示、底部说明全跟着切了，
+  // **只有这两样还是上一个工作室的** —— 用户在素材工作室里看到的是
+  // 「我是你的广告投放小助手」和「哪条广告的 CTR 最高」。
+  // 根因：重画它们的代码只长在「切语言」那个监听器里，切工作室那条路压根没有。
+  // **要递归往下取**:气泡的文字在 row → bubble 里，而模拟的 textContent
+  // 不像真 DOM 那样把子孙的文字汇总上来，只读一层会永远拿到空串(踩过)。
+  const deep = (el) => !el ? "" : String(el.textContent || "") + String(el.innerHTML || "")
+    + (el.children || []).map(deep).join("");
+  const shown = () => (app.registry["messages"].children || []).map(deep).join(" ");
+  t("切工作室后欢迎语跟着换", shown().includes("素材工作室"), shown().slice(0, 80));
+  t("切工作室后快捷提问也跟着换",
+    shown().includes("看看同行最近在投什么") && !shown().includes("哪条广告的 CTR 最高"),
+    shown().slice(0, 160));
 }
 
 console.log("\n【2】已有两个会话:打开的是当前那个");

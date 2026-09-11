@@ -3,35 +3,34 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>选择投放平台 · 广告投放小助手</title>
+<title>选择投放平台 · TalkAD</title>
   <!-- 站点图标:对话气泡 + 上升柱状 = 用聊天管广告数据。
        SVG 优先(任意尺寸都清晰),PNG 兜底给不认 SVG 图标的老 Safari。 -->
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/static/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-  <meta name="theme-color" content="#4f6ef7">
+  <meta name="theme-color" content="#171717">
 <style>
   :root {
-    --bg: #eef1f6; --panel: #ffffff; --text: #1d2129; --muted: #7a8190;
-    --accent1: #4f6ef7; --accent2: #7b5ff5; --border: #e4e8ef;
-    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 8px 24px -8px rgba(16,24,40,.12);
+    --bg: #fafafa; --panel: #ffffff; --text: #0a0a0a; --muted: #737373;
+    --accent1: #171717; --accent2: #171717; --accent-fg: #fafafa; --border: #e5e5e5;
+    --shadow: 0 1px 2px 0 rgba(0,0,0,.05);
     --good: #067647; --warn: #b54708;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e1015; --panel: #171a21; --text: #e9ebef; --muted: #8b93a1;
-      --accent1: #5b7cff; --accent2: #8b6cf8; --border: #262b36;
-      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px -8px rgba(0,0,0,.6);
+      --bg: #0a0a0a; --panel: #171717; --text: #fafafa; --muted: #a1a1a1;
+      --accent1: #fafafa; --accent2: #fafafa; --accent-fg: #171717; --border: #262626;
+      --shadow: 0 1px 2px 0 rgba(0,0,0,.4);
       --good: #75e0a7; --warn: #fec84b;
     }
   }
+  .ico { width:16px; height:16px; flex:none; }
+  .logo-ico { width:20px; height:20px; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     min-height: 100dvh; color: var(--text);
-    background:
-      radial-gradient(900px 480px at 18% -10%, color-mix(in srgb, var(--accent1) 15%, transparent), transparent 60%),
-      radial-gradient(800px 460px at 88% -5%, color-mix(in srgb, var(--accent2) 13%, transparent), transparent 60%),
-      var(--bg);
+    background: var(--bg);
     font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   }
   header {
@@ -40,15 +39,16 @@
   }
   .logo {
     width: 38px; height: 38px; border-radius: 12px;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    background: var(--accent1); color: var(--accent-fg);
     display: grid; place-items: center; font-size: 20px;
   }
   .brand h1 { font-size: 15.5px; font-weight: 700; }
   .brand .sub { font-size: 12px; color: var(--muted); }
   .spacer { margin-left: auto; }
   .btn {
+    display: inline-flex; align-items: center; gap: 6px;
     background: var(--panel); border: 1px solid var(--border); color: var(--muted);
-    border-radius: 999px; padding: 7px 14px; font-size: 12.5px; cursor: pointer;
+    border-radius: 8px; padding: 7px 14px; font-size: 12.5px; cursor: pointer;
     font-family: inherit; transition: all .15s ease; white-space: nowrap;
   }
   .btn:hover { border-color: var(--accent1); color: var(--accent1); }
@@ -72,7 +72,7 @@
   .card-name { font-size: 15.5px; font-weight: 700; }
   .card-desc { font-size: 12.5px; color: var(--muted); line-height: 1.65; flex: 1; }
   .badge {
-    margin-left: auto; font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    margin-left: auto; font-size: 11px; padding: 3px 9px; border-radius: 6px;
     border: 1px solid var(--border); white-space: nowrap;
   }
   .badge.bound { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent);
@@ -83,7 +83,7 @@
   .card-action {
     margin-top: 4px; padding: 9px; border-radius: 11px; border: 0; cursor: pointer;
     font: inherit; font-size: 13px; font-weight: 600; color: #fff;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    background: var(--accent1);
   }
   .card-action.ghost {
     background: transparent; color: var(--warn); border: 1.5px solid color-mix(in srgb, var(--warn) 45%, transparent);
@@ -95,14 +95,14 @@
 </head>
 <body>
   <header>
-    <div class="logo">🤖</div>
+    <div class="logo"><svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></div>
     <div class="brand">
-      <h1 id="brand-title">广告投放小助手</h1>
+      <h1 id="brand-title">TalkAD</h1>
       <div class="sub" id="brand-sub">选择一个投放平台</div>
     </div>
     <div class="spacer"></div>
     <span class="btn" id="user-chip" style="display:none;cursor:pointer"></span>
-    <button class="btn" id="lang-toggle">🌐 EN</button>
+    <button class="btn" id="lang-toggle"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg><span class="lbl">EN</span></button>
   </header>
 
   <main>
@@ -116,10 +116,10 @@
 <script>
   var I18N = {
     zh: {
-      title: "广告投放小助手", sub: "选择一个投放平台",
+      title: "TalkAD", sub: "选择一个投放平台",
       headTitle: "你想管理哪个平台的广告?",
       headDesc: "选一个平台就能开始对话式投放。没绑账号的平台会提示你先绑定。",
-      langBtn: "🌐 EN", loading: "加载中…",
+      langBtn: "EN", loading: "加载中…",
       bound: "已绑定", unbound: "未绑定", coming: "敬请期待",
       enter: "进入对话", bind: "先绑定账号", notReady: "还没上线",
       bindHintPrefix: "绑定方式:",
@@ -127,10 +127,10 @@
       loadFail: "加载平台列表失败:",
     },
     en: {
-      title: "Ad Campaign Assistant", sub: "Pick a platform",
+      title: "TalkAD", sub: "Pick a platform",
       headTitle: "Which platform do you want to manage?",
       headDesc: "Pick a platform to start chatting. Platforms without a linked account will ask you to connect first.",
-      langBtn: "🌐 中文", loading: "Loading…",
+      langBtn: "中文", loading: "Loading…",
       bound: "Connected", unbound: "Not connected", coming: "Coming soon",
       enter: "Open chat", bind: "Connect account first", notReady: "Not available yet",
       bindHintPrefix: "How to connect: ",
@@ -144,6 +144,14 @@
 
   var DATA = null;
 
+  /** 只改文字标签，别把前面的 <svg> 图标冲掉（和聊天页 setBtnLabel 同一条）。 */
+  function setBtnLabel(id, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const lbl = el.querySelector(".lbl");
+    if (lbl) lbl.textContent = text; else el.textContent = text;
+  }
+
   function applyLang() {
     var d = t();
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
@@ -152,7 +160,7 @@
     document.getElementById("brand-sub").textContent = d.sub;
     document.getElementById("head-title").textContent = d.headTitle;
     document.getElementById("head-desc").textContent = d.headDesc;
-    document.getElementById("lang-toggle").textContent = d.langBtn;
+    setBtnLabel("lang-toggle", d.langBtn);
     if (DATA) render();
   }
 
@@ -216,7 +224,7 @@
     if (!d.username) return;
     var chip = document.getElementById("user-chip");
     chip.style.display = "";
-    chip.textContent = "👤 " + d.username;
+    chip.textContent = d.username;
     chip.onclick = function () {
       if (!confirm(t().logoutConfirm)) return;
       fetch("/api/logout", { method: "POST" }).finally(function () { location.href = "/login"; });

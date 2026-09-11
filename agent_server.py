@@ -1,5 +1,5 @@
 """
-广告投放小助手 —— 聊天后端(你的 agent 的"大脑中转站")。
+TalkAD —— 聊天后端(你的 agent 的"大脑中转站")。
 
 它做两件事:
   1. 把聊天页面(static/index.html)端出来给浏览器;
@@ -82,7 +82,7 @@ load_env_file()
 
 # docs_url=None:关掉 FastAPI 自带的接口文档(/docs、/redoc、/openapi.json),
 # 免得把"操作说明书"暴露给任何能访问这个端口的人
-app = FastAPI(title="广告投放小助手", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="TalkAD", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 # ============ 访问密码(可选)============
@@ -248,7 +248,7 @@ def _boot_scheduler():
     sched.start_worker(_scheduled_execute)
 
 # 系统提示词:给 AI 大脑设定人设和职责。
-SYSTEM_PROMPT = """你是「广告投放小助手」,帮助用户管理 NewsBreak 平台上的广告投放。
+SYSTEM_PROMPT = """你是「TalkAD」(投放助手),帮助用户管理 NewsBreak 平台上的广告投放。
 
 你的用户是彻头彻尾的投放小白,你的首要职责是「手把手带着做」:
 - 用简体中文、通俗易懂的大白话交流;涉及术语(campaign、CPC、ROAS 等)顺带用一句话解释;
@@ -411,7 +411,7 @@ This holds even when the user writes to you in Chinese, and even when earlier me
 conversation are in Chinese — the user has explicitly chosen English in the interface. Never switch
 languages to match the user's input. (Proper nouns such as account names may stay in their original script.)
 
-You are the "Ad Campaign Assistant", helping users manage advertising on NewsBreak.
+You are "TalkAD", helping users manage advertising on NewsBreak.
 
 Your users are complete beginners at ad buying. Your first duty is to walk them through things step by step:
 - Write in plain everyday English; when a term comes up (campaign, CPC, ROAS...), explain it in one short sentence;

@@ -2400,6 +2400,76 @@ def test_creative_render():
             if not (_pl.Path("static") / f).exists():
                 return f"图标文件 {f} 不存在(页面引用了但文件没有 = 还是默认图标)"
         return None
+    def t_icon_buttons_keep_their_icon():
+        """**带图标的按钮不许用 `textContent` 赋值** —— 那会把 <svg> 一起冲掉。
+
+        顶栏那几个按钮是「图标 + 文字」，而文字是 `applyLang()` 每次切语言时写进去的。
+        原来写的是 `btn.textContent = 文案`：图标当场消失，而且**只在切过语言之后才消失**，
+        一眼看不出是哪一步弄的。所以统一走 `setBtnLabel()`，它只改 `.lbl` 那个 span。
+
+        **为什么守在源码层而不是跑一遍**：前端测试的模拟 DOM 里 `querySelector` 只认
+        「JS 写进去的 innerHTML」，而 `.lbl` 来自静态 HTML —— 那边会走回退分支，
+        真出问题也测不出来（和坑表「测新函数不等于测它被接上了」同一类）。
+        """
+        from pathlib import Path as _P
+        import re as _re
+        html = _P("static/index.html").read_text(encoding="utf-8")
+        bad = []
+        # 这几个按钮在 HTML 里带 <svg> 图标
+        iconed = [b for b in ("campaign-mode", "creative-mode", "landing-mode", "acct-btn",
+                              "dash-btn", "platform-btn", "lang-toggle", "new-chat")
+                  if _re.search(r'<button id="%s"[^>]*>\s*<svg' % b, html)]
+        if len(iconed) < 8:
+            return "有按钮没带上图标,只找到 %d 个:%r" % (len(iconed), iconed)
+        for b in iconed:
+            if not _re.search(r'<button id="%s"[^>]*>.*?<span class="lbl">' % b, html, _re.S):
+                bad.append(b + " 缺 .lbl(文字没地方放,只能写回 textContent 冲掉图标)")
+            # 直接给按钮本体赋 textContent = 图标没了
+            if _re.search(r'getElementById\("%s"\)\.textContent\s*=' % b, html):
+                bad.append(b + " 还在用 textContent 赋值")
+        # **变量名也要查。** 第一版只查了 `getElementById("x").textContent`,
+        # 而账户按钮写的是 `acctBtn.textContent = "🔗 Account · " + 名字` —— 用的是变量,
+        # 于是漏网:图标被冲掉,而且**只在连上账户之后**才没,线上截图才看出来。
+        for var in ("langBtn", "newChatBtn", "dashBtn", "acctBtn"):
+            if _re.search(r'\b%s\.textContent\s*=' % var, html):
+                bad.append(var + " 还在用 textContent 赋值")
+        if bad:
+            return "图标会被文字冲掉:" + "; ".join(bad)
+        if "function setBtnLabel(" not in html:
+            return "setBtnLabel 不见了"
+        return True
+    check("带图标的按钮:切语言时图标不会被冲掉", t_icon_buttons_keep_their_icon)
+
+    def t_storage_keys_never_follow_the_brand():
+        """**localStorage 的键不许跟着产品名改。**
+
+        改名时最容易顺手把 `adbot-*` 一起改掉 —— 而那几个键存的是
+        **用户的聊天记录、语言选择、选过的平台**。键名一变,浏览器里原来那份
+        就再也找不到了:所有人的历史对话当场「凭空消失」,而且**页面一切正常**,
+        没有任何报错。是纯粹的静默数据丢失。
+        产品名是给人看的,存储键是给机器认的 —— **两者必须解耦**。
+        """
+        from pathlib import Path as _P
+        import re as _re
+        want = {"adbot-lang", "adbot-platform", "adbot-conversations",
+                "adbot-current-conv", "adbot-chat-history", "adbot-cache-uid"}
+        seen = set()
+        for name in ("index", "dashboard", "login", "platforms"):
+            html = _P("static/%s.html" % name).read_text(encoding="utf-8")
+            seen |= set(_re.findall(r'"(adbot-[a-z-]+)"', html))
+            # 换了前缀的会在这儿露出来
+            other = set(_re.findall(r'localStorage\.(?:get|set|remove)Item\(\s*"([^"]+)"', html))
+            bad = {k for k in other if not k.startswith("adbot-")}
+            if bad:
+                return "%s.html 里有不按 adbot- 前缀的存储键:%r" % (name, sorted(bad))
+        missing = want - seen
+        if missing:
+            return ("这几个存储键不见了:%r —— 改名时把它们一起改掉的话,"
+                    "用户的聊天记录会静默消失" % sorted(missing))
+        return True
+    check("改名不许动 localStorage 的键(动了用户记录就没了)",
+          t_storage_keys_never_follow_the_brand)
+
     check("四个页面都有站点图标,文件也在", t_favicon)
 
     # 三处工具表漏注册一处,就是"某条大脑路径上这个工具不存在"
@@ -6284,7 +6354,7 @@ def test_http():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("广告投放小助手 · 冒烟测试(只读,不会改动真实广告)")
+    print("TalkAD · 冒烟测试(只读,不会改动真实广告)")
     print("=" * 60)
 
     test_pure_logic()

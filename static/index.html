@@ -3,44 +3,42 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>广告投放小助手</title>
+<title>TalkAD</title>
   <!-- 站点图标:对话气泡 + 上升柱状 = 用聊天管广告数据。
        SVG 优先(任意尺寸都清晰),PNG 兜底给不认 SVG 图标的老 Safari。 -->
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/static/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-  <meta name="theme-color" content="#4f6ef7">
+  <meta name="theme-color" content="#171717">
 <style>
   /* ============ 设计变量:一处改色,全站生效 ============ */
   :root {
-    --bg: #eef1f6;                /* 页面底色 */
+    --bg: #fafafa;                /* 页面底色 */
     --panel: #ffffff;             /* 面板/气泡底色 */
-    --text: #1d2129;
-    --muted: #7a8190;
-    --accent1: #4f6ef7;           /* 主题渐变的两端 */
-    --accent2: #7b5ff5;
+    --text: #0a0a0a;
+    --muted: #737373;
+    --accent1: #171717;           /* 主色(shadcn 的 primary:亮色近黑、暗色近白) */
+    --accent-fg: #fafafa;         /* 主色上的文字 —— 暗色模式主色变近白,写死 #fff 会白底白字 */
+    --accent2: #171717;
     --bot-bubble: #ffffff;
-    --border: #e4e8ef;
-    --shadow: 0 1px 3px rgba(16, 24, 40, .07), 0 6px 16px -6px rgba(16, 24, 40, .08);
+    --border: #e5e5e5;
+    --shadow: 0 1px 2px 0 rgba(0, 0, 0, .05);
     --chip-bg: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e1015; --panel: #171a21; --text: #e9ebef; --muted: #8b93a1;
-      --accent1: #5b7cff; --accent2: #8b6cf8;
-      --bot-bubble: #1c2029; --border: #262b36;
-      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 16px -6px rgba(0,0,0,.5);
-      --chip-bg: #1c2029;
+      --bg: #0a0a0a; --panel: #171717; --text: #fafafa; --muted: #a1a1a1;
+      --accent1: #fafafa; --accent2: #fafafa; --accent-fg: #171717;
+      --bot-bubble: #171717; --border: #262626;
+      --shadow: 0 1px 2px 0 rgba(0,0,0,.4);
+      --chip-bg: #171717;
     }
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
-    background:
-      radial-gradient(1000px 500px at 15% -10%, color-mix(in srgb, var(--accent1) 14%, transparent), transparent 60%),
-      radial-gradient(900px 500px at 90% -10%, color-mix(in srgb, var(--accent2) 12%, transparent), transparent 60%),
-      var(--bg);
+    background: var(--bg);
     color: var(--text);
     font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
     display: flex; flex-direction: column; height: 100dvh;
@@ -58,20 +56,47 @@
   }
   .logo {
     width: 38px; height: 38px; border-radius: 12px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    background: var(--accent1); color: var(--accent-fg);
     display: grid; place-items: center; font-size: 20px;
     box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--accent1) 45%, transparent);
   }
-  .title-wrap h1 { font-size: 15.5px; font-weight: 700; letter-spacing: .2px; }
-  .title-wrap .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-top: 1px; }
+  /* **英文比中文长得多**，而 header 是 flex —— `.title-wrap` 默认可压缩，
+     右边一长浏览器就去挤标题，`Landing Page Studio` 被压成三行、副标四行，
+     整个顶栏撑高一倍（线上实测）。所以标题块**不参与压缩**，且一行写不下就省略。 */
+  .title-wrap { flex: none; max-width: 30vw; }
+  .title-wrap h1 { font-size: 15.5px; font-weight: 700; letter-spacing: .2px;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title-wrap .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center;
+                     gap: 5px; margin-top: 1px; white-space: nowrap; overflow: hidden; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px color-mix(in srgb, #22c55e 20%, transparent); }
-  header .right { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 12px; }
+  header .right { margin-left: auto; font-size: 12px; color: var(--muted); display: flex;
+                  align-items: center; gap: 12px; min-width: 0; }
   .workspace-switch { display:flex; gap:3px; padding:3px; border:1px solid var(--border); border-radius:12px; background:var(--bg); overflow-x:auto; scrollbar-width:none; }
   .workspace-switch::-webkit-scrollbar { display:none; }
-  .workspace-btn { border:0; background:transparent; color:var(--muted); border-radius:9px; padding:7px 11px; cursor:pointer; font-size:12.5px; white-space:nowrap; }
+  .ico { width:16px; height:16px; flex:none; }
+  .logo-ico { width:20px; height:20px; }
+  .workspace-btn { display:inline-flex; align-items:center; gap:6px; border:0; background:transparent; color:var(--muted); border-radius:9px; padding:7px 11px; cursor:pointer; font-size:12.5px; white-space:nowrap; }
   .workspace-btn.active { background:var(--panel); color:var(--accent1); box-shadow:var(--shadow); font-weight:650; }
   .workspace-btn:hover { color:var(--accent1); background:color-mix(in srgb,var(--accent1) 7%,transparent); }
   .workspace-btn.unlinked { color:#d97706; }
+  /* 设置类入口：只显示图标，文字留在 DOM 里给读屏软件，视觉上藏掉 */
+  .tools { display:flex; align-items:center; gap:2px; flex:none; }
+  .tool-btn {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:32px; height:32px; padding:0; border:0; border-radius:8px;
+    background:transparent; color:var(--muted); cursor:pointer; flex:none; position:relative;
+    transition: background .15s ease, color .15s ease;
+  }
+  .tool-btn:hover { color:var(--accent1); background:color-mix(in srgb,var(--accent1) 8%,transparent); }
+  /* 文字留在 DOM 里(读屏软件要念),视觉上收成 1px —— 别用 display:none,那样读屏也听不到 */
+  .tool-btn .lbl { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+  /* 没接账户时除了变色,右上角还点一个小红点 —— **光靠颜色不够**:
+     色弱用户分不出琥珀色和灰色,而「账户没接上」是个必须看见的状态 */
+  .tool-btn.unlinked { color:#d97706; }
+  .tool-btn.unlinked::after {
+    content:""; position:absolute; top:3px; right:3px;
+    width:6px; height:6px; border-radius:50%; background:#d97706;
+  }
 
   /* ============ 主体:左侧会话栏 + 右侧聊天区 ============ */
   .main { flex: 1; display: flex; min-height: 0; }
@@ -155,11 +180,12 @@
   }
   .ghost-btn {
     background: var(--panel); border: 1px solid var(--border); color: var(--muted);
-    border-radius: 999px; padding: 6px 13px; font-size: 12.5px; cursor: pointer;
+    border-radius: 8px; padding: 6px 13px; font-size: 12.5px; cursor: pointer;
     transition: all .15s ease; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 6px;
   }
   .ghost-btn:hover { border-color: var(--accent1); color: var(--accent1); }
-  @media (max-width: 1050px) { .tagline, #lang-toggle { display: none; } }
+  @media (max-width: 1050px) { #lang-toggle { display: none; } }
   @media (max-width: 760px) { .title-wrap { display:none; } header { gap:7px; padding:10px; } header .right { min-width:0; gap:6px; } .workspace-switch { max-width:calc(100vw - 115px); } .workspace-btn { padding:7px 9px; } }
 
   /* ============ 消息区 ============ */
@@ -181,7 +207,9 @@
     display: grid; place-items: center; font-size: 16px; font-weight: 600;
     box-shadow: var(--shadow);
   }
-  .avatar.bot { background: linear-gradient(135deg, var(--accent1), var(--accent2)); }
+  /* 图标是 stroke="currentColor"，而 --accent1 是近黑 —— 不显式给前景色就是
+     **黑底黑图标**，什么都看不见。暗色模式下主色翻成近白，这个也跟着翻。 */
+  .avatar.bot { background: var(--accent1); color: var(--accent-fg); }
   .avatar.user { background: var(--panel); border: 1px solid var(--border); font-size: 13px; color: var(--muted); }
 
   .bubble {
@@ -190,7 +218,7 @@
     line-height: 1.65; font-size: 14.5px; word-break: break-word;
   }
   .row.user .bubble {
-    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    background: var(--accent1);
     color: #fff; border-bottom-right-radius: 5px;
     box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent1) 55%, transparent);
     white-space: pre-wrap;
@@ -311,7 +339,7 @@
     width: 100%; max-width: 520px; max-height: 86vh; overflow-y: auto;
     padding: 22px 24px; animation: rise .2s ease both;
   }
-  .modal h2 { font-size: 16.5px; margin-bottom: 4px; }
+  .modal h2 { display:flex; align-items:center; gap:7px; font-size: 16.5px; margin-bottom: 4px; }
   .modal .desc { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-bottom: 16px; }
   .modal label { display: block; font-size: 12.5px; font-weight: 600; margin: 14px 0 6px; }
   .modal input[type="text"], .modal input[type="password"] {
@@ -338,7 +366,7 @@
   .acct-item .aid { margin-left: auto; font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
   .modal-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 20px; }
   .btn-primary {
-    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    background: var(--accent1); color: var(--accent-fg);
     border: 0; border-radius: 11px; padding: 9px 20px; font-size: 13.5px; cursor: pointer;
   }
   .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
@@ -355,7 +383,7 @@
   #chips { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 42px; }
   .chip {
     background: var(--chip-bg); border: 1px solid var(--border); color: var(--text);
-    border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+    border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
     box-shadow: var(--shadow); transition: all .15s ease;
   }
   .chip:hover { border-color: var(--accent1); color: var(--accent1); transform: translateY(-1px); }
@@ -376,7 +404,7 @@
   }
   #send {
     width: 38px; height: 38px; border-radius: 50%; border: 0; cursor: pointer; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    background: var(--accent1); color: var(--accent-fg);
     display: grid; place-items: center; font-size: 16px;
     box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--accent1) 50%, transparent);
     transition: transform .12s ease, opacity .15s ease;
@@ -390,7 +418,7 @@
   }
   #attach:hover { border-color: var(--accent1); background: color-mix(in srgb, var(--accent1) 8%, transparent); }
   #attach:disabled { opacity: .5; cursor: wait; }
-  .hint { text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+  .hint { display:flex; align-items:center; gap:6px; justify-content:center; text-align: center; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
 
   /* 细滚动条 */
   #messages::-webkit-scrollbar { width: 8px; }
@@ -400,32 +428,38 @@
 </head>
 <body>
   <header>
-    <button id="sidebar-toggle" class="ghost-btn" title="显示 / 隐藏对话列表">☰</button>
-    <div class="logo" id="app-logo">🤖</div>
+    <button id="sidebar-toggle" class="ghost-btn" title="显示 / 隐藏对话列表"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg></button>
+    <div class="logo" id="app-logo"><svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></div>
     <div class="title-wrap">
-      <h1 id="app-title">广告投放小助手</h1>
+      <h1 id="app-title">投放助手</h1>
       <div class="sub"><span class="dot"></span><span id="app-sub">在线 · NewsBreak 对话式投放</span></div>
     </div>
     <div class="right">
-      <span class="tagline" id="app-tagline">查数据 · 看报表 · 管投放</span>
       <div class="workspace-switch" aria-label="工作区">
-        <button id="campaign-mode" class="workspace-btn active">💬 投放助手</button>
-        <button id="creative-mode" class="workspace-btn">🎨 素材工作室</button>
-        <button id="landing-mode" class="workspace-btn">🧭 落地页工作室</button>
-        <button id="acct-btn" class="workspace-btn" title="接入 / 切换广告账户">🔗 账户管理</button>
-        <button id="dash-btn" class="workspace-btn" title="打开数据大屏(KPI/趋势/AI诊断)" onclick="location.href='/dashboard'">📊 数据大屏</button>
-        <button id="platform-btn" class="workspace-btn" title="切换投放平台" onclick="location.href='/platforms'">🔄 切换平台</button>
+        <button id="campaign-mode" class="workspace-btn active"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="lbl">投放助手</span></button>
+        <button id="creative-mode" class="workspace-btn"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg><span class="lbl">素材工作室</span></button>
+        <button id="landing-mode" class="workspace-btn"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="7" x="3" y="3" rx="1"/><rect width="9" height="7" x="3" y="14" rx="1"/><rect width="5" height="7" x="16" y="14" rx="1"/></svg><span class="lbl">落地页工作室</span></button>
+      
+      </div>
+      <!-- **设置类入口和工作室导航是两回事**，混在一个框里就是「又挤又乱」的来源：
+           工作室 = 我现在在哪(常看)，这三个 = 去别处/改设置(偶尔点)。
+           拆出来之后只显示图标，名字放 title —— 账户名有十几个字，
+           摊在顶栏上会把「切换平台」和「数据大屏」整个挤出可视区(线上实测看不见了)。 -->
+      <div class="tools" aria-label="设置">
+        <button id="acct-btn" class="tool-btn" title="接入 / 切换广告账户"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/></svg><span class="lbl">账户管理</span></button>
+        <button id="dash-btn" class="tool-btn" title="打开数据大屏(KPI/趋势/AI诊断)" onclick="location.href='/dashboard'"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg><span class="lbl">数据大屏</span></button>
+        <button id="platform-btn" class="tool-btn" title="切换投放平台" onclick="location.href='/platforms'"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg><span class="lbl">切换平台</span></button>
       </div>
       <span id="user-chip" class="ghost-btn" style="display:none;cursor:default"></span>
-      <button id="lang-toggle" class="ghost-btn" title="切换中文 / English">🌐 EN</button>
-      <button id="new-chat" class="ghost-btn" title="开一个新对话(当前对话会存进左侧列表)">✚ 新对话</button>
+      <button id="lang-toggle" class="ghost-btn" title="切换中文 / English"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg><span class="lbl">EN</span></button>
+      <button id="new-chat" class="ghost-btn" title="开一个新对话(当前对话会存进左侧列表)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg><span class="lbl">新对话</span></button>
     </div>
   </header>
 
   <!-- 广告账户接入弹窗 -->
   <div class="overlay" id="acct-overlay">
     <div class="modal">
-      <h2 id="acct-title">🔗 接入广告账户</h2>
+      <h2 id="acct-title"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/></svg><span class="lbl">接入广告账户</span></h2>
       <div class="desc" id="acct-desc"></div>
       <div id="acct-body"></div>
       <div class="modal-msg" id="acct-msg"></div>
@@ -484,12 +518,12 @@
 
       <footer>
         <div class="input-box">
-          <button id="attach" title="上传广告素材(图片/视频)">📎</button>
+          <button id="attach" title="上传广告素材(图片/视频)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
           <input type="file" id="file-input" accept="image/*,video/*" hidden />
           <textarea id="input" rows="1" placeholder="输入消息,回车发送(Shift+回车换行)…"></textarea>
-          <button id="send" title="发送">➤</button>
+          <button id="send" title="发送"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
         </div>
-        <div class="hint" id="app-hint">📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak</div>
+        <div class="hint" id="app-hint"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg> 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak</div>
       </footer>
     </div>
   </div>
@@ -520,14 +554,14 @@
 
   const I18N = {
     zh: {
-      title: "广告投放小助手",
+      title: "投放助手",
       sub: "在线 · {p} 对话式投放",
       switchPlatform: "切换平台",
       notBoundTitle: "还没绑定 {p} 账号",
       notBoundBody: "每个人用自己的 {p} 账号,所以要你自己绑一次。点顶栏的 🔗 按钮,粘贴你的 Access Token 就行。绑好后只有你能看到、也只动你自己的广告。",
       notBoundBtn: "现在去绑定",
       tagline: "查数据 · 看报表 · 管投放",
-      langBtn: "🌐 EN",
+      langBtn: "EN",
       langBtnTitle: "Switch to English",
       upUploading: (info) => `⏳ 正在上传素材…\n📄 ${info}`,
       upErrEmpty: "这个文件是空的(0 字节),换一个试试。",
@@ -539,16 +573,16 @@
       upErrNetwork: (m) => `连接中断,请求没能送达服务器(${m})。\n常见原因:①VSCode 端口转发的"桥"断了 → 去端口面板把 18100 删掉重加;②服务刚重启;③文件过大导致连接被掐断。\n先刷新页面确认能正常聊天,再重新上传。`,
       storageTrimmed: (n) => `⚠️ 浏览器存储空间满了,已自动清掉最旧的 ${n} 段对话腾地方。想彻底清爽可以手动删掉不用的对话。`,
       storageFull: "⚠️ 浏览器存储空间已满,这段对话可能存不下了。请点「✚ 新对话」或删掉几段旧对话再继续。",
-      dashBtn: "📊 数据大屏",
+      dashBtn: "数据大屏",
       dashBtnTitle: "打开数据大屏(KPI / 趋势 / AI 诊断)",
       syncFailed: "⚠️ 没能读回你账号里的聊天记录(网络或服务出了问题)。**先别发新消息**,刷新一下页面再试 —— 现在发的话可能会覆盖掉服务器上的旧记录。",
       imgZoomHint: "点图片可以放大看",
       imgOpenNew: "在新标签页打开原图 ↗",
       imgLoading: "加载中…",
-      acctBtn: "🔗 账户管理",
+      acctBtn: "账户管理",
       acctBtnTitle: "接入 / 切换广告账户",
-      acctBtnUnlinked: "🔗 未接入账户",
-      acctTitle: "🔗 接入广告账户",
+      acctBtnUnlinked: "未接入账户",
+      acctTitle: "接入广告账户",
       acctDescLinked: "助手当前连着下面这个 NewsBreak 账户。有多个账户时,点一下就能切换。",
       acctDescUnlinked: "还没接入 NewsBreak 广告账户。粘贴你的 Access Token 就能连上。",
       acctTokenLabel: "NewsBreak Access Token",
@@ -566,7 +600,7 @@
       boundOk: "✅ {p} 账号已连接,输入框解锁了,现在可以问我数据了。",
       acctSwitched: "✅ 已切换账户。",
       acctTokenBad: "Token 无效或已过期,请重新生成一个。",
-      newChat: "✚ 新对话",
+      newChat: "新对话",
       newChatTitle: "开一个新对话(当前对话会存进左侧列表)",
       sidebarHead: "对话记录",
       sidebarToggleTitle: "显示 / 隐藏对话列表",
@@ -591,9 +625,9 @@
       attachTitle: "上传广告素材(图片/视频)",
       sendTitle: "发送",
       placeholder: "输入消息,回车发送(Shift+回车换行)…",
-      hint: "📎 上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak",
+      hint: "上传素材 · 写操作(开关/建广告)会先向你确认后才执行 · 数据实时来自 NewsBreak",
       welcome:
-        "你好,我是你的**广告投放小助手** 👋\n" +
+        "你好,这里是**投放助手**\n" +
         "我连着你的 NewsBreak 账户,可以直接查真实数据;开启/暂停投放这类操作,我会先跟你确认再动手。\n" +
         "点下面的快捷按钮,或直接输入你的问题:",
       chips: [
@@ -602,15 +636,15 @@
         "哪条广告的 CTR 最高?",
         "我想投一个新广告",
       ],
-      campaignMode: "💬 投放助手", creativeMode: "🎨 素材工作室", landingMode: "🧭 落地页工作室",
+      campaignMode: "投放助手", creativeMode: "素材工作室", landingMode: "落地页工作室",
       creativeTitle: "素材工作室", creativeSub: "在线 · 创意研究与制作",
       creativeTagline: "找灵感 · 拆素材 · 做新图",
-      creativeHint: "🎨 素材模式不会创建或启停广告 · 生图付费前一定会确认",
+      creativeHint: "素材模式不会创建或启停广告 · 生图付费前一定会确认",
       creativeWelcome: "你好,这里是**素材工作室** 🎨\n我可以陪你找竞品灵感、拆解素材、写创意方案并生成新图片。这里不会创建、开启或暂停广告;做好后可再带到投放助手。\n你想从哪一步开始?",
       creativeChips: ["看看同行最近在投什么", "帮我找可商用的图片", "上传一张图帮我拆解", "我有想法,帮我做成广告图"],
       landingTitle: "落地页工作室", landingSub: "在线 · 落地页研究与制作",
       landingTagline: "找案例 · 拆结构 · 做页面",
-      landingHint: "🧭 生成 A/B 页面 · 确认后可直接发布 Cloudflare Pages",
+      landingHint: "生成 A/B 页面 · 确认后可直接发布 Cloudflare Pages",
       landingWelcome: "你好,这里是**落地页工作室** 🧭\n我可以筛选和拆解同行页面，制作两个原创 A/B 版本；你提供 ClickFlare CTA 地址与追踪脚本后，还可以选择域名直接发布到 Cloudflare Pages。\n告诉我品类或直接发一个落地页链接即可。",
       landingChips: ["找一批 roof repair 优质落地页", "我发链接,帮我拆解页面", "根据拆解生成两个新落地页", "查看 Cloudflare 可发布域名", "把 A/B 页面发布到 Cloudflare"],
       campaignKind: "投放", creativeKind: "素材", landingKind: "落地页",
@@ -629,14 +663,14 @@
       uploadedMsg: (name, url) => `我已上传素材「${name}」,assetUrl: ${url}`,
     },
     en: {
-      title: "Ad Campaign Assistant",
+      title: "Campaign Assistant",
       sub: "Online · {p} conversational ads",
       switchPlatform: "Switch platform",
       notBoundTitle: "No {p} account linked yet",
       notBoundBody: "Everyone uses their own {p} account, so you need to link yours once. Click the 🔗 button in the top bar and paste your Access Token. Only you can see it, and it only touches your own ads.",
       notBoundBtn: "Link it now",
       tagline: "Data · Reports · Campaign control",
-      langBtn: "🌐 中文",
+      langBtn: "中文",
       langBtnTitle: "切换为中文",
       upUploading: (info) => `⏳ Uploading asset…\n📄 ${info}`,
       upErrEmpty: "This file is empty (0 bytes) — try another one.",
@@ -648,16 +682,16 @@
       upErrNetwork: (m) => `Connection dropped — the request never reached the server (${m}).\nCommon causes: (1) the VS Code port-forward "bridge" died → remove and re-add port 18100; (2) the server just restarted; (3) the file was large enough that the connection was cut.\nRefresh the page, confirm chat still works, then upload again.`,
       storageTrimmed: (n) => `⚠️ Browser storage was full — the ${n} oldest chat(s) were dropped to make room. Delete chats you no longer need to free up more.`,
       storageFull: "⚠️ Browser storage is full; this chat may not be saved. Start a new chat or delete some old ones to continue.",
-      dashBtn: "📊 Dashboard",
+      dashBtn: "Dashboard",
       dashBtnTitle: "Open the data dashboard (KPIs / trends / AI review)",
       syncFailed: "⚠️ Could not load your saved conversations (network or server issue). **Do not send a new message yet** — refresh the page first, or you may overwrite the history stored on the server.",
       imgZoomHint: "Click an image to enlarge",
       imgOpenNew: "Open original in a new tab ↗",
       imgLoading: "Loading…",
-      acctBtn: "🔗 Accounts",
+      acctBtn: "Accounts",
       acctBtnTitle: "Connect / switch ad account",
-      acctBtnUnlinked: "🔗 Not connected",
-      acctTitle: "🔗 Connect ad account",
+      acctBtnUnlinked: "Not connected",
+      acctTitle: "Connect ad account",
       acctDescLinked: "The assistant is connected to the NewsBreak account below. If you have more than one, click to switch.",
       acctDescUnlinked: "No NewsBreak ad account connected yet. Paste your Access Token to connect.",
       acctTokenLabel: "NewsBreak Access Token",
@@ -675,7 +709,7 @@
       boundOk: "✅ {p} account connected. The message box is unlocked — ask me anything about your data.",
       acctSwitched: "✅ Account switched.",
       acctTokenBad: "Token is invalid or expired — please generate a new one.",
-      newChat: "✚ New chat",
+      newChat: "New chat",
       newChatTitle: "Start a new chat (the current one is saved to the list on the left)",
       sidebarHead: "Chats",
       sidebarToggleTitle: "Show / hide the chat list",
@@ -700,9 +734,9 @@
       attachTitle: "Upload creative (image / video)",
       sendTitle: "Send",
       placeholder: "Type a message. Enter to send, Shift+Enter for a new line…",
-      hint: "📎 Upload creative · Write actions (pause/create) always ask you first · Live data from NewsBreak",
+      hint: "Upload creative · Write actions (pause/create) always ask you first · Live data from NewsBreak",
       welcome:
-        "Hi, I'm your **Ad Campaign Assistant** 👋\n" +
+        "Welcome to the **Campaign Assistant**\n" +
         "I'm connected to your NewsBreak account and can pull real data. For actions like pausing or launching ads, I'll always confirm with you first.\n" +
         "Tap a shortcut below, or just type your question:",
       chips: [
@@ -711,15 +745,15 @@
         "Which ad has the highest CTR?",
         "I want to create a new ad",
       ],
-      campaignMode: "💬 Campaigns", creativeMode: "🎨 Creative Studio", landingMode: "🧭 Landing Studio",
+      campaignMode: "Campaigns", creativeMode: "Creative Studio", landingMode: "Landing Studio",
       creativeTitle: "Creative Studio", creativeSub: "Online · Creative research & production",
       creativeTagline: "Research · Analyze · Create",
-      creativeHint: "🎨 Creative mode cannot create or change ads · image costs are always confirmed first",
+      creativeHint: "Creative mode cannot create or change ads · image costs are always confirmed first",
       creativeWelcome: "Welcome to the **Creative Studio** 🎨\nI can research competitor ideas, analyze creatives, plan concepts, and generate new images. This workspace cannot create, launch, or pause ads.\nWhere would you like to start?",
       creativeChips: ["Show me what competitors are running", "Find commercially usable images", "Analyze an image I upload", "Turn my idea into ad creatives"],
       landingTitle: "Landing Page Studio", landingSub: "Online · Landing-page research & production",
       landingTagline: "Research · Analyze · Build",
-      landingHint: "🧭 Build A/B pages · publish to Cloudflare Pages after confirmation",
+      landingHint: "Build A/B pages · publish to Cloudflare Pages after confirmation",
       landingWelcome: "Welcome to the **Landing Page Studio** 🧭\nI can research and analyze competitor pages, build two original A/B versions, and publish them to a Cloudflare domain after you provide the exact ClickFlare CTA URL and tracking script.\nGive me a category or a complete landing-page URL.",
       landingChips: ["Find strong roof repair landing pages", "Analyze a landing-page URL", "Generate two new landing pages", "Show Cloudflare domains", "Publish A/B pages to Cloudflare"],
       campaignKind: "Ads", creativeKind: "Creative", landingKind: "Landing",
@@ -748,6 +782,20 @@
   }
 
   /** 把界面上所有静态文案刷成当前语言 */
+  /** 只改按钮里的文字标签，别碰它前面的图标。
+   *  原来是 `btn.textContent = 文案`，那会把 <svg> 一起冲掉 —— 图标当场消失，
+   *  而且**只在切语言之后才消失**，一眼看不出是哪一步弄的。 */
+  function setBtnLabel(id, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const lbl = el.querySelector(".lbl");
+    if (lbl) lbl.textContent = text; else el.textContent = text;
+  }
+
+  const LOGO_BOT = '<svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>';
+  const LOGO_CREATIVE = '<svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>';
+  const LOGO_LANDING = '<svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="7" x="3" y="3" rx="1"/><rect width="9" height="7" x="3" y="14" rx="1"/><rect width="5" height="7" x="16" y="14" rx="1"/></svg>';
+
   function applyLang() {
     const d = t();
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
@@ -756,27 +804,27 @@
     document.title = landing ? d.landingTitle : creative ? d.creativeTitle : d.title;
     document.getElementById("app-title").textContent = landing ? d.landingTitle : creative ? d.creativeTitle : d.title;
     document.getElementById("app-sub").textContent = landing ? d.landingSub : creative ? d.creativeSub : d.sub.replace("{p}", PLATFORM_NAME);
-    document.getElementById("app-tagline").textContent = landing ? d.landingTagline : creative ? d.creativeTagline : d.tagline;
     document.getElementById("app-hint").textContent = landing ? d.landingHint : creative ? d.creativeHint : d.hint;
-    document.getElementById("app-logo").textContent = landing ? "🧭" : creative ? "🎨" : "🤖";
-    document.getElementById("campaign-mode").textContent = d.campaignMode;
-    document.getElementById("creative-mode").textContent = d.creativeMode;
-    document.getElementById("landing-mode").textContent = d.landingMode;
-    document.getElementById("platform-btn").textContent = lang === "en" ? "🔄 Platforms" : "🔄 切换平台";
+    document.getElementById("app-logo").innerHTML =
+      landing ? LOGO_LANDING : creative ? LOGO_CREATIVE : LOGO_BOT;
+    setBtnLabel("campaign-mode", d.campaignMode);
+    setBtnLabel("creative-mode", d.creativeMode);
+    setBtnLabel("landing-mode", d.landingMode);
+    setBtnLabel("platform-btn", lang === "en" ? "Platforms" : "切换平台");
     document.getElementById("campaign-mode").classList.toggle("active", mode === "campaign");
     document.getElementById("creative-mode").classList.toggle("active", creative);
     document.getElementById("landing-mode").classList.toggle("active", landing);
 
     const langBtn = document.getElementById("lang-toggle");
-    langBtn.textContent = d.langBtn;
+    setBtnLabel("lang-toggle", d.langBtn);
     langBtn.title = d.langBtnTitle;
 
     const newChatBtn = document.getElementById("new-chat");
-    newChatBtn.textContent = d.newChat;
+    setBtnLabel("new-chat", d.newChat);
     newChatBtn.title = d.newChatTitle;
 
     var dashBtn = document.getElementById("dash-btn");
-    if (dashBtn) { dashBtn.textContent = d.dashBtn; dashBtn.title = d.dashBtnTitle; }
+    if (dashBtn) { setBtnLabel("dash-btn", d.dashBtn); dashBtn.title = d.dashBtnTitle; }
 
     // 账户按钮和弹窗也跟着换语言。
     // 必须用 acctReady 判断:账户模块在本文件末尾才初始化,而 applyLang 在那之前就会被调用一次;
@@ -1005,7 +1053,9 @@
 
     const avatar = document.createElement("div");
     avatar.className = "avatar " + (who === "user" ? "user" : "bot");
-    avatar.textContent = who === "user" ? "我" : "🤖";
+    // 机器人头像也用同一套线性图标(和顶栏 logo 一致);"我" 是文字,不动
+    if (who === "user") avatar.textContent = "我";
+    else avatar.innerHTML = LOGO_BOT;
 
     const bubble = document.createElement("div");
     bubble.className = "bubble";
@@ -1477,6 +1527,32 @@
     messagesEl.appendChild(chipsWrap);
   }
 
+  /** 开场的欢迎语和快捷提问,按**当前工作室 + 当前语言**重画。返回是不是整段重画了。
+   *
+   *  **切语言和切工作室改的是同一样东西**(界面文字),所以必须共用一份。
+   *  原来这段只长在「切语言」那个监听器里,于是切工作室时:顶栏、副标题、
+   *  输入框提示、底部说明全跟着换了,**只有欢迎语和那四个快捷提问还是上一个工作室的**
+   *  —— 用户在素材工作室里看到的是「我是你的投放助手」和「哪条广告 CTR 最高」
+   *  (2026-09-11 线上实测)。和坑表「同一个判断散在几处,加一种就漏一处」同一条。
+   */
+  function repaintWelcome() {
+    if (history.length === 0) {     // 还没聊过:整段重画,连快捷提问一起换
+      messagesEl.innerHTML = "";
+      showWelcome();
+      return true;
+    }
+    // 已经聊过:对话内容是历史记录,一个字不动;但开场那条是界面文字,跟着换
+    const row = messagesEl.querySelector('.row[data-welcome="1"] .bubble');
+    if (row) {
+      const mode = currentMode();
+      const welcome = mode === "landing" ? t().landingWelcome
+                    : mode === "creative" ? t().creativeWelcome : t().welcome;
+      row.dataset.raw = welcome;
+      renderBubble(row, welcome);
+    }
+    return false;
+  }
+
   function restoreHistory() {
     history.forEach((m) => addBubble(m.role === "user" ? "user" : "bot", m.content));
     const tip = document.createElement("div");
@@ -1710,6 +1786,7 @@
       ensureConv(currentId).mode = mode;
       saveConversations();
       applyLang();
+      repaintWelcome();          // 欢迎语和快捷提问也要跟着换工作室
       renderConvList();
       if (inputEl.focus) inputEl.focus();
     };
@@ -1745,21 +1822,11 @@
     localStorage.setItem(LANG_KEY, lang);
     applyLang();
 
-    // 开场页(还没聊过)整个重画,让欢迎语和快捷提问都换语言
-    if (history.length === 0) {
-      messagesEl.innerHTML = "";
-      showWelcome();
+    // 开场页(还没聊过)整个重画,让欢迎语和快捷提问都换语言;
+    // 聊过了就只换开场那条(对话内容是历史记录,不改写)
+    if (repaintWelcome()) {
       inputEl.focus();
       return;
-    }
-
-    // 已经聊过:对话内容保持原样(那是历史记录),但开场欢迎语属于界面文字,跟着换
-    const welcomeRow = messagesEl.querySelector('.row[data-welcome="1"] .bubble');
-    if (welcomeRow) {
-      const mode = currentMode();
-      const welcome = mode === "landing" ? t().landingWelcome : mode === "creative" ? t().creativeWelcome : t().welcome;
-      welcomeRow.dataset.raw = welcome;
-      renderBubble(welcomeRow, welcome);
     }
 
     // 提示语:同一条反复切换时替换掉旧提示,不要堆一串
@@ -1808,20 +1875,25 @@
     if (acctState && acctState.connected) {
       const active = (acctState.accounts || []).find((a) => a.id === acctState.active_account_id);
       const name = active ? active.name : d.acctBtn;
-      const shortName = name.length > 10 ? name.slice(0, 10) + "…" : name;
-      acctBtn.textContent = (lang === "en" ? "🔗 Account · " : "🔗 账户 · ") + shortName;
-      acctBtn.className = "workspace-btn linked";
+      const shortName = name.length > 8 ? name.slice(0, 8) + "…" : name;
+      setBtnLabel("acct-btn", (lang === "en" ? "Account · " : "账户 · ") + shortName);
+      acctBtn.className = "tool-btn linked";
     } else {
-      acctBtn.textContent = lang === "en" ? "🔗 Connect account" : "🔗 账户管理";
-      acctBtn.className = "workspace-btn unlinked";
+      setBtnLabel("acct-btn", lang === "en" ? "Connect account" : "账户管理");
+      acctBtn.className = "tool-btn unlinked";
     }
-    acctBtn.title = d.acctBtnTitle;
+    // 图标按钮上看不见文字了，但「现在连的是哪个账户」是有用的信息 —— 放进悬停提示
+    acctBtn.title = (acctState && acctState.connected
+                     ? (acctState.accounts || []).map(function (a) {
+                         return a.id === acctState.active_account_id ? "● " + a.name : null;
+                       }).filter(Boolean).join("") + " · "
+                     : "") + d.acctBtnTitle;
   }
 
   // 弹窗内容:根据"接没接入"渲染两种界面
   function renderAcctModal() {
     const d = t();
-    document.getElementById("acct-title").textContent = d.acctTitle;
+    setBtnLabel("acct-title", d.acctTitle);
     document.getElementById("acct-close").textContent = d.acctClose;
     const linked = acctState && acctState.connected;
     document.getElementById("acct-desc").textContent = linked ? d.acctDescLinked : d.acctDescUnlinked;
@@ -2125,7 +2197,7 @@
     var body = d.notBoundBody.replace(/\{p\}/g, p.name);
     var hint = lang === "en" ? p.bind_hint_en : p.bind_hint_zh;
     row.innerHTML =
-      '<div class="avatar bot">🔗</div>' +
+      "<div class=\"avatar bot\">" + LOGO_BOT + "</div>" +
       '<div class="bubble" style="border-color:#d97706">' +
         '<strong>⚠️ ' + escapeHtml(d.notBoundTitle.replace(/\{p\}/g, p.name)) + '</strong>' +
         '<p>' + escapeHtml(body) + '</p>' +

@@ -3,35 +3,34 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>登录 · 广告投放小助手</title>
+<title>登录 · TalkAD</title>
   <!-- 站点图标:对话气泡 + 上升柱状 = 用聊天管广告数据。
        SVG 优先(任意尺寸都清晰),PNG 兜底给不认 SVG 图标的老 Safari。 -->
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/static/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-  <meta name="theme-color" content="#4f6ef7">
+  <meta name="theme-color" content="#171717">
 <style>
   :root {
-    --bg: #eef1f6; --panel: #ffffff; --text: #1d2129; --muted: #7a8190;
-    --accent1: #4f6ef7; --accent2: #7b5ff5; --border: #e4e8ef;
-    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 12px 32px -8px rgba(16,24,40,.14);
+    --bg: #fafafa; --panel: #ffffff; --text: #0a0a0a; --muted: #737373;
+    --accent1: #171717; --accent2: #171717; --accent-fg: #fafafa; --border: #e5e5e5;
+    --shadow: 0 1px 2px 0 rgba(0,0,0,.05);
     --bad: #b42318; --good: #067647;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e1015; --panel: #171a21; --text: #e9ebef; --muted: #8b93a1;
-      --accent1: #5b7cff; --accent2: #8b6cf8; --border: #262b36;
-      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 12px 32px -8px rgba(0,0,0,.6);
+      --bg: #0a0a0a; --panel: #171717; --text: #fafafa; --muted: #a1a1a1;
+      --accent1: #fafafa; --accent2: #fafafa; --accent-fg: #171717; --border: #262626;
+      --shadow: 0 1px 2px 0 rgba(0,0,0,.4);
       --bad: #fda29b; --good: #75e0a7;
     }
   }
+  .ico { width:16px; height:16px; flex:none; }
+  .logo-ico { width:20px; height:20px; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     min-height: 100dvh; display: grid; place-items: center; padding: 20px;
-    background:
-      radial-gradient(900px 480px at 20% -10%, color-mix(in srgb, var(--accent1) 16%, transparent), transparent 60%),
-      radial-gradient(800px 460px at 85% -5%, color-mix(in srgb, var(--accent2) 14%, transparent), transparent 60%),
-      var(--bg);
+    background: var(--bg);
     color: var(--text);
     font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   }
@@ -43,7 +42,7 @@
   .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
   .logo {
     width: 42px; height: 42px; border-radius: 13px;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    background: var(--accent1); color: var(--accent-fg);
     display: grid; place-items: center; font-size: 22px;
     box-shadow: 0 4px 14px -3px color-mix(in srgb, var(--accent1) 50%, transparent);
   }
@@ -57,7 +56,7 @@
   input:focus { border-color: var(--accent1); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent1) 12%, transparent); }
   button {
     width: 100%; margin-top: 22px; padding: 12px; font: inherit; font-size: 14.5px; font-weight: 600;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
+    background: var(--accent1); color: var(--accent-fg);
     border: 0; border-radius: 12px; cursor: pointer;
   }
   button:disabled { opacity: .55; cursor: not-allowed; }
@@ -71,10 +70,10 @@
 <body>
   <div class="card">
     <div class="brand">
-      <div class="logo">🤖</div>
+      <div class="logo"><svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></div>
       <div>
         <h1 id="title">登录</h1>
-        <div style="font-size:12px;color:var(--muted)" id="subtitle">广告投放小助手</div>
+        <div style="font-size:12px;color:var(--muted)" id="subtitle">TalkAD</div>
       </div>
     </div>
 

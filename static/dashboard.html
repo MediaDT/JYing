@@ -3,26 +3,27 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>数据大屏 · 广告投放小助手</title>
+<title>数据大屏 · TalkAD</title>
   <!-- 站点图标:对话气泡 + 上升柱状 = 用聊天管广告数据。
        SVG 优先(任意尺寸都清晰),PNG 兜底给不认 SVG 图标的老 Safari。 -->
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/static/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-  <meta name="theme-color" content="#4f6ef7">
+  <meta name="theme-color" content="#171717">
 <style>
   /* ===== 设计变量:图表颜色取自已验证的调色板(浅/深各一套) ===== */
   :root {
     color-scheme: light;
-    --bg: #eef1f6;
+    --bg: #fafafa;
     --surface-1: #ffffff;          /* 卡片/图表底色 */
-    --text-primary: #1d2129;
-    --text-secondary: #52514e;
-    --muted: #7a8190;
-    --border: #e4e8ef;
-    --accent1: #4f6ef7;
-    --accent2: #7b5ff5;
-    --shadow: 0 1px 3px rgba(16,24,40,.07), 0 6px 16px -6px rgba(16,24,40,.08);
+    --text-primary: #0a0a0a;
+    --text-secondary: #404040;
+    --muted: #737373;
+    --border: #e5e5e5;
+    --accent1: #171717;
+    --accent2: #171717;
+    --accent-fg: #fafafa;
+    --shadow: 0 1px 2px 0 rgba(0,0,0,.05);
     --series-1: #2a78d6;           /* 分类槽1 蓝(趋势线) */
     --series-2: #eb6834;           /* 分类槽2 橙 */
     --series-3: #1baf7a;           /* 分类槽3 绿 */
@@ -34,16 +35,18 @@
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
       color-scheme: dark;
-      --bg: #0e1015; --surface-1: #171a21; --text-primary: #e9ebef;
-      --text-secondary: #c3c2b7; --muted: #8b93a1; --border: #262b36;
-      --accent1: #5b7cff; --accent2: #8b6cf8;
-      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 16px -6px rgba(0,0,0,.5);
+      --bg: #0a0a0a; --surface-1: #171717; --text-primary: #fafafa;
+      --text-secondary: #d4d4d4; --muted: #a1a1a1; --border: #262626;
+      --accent1: #fafafa; --accent2: #fafafa; --accent-fg: #171717;
+      --shadow: 0 1px 2px 0 rgba(0,0,0,.4);
       --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
-      --grid: #262b36;
+      --grid: #262626;
       --good: #75e0a7; --warn: #fec84b; --bad: #fda29b;
     }
   }
 
+  .ico { width:16px; height:16px; flex:none; }
+  .logo-ico { width:20px; height:20px; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: var(--bg); color: var(--text-primary); min-height: 100vh;
@@ -62,19 +65,20 @@
   }
   .logo {
     width: 34px; height: 34px; border-radius: 11px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    background: var(--accent1); color: var(--accent-fg);
     display: grid; place-items: center; font-size: 18px;
   }
   h1 { font-size: 16px; font-weight: 700; }
   .sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
   .spacer { margin-left: auto; }
   .btn {
+    display: inline-flex; align-items: center; gap: 6px;
     background: var(--surface-1); border: 1px solid var(--border); color: var(--text-secondary);
-    border-radius: 999px; padding: 7px 14px; font-size: 12.5px; cursor: pointer;
+    border-radius: 8px; padding: 7px 14px; font-size: 12.5px; cursor: pointer;
     transition: all .15s ease; white-space: nowrap; font-family: inherit;
   }
   .btn:hover { border-color: var(--accent1); color: var(--accent1); }
-  .btn.active { background: var(--accent1); border-color: var(--accent1); color: #fff; }
+  .btn.active { background: var(--accent1); border-color: var(--accent1); color: var(--accent-fg); }
 
   /* 自定义时间范围。**快捷键不撤掉** —— 小白最常用的就是那四个,一步到位;
      自定义是进阶需求,藏在一个按钮后面即可,不该让所有人先填两个日期。 */
@@ -111,7 +115,7 @@
   }
   .cal-day:hover { background: color-mix(in srgb, var(--accent1) 14%, transparent); }
   .cal-day.out { color: var(--text-secondary); opacity: .45; }
-  .cal-day.sel { background: var(--accent1); color: #fff; font-weight: 600; }
+  .cal-day.sel { background: var(--accent1); color: var(--accent-fg); font-weight: 600; }
   .cal-day.today { box-shadow: inset 0 0 0 1px var(--accent1); }
   .date-pop input[type="text"] { cursor: pointer; }
   /* 日历现在是在给「开始日期」还是「结束日期」选?不标出来的话,
@@ -135,8 +139,8 @@
   /* 「已经替你换过来了」是**办好了**,不是出错 —— 标红会把人吓一跳 */
   .date-pop .err.note { color: var(--text-secondary); }
   .btn-primary {
-    background: linear-gradient(135deg, var(--accent1), var(--accent2)); color: #fff;
-    border: 0; border-radius: 999px; padding: 8px 18px; font-size: 13px; cursor: pointer;
+    background: var(--accent1); color: var(--accent-fg);
+    border: 0; border-radius: 8px; padding: 8px 18px; font-size: 13px; cursor: pointer;
     font-family: inherit;
   }
   .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
@@ -211,7 +215,7 @@
 </head>
 <body>
   <header>
-    <div class="logo">📊</div>
+    <div class="logo"><svg class="ico logo-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div>
     <div>
       <h1 id="page-title">数据大屏</h1>
       <div class="sub" id="range-sub">加载中…</div>
@@ -232,8 +236,8 @@
         </div>
       </div>
     </div>
-    <button class="btn" id="lang-toggle">🌐 EN</button>
-    <button class="btn" id="back-btn" onclick="location.href='/'">💬 回到聊天</button>
+    <button class="btn" id="lang-toggle"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg><span class="lbl">EN</span></button>
+    <button class="btn" id="back-btn" onclick="location.href='/'"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span class="lbl">回到聊天</span></button>
   </header>
 
   <main>
@@ -261,7 +265,7 @@
     <div class="card">
       <div class="card-head">
         <div>
-          <h2 id="ai-title">🤖 AI 投放诊断</h2>
+          <h2 id="ai-title">AI 投放诊断</h2>
           <div class="hint" id="ai-hint">让 AI 读一遍上面的真实数据,指出问题并给出可执行的优化建议</div>
         </div>
         <button class="btn-primary" id="analyze-btn" style="margin-left:auto"></button>
@@ -289,7 +293,7 @@
 
   var I18N = {
     zh: {
-      title: "数据大屏", back: "💬 回到聊天", langBtn: "🌐 EN", langTitle: "Switch to English",
+      title: "数据大屏", back: "回到聊天", langBtn: "EN", langTitle: "Switch to English",
       loading: "加载中…", rangeFmt: function (a, b, d) { return a + " ~ " + b + " · 共 " + d + " 天"; },
       days: function (d) { return "近 " + d + " 天"; },
       custom: "自定义", from: "开始日期", to: "结束日期",
@@ -308,7 +312,7 @@
       trendHintCapped: "按天看走势(平台限制,趋势只显示最近 31 天)",
       trendEmpty: "这段时间没有按天数据",
       barTitle: "各计划花费对比", barHint: "颜色越深花得越多", barEmpty: "这段时间没有花费",
-      aiTitle: "🤖 AI 投放诊断", aiHint: "让 AI 读一遍上面的真实数据,指出问题并给出可执行的优化建议",
+      aiTitle: "AI 投放诊断", aiHint: "让 AI 读一遍上面的真实数据,指出问题并给出可执行的优化建议",
       aiBtn: "开始分析", aiBtnAgain: "重新分析", aiBtnBusy: "分析中…",
       aiPlaceholder: "点右上角「开始分析」,AI 会基于当前时间段的数据给出诊断",
       aiWorking: "AI 正在读这段时间的数据…(可能要二三十秒)",
@@ -320,7 +324,7 @@
       tipSpend: "花费", tipClicks: "点击",
     },
     en: {
-      title: "Dashboard", back: "💬 Back to chat", langBtn: "🌐 中文", langTitle: "切换为中文",
+      title: "Dashboard", back: "Back to chat", langBtn: "中文", langTitle: "切换为中文",
       loading: "Loading…", rangeFmt: function (a, b, d) { return a + " ~ " + b + " · " + d + " days"; },
       days: function (d) { return "Last " + d + "d"; },
       custom: "Custom", from: "From", to: "To",
@@ -342,7 +346,7 @@
       trendHintCapped: "Day-by-day movement (platform limit: trend shows the last 31 days only)",
       trendEmpty: "No daily data in this period",
       barTitle: "Spend by campaign", barHint: "Darker = spent more", barEmpty: "No spend in this period",
-      aiTitle: "🤖 AI campaign review", aiHint: "Let the AI read the real data above, flag problems and give actionable fixes",
+      aiTitle: "AI campaign review", aiHint: "Let the AI read the real data above, flag problems and give actionable fixes",
       aiBtn: "Analyse", aiBtnAgain: "Re-analyse", aiBtnBusy: "Analysing…",
       aiPlaceholder: "Click “Analyse” — the AI will review the data for the selected period",
       aiWorking: "The AI is reading this period's data… (this can take 20–30s)",
@@ -835,10 +839,18 @@
   window.onMarkedReady = renderAnalysis;
 
   // ===== 中英切换:重画整页(和聊天页共用 adbot-lang,一边切另一边也跟着) =====
+  /** 只改文字标签，别把前面的 <svg> 图标冲掉（和聊天页 setBtnLabel 同一条）。 */
+  function setBtnLabel(id, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const lbl = el.querySelector(".lbl");
+    if (lbl) lbl.textContent = text; else el.textContent = text;
+  }
+
   function applyLang() {
     var d = t();
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
-    document.title = d.title + " · " + (lang === "en" ? "Ad Campaign Assistant" : "广告投放小助手");
+    document.title = d.title + " · TalkAD";
     var set = function (id, text) { var el = document.getElementById(id); if (el) el.textContent = text; };
     set("page-title", d.title);
     set("trend-title", d.trendTitle);
